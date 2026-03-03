@@ -11,11 +11,13 @@
 AsyncWebServer server(80);
 
 // Search for parameter in HTTP POST request
-const char* PARAM_INPUT_1 = "ssid";
-const char* PARAM_INPUT_2 = "pass";
-const char* PARAM_INPUT_3 = "ip";
-const char* PARAM_INPUT_4 = "gateway";
+const char* PARAM_SSID    = "ssid";
+const char* PARAM_PASS    = "pass";
+const char* PARAM_IP      = "ip";
+const char* PARAM_GATEWAY = "gateway";
 
+// AP password
+const char* AP_PASSWORD = "bazsi1234";
 
 //Variables to save values from HTML form
 String ssid;
@@ -61,49 +63,63 @@ const uint32_t RESET_DELAY = 6 * 60 * 1000;
 const uint32_t RESET_PULSE = 90 * 1000;
 const uint32_t firstStartDelay = 3 * 60 * 1000;
 const uint8_t maxfailureEvents = 5;  // failure sleep
-uint8_t Nreset_events = 0;
 const uint8_t wifi_maxRetries = 3;
 const uint32_t wifiInterval = 20 * 1000;
-uint8_t i = 0;
-int failedTestsCount = 0;
-
-unsigned long previousMillis_initWiFi = 0;
-unsigned long currentMillis_initWiFi = 0;
-unsigned long stateStartMillis_loop = 0;
-unsigned long currentMillis_loop = 0;
-unsigned long previousMillisResetPulse_reset_device = 0;
-unsigned long currentMillis_reconnectWifi = 0;
-unsigned long currentMillis_reset_device = 0;
-unsigned long startAttemptTime_reconnectWifi = 0;
-unsigned long lastDebounceTime_resetPin = 0;
 const unsigned long debounceDelay_resetPin = 50;
-unsigned long lastDebounceTime_wifiresetPin = 0;
 const unsigned long debounceDelay_wifiresetPin = 50;
-unsigned long currentMillis_wifiresetbutton = 0;
-unsigned long currentMillis_resetbutton = 0;
-unsigned long startMillis = millis();
-bool firstStart = true;
-int buttonState_resetPin = HIGH;
-int buttonState_wifiresetPin = HIGH;
 
-bool successfulTestPrinted = false;  // Flag to track if "Successful Test" has been printed
-bool beginResetPrinted = false;      // Flag to track if "Begining Reset" has been printed
-bool wifiConnected = false;
-bool firstStartPrinted = false;
-bool printAttempts = false;
-bool connectionSuccess = false;  // Állapotjelző változó
-int wifi_attempts = 0;
+struct TestState {
+  uint8_t cycleIndex = 0;       // volt: i
+  int failedCount = 0;          // volt: failedTestsCount
+  uint8_t resetEvents = 0;      // volt: Nreset_events
+  bool resetPulseActive = false;
+  uint8_t resetStep = 0;        // volt: step_reset_device
+};
 
-bool resetPulseActive = false;
-uint8_t step_reset_device = 0;
+struct TimingState {
+  unsigned long stateStart = 0;           // volt: stateStartMillis_loop
+  unsigned long currentLoop = 0;          // volt: currentMillis_loop
+  unsigned long resetPulseStart = 0;      // volt: previousMillisResetPulse_reset_device
+  unsigned long resetDeviceCurrent = 0;   // volt: currentMillis_reset_device
+  unsigned long wifiInitPrev = 0;         // volt: previousMillis_initWiFi
+  unsigned long wifiInitCurrent = 0;      // volt: currentMillis_initWiFi
+  unsigned long reconnectStart = 0;       // volt: startAttemptTime_reconnectWifi
+  unsigned long reconnectCurrent = 0;     // volt: currentMillis_reconnectWifi
+  unsigned long resetBtnDebounce = 0;     // volt: lastDebounceTime_resetPin
+  unsigned long wifiResetBtnDebounce = 0; // volt: lastDebounceTime_wifiresetPin
+  unsigned long resetBtnCurrent = 0;      // volt: currentMillis_resetbutton
+  unsigned long wifiResetBtnCurrent = 0;  // volt: currentMillis_wifiresetbutton
+  unsigned long startMillis = 0;          // volt: startMillis (set to millis() in setup)
+};
 
-enum {
+struct UIFlags {
+  bool successPrinted = false;      // volt: successfulTestPrinted
+  bool resetPrinted = false;        // volt: beginResetPrinted
+  bool firstStartPrinted = false;   // volt: firstStartPrinted
+  bool wifiAttemptPrinted = false;  // volt: printAttempts
+  bool firstStart = true;           // volt: firstStart
+};
+
+struct WifiState {
+  bool connected = false;           // volt: wifiConnected
+  bool connectionSuccess = false;   // volt: connectionSuccess
+  int attempts = 0;                 // volt: wifi_attempts
+  int buttonStateReset = HIGH;      // volt: buttonState_resetPin
+  int buttonStateWifiReset = HIGH;  // volt: buttonState_wifiresetPin
+};
+
+TestState testState;
+TimingState timing;
+UIFlags uiFlags;
+WifiState wifiState;
+
+enum State : uint8_t {
   TESTING_STATE = 0,
   FAILURE_STATE = 1,
   SUCCESS_STATE = 2
 };
 
-int CurrentState = TESTING_STATE;
+State currentState = TESTING_STATE;
 
 // Initialize LittleFS
 void initLittleFS() {
@@ -178,8 +194,8 @@ bool initWiFi() {
   bool ssidValid = ssid.length() > 0;
   if (!ssidValid) {
     Serial.println("Undefined SSID!");
-    connectionSuccess = false;
-    return connectionSuccess;
+    wifiState.connectionSuccess = false;
+    return wifiState.connectionSuccess;
   }
   // Ellenőrizzük az SSID-t, IP-t, gateway-t
   bool ipValid = localIP.fromString(ip.c_str());
@@ -211,18 +227,18 @@ bool initWiFi() {
   Serial.print("Trying to connect to SSID: ");
   Serial.println(ssid);
   blockingDelay(100);
-  currentMillis_initWiFi = millis();
-  previousMillis_initWiFi = currentMillis_initWiFi;
+  timing.wifiInitCurrent = millis();
+  timing.wifiInitPrev = timing.wifiInitCurrent;
   while (WiFi.status() != WL_CONNECTED) {
     resetbutton();
     wifiresetbutton();
     yield();
-    currentMillis_initWiFi = millis();
-    if (currentMillis_initWiFi - previousMillis_initWiFi >= interval) {
+    timing.wifiInitCurrent = millis();
+    if (timing.wifiInitCurrent - timing.wifiInitPrev >= interval) {
       printUptime();
       Serial.println("Failed to connect.");
-      connectionSuccess = false;
-      return connectionSuccess;
+      wifiState.connectionSuccess = false;
+      return wifiState.connectionSuccess;
     }
   }
 
@@ -235,40 +251,42 @@ bool initWiFi() {
     Serial.print("Signal strength (RSSI): ");
     Serial.print(WiFi.RSSI());
     Serial.println(" dBm");
-    connectionSuccess = true;
-    return connectionSuccess;
+    wifiState.connectionSuccess = true;
+    return wifiState.connectionSuccess;
   }
 
-  connectionSuccess = false;
-  return connectionSuccess;
+  wifiState.connectionSuccess = false;
+  return wifiState.connectionSuccess;
 }
 
 bool reset_device() {
   // keep track of number of resets
-  currentMillis_reset_device = millis();
-  if (step_reset_device == 0) {
-    Nreset_events++;
-    if (Nreset_events >= maxfailureEvents) {
+  timing.resetDeviceCurrent = millis();
+  if (testState.resetStep == 0) {
+    testState.resetEvents++;
+    if (testState.resetEvents >= maxfailureEvents) {
       tosleep();
     }
     Serial.println("Router resetting");
-    Serial.println(String("Powering OFF the router. Instance = ") + String(Nreset_events));
+    Serial.print("Powering OFF the router. Instance = ");
+    Serial.println(testState.resetEvents);
     digitalWrite(relayPin, HIGH);
     Serial.println("Relay on.");
     digitalWrite(ledPin, LOW);
     Serial.println("Reset_pulse delay.");
-    resetPulseActive = true;
-    step_reset_device++;
-    previousMillisResetPulse_reset_device = millis();
+    testState.resetPulseActive = true;
+    testState.resetStep++;
+    timing.resetPulseStart = millis();
   }
-  if (resetPulseActive && (currentMillis_reset_device - previousMillisResetPulse_reset_device >= RESET_PULSE)) {
+  if (testState.resetPulseActive && (timing.resetDeviceCurrent - timing.resetPulseStart >= RESET_PULSE)) {
     Serial.println("Reset_pulse delay end.");
-    Serial.println(String("Powering ON the router. Instance = ") + String(Nreset_events));
+    Serial.print("Powering ON the router. Instance = ");
+    Serial.println(testState.resetEvents);
     digitalWrite(relayPin, LOW);
     digitalWrite(ledPin, HIGH);
     printUptime();
-    resetPulseActive = false;
-    step_reset_device = 0;
+    testState.resetPulseActive = false;
+    testState.resetStep = 0;
     return true;
   }
   return false;
@@ -291,31 +309,27 @@ void tosleep() {
 }
 
 void printUptime() {
-  int64_t timeInMicroseconds = esp_timer_get_time();
-  int64_t timeInSeconds = timeInMicroseconds / 1000000;
+  int64_t totalSec = esp_timer_get_time() / 1000000;
+  int64_t d = totalSec / 86400;
+  int h = (totalSec % 86400) / 3600;
+  int m = (totalSec % 3600) / 60;
+  int s = totalSec % 60;
 
-  int64_t months = timeInSeconds / 2592000;  // kb. 30 napos hónap
-  int64_t days = (timeInSeconds % 2592000) / 86400;
-  int64_t hours = (timeInSeconds % 86400) / 3600;
-  int64_t minutes = (timeInSeconds % 3600) / 60;
-  int64_t seconds = timeInSeconds % 60;
-
-  String uptimeStr = "Uptime: ";
-  if (months > 0) uptimeStr += String(months) + "m ";
-  if (days > 0 || months > 0) uptimeStr += String(days) + "d ";
-  uptimeStr += String(hours) + "h ";
-  uptimeStr += String(minutes) + "m ";
-  uptimeStr += String(seconds) + "s";
-
-  Serial.println(uptimeStr);
+  char buf[40];
+  if (d > 0) {
+    snprintf(buf, sizeof(buf), "Uptime: %lldd %dh %dm %ds", (long long)d, h, m, s);
+  } else {
+    snprintf(buf, sizeof(buf), "Uptime: %dh %dm %ds", h, m, s);
+  }
+  Serial.println(buf);
 }
 
 void resetbutton() {
-  buttonState_resetPin = digitalRead(resetPin);
-  if (buttonState_resetPin == LOW) {
-    currentMillis_resetbutton = millis();
-    if ((currentMillis_resetbutton - lastDebounceTime_resetPin) > debounceDelay_resetPin) {
-      lastDebounceTime_resetPin = currentMillis_resetbutton;
+  wifiState.buttonStateReset = digitalRead(resetPin);
+  if (wifiState.buttonStateReset == LOW) {
+    timing.resetBtnCurrent = millis();
+    if ((timing.resetBtnCurrent - timing.resetBtnDebounce) > debounceDelay_resetPin) {
+      timing.resetBtnDebounce = timing.resetBtnCurrent;
       Serial.println("Reset button pressed.");
       Serial.println("RESTART ESP32C3 device.");
       blockingDelay(500);
@@ -325,11 +339,11 @@ void resetbutton() {
 }
 
 void wifiresetbutton() {
-  buttonState_wifiresetPin = digitalRead(wifiresetPin);
-  if (buttonState_wifiresetPin == LOW) {
-    currentMillis_wifiresetbutton = millis();
-    if ((currentMillis_wifiresetbutton - lastDebounceTime_wifiresetPin) > debounceDelay_wifiresetPin) {
-      lastDebounceTime_wifiresetPin = currentMillis_wifiresetbutton;
+  wifiState.buttonStateWifiReset = digitalRead(wifiresetPin);
+  if (wifiState.buttonStateWifiReset == LOW) {
+    timing.wifiResetBtnCurrent = millis();
+    if ((timing.wifiResetBtnCurrent - timing.wifiResetBtnDebounce) > debounceDelay_wifiresetPin) {
+      timing.wifiResetBtnDebounce = timing.wifiResetBtnCurrent;
       Serial.println("WIFIRESET button is pulling down!");
       Serial.println("RESET saved wifi data!");
       clearFile(LittleFS, gatewayPath);
@@ -345,123 +359,82 @@ void wifiresetbutton() {
 
 bool reconnectWifi() {
 
-  ssid = readFile(LittleFS, ssidPath);
-  pass = readFile(LittleFS, passPath);
-  ip = readFile(LittleFS, ipPath);
-  gateway = readFile(LittleFS, gatewayPath);
-
-  wifiConnected = false;
-  startAttemptTime_reconnectWifi = millis();
-  wifi_attempts = 0;
+  wifiState.connected = false;
+  timing.reconnectStart = millis();
+  wifiState.attempts = 0;
   printUptime();
   Serial.println("Starting reconnectWifi loop");
 
-  while (wifi_attempts < wifi_maxRetries) {
+  while (wifiState.attempts < wifi_maxRetries) {
 
-    currentMillis_reconnectWifi = millis();
+    timing.reconnectCurrent = millis();
 
-    if (wifi_attempts == 0 || (currentMillis_reconnectWifi - startAttemptTime_reconnectWifi >= wifiInterval)) {
-      startAttemptTime_reconnectWifi = currentMillis_reconnectWifi;
-      if (!printAttempts) {
+    if (wifiState.attempts == 0 || (timing.reconnectCurrent - timing.reconnectStart >= wifiInterval)) {
+      timing.reconnectStart = timing.reconnectCurrent;
+      if (!uiFlags.wifiAttemptPrinted) {
         printUptime();
         Serial.print("Attempt ");
-        Serial.println(wifi_attempts + 1);
-        printAttempts = true;
+        Serial.println(wifiState.attempts + 1);
+        uiFlags.wifiAttemptPrinted = true;
       }
       Serial.println("Calling initWiFi()");
       if (initWiFi()) {
         printUptime();
         Serial.println("WIFI RECONECTED! In FAILURE_STATE.");
         digitalWrite(wifiledPin, HIGH);
-        printAttempts = false;
+        uiFlags.wifiAttemptPrinted = false;
         Serial.println("Exiting loop with wifiConnected = true");
-        wifiConnected = true;
-        return wifiConnected;
+        wifiState.connected = true;
+        return wifiState.connected;
 
       } else {
-        wifiConnected = false;
+        wifiState.connected = false;
         printUptime();
         Serial.println("WIFI ERROR! In FAILURE_STATE.");
-        if (wifi_attempts < wifi_maxRetries - 1) {
+        if (wifiState.attempts < wifi_maxRetries - 1) {
           printUptime();
           Serial.print(wifiInterval / 1000);
           Serial.println(" seconds delay start.");
         }
         Serial.print("WiFi status: ");
         Serial.println(WiFi.status());
-        startAttemptTime_reconnectWifi = millis();
-        wifi_attempts++;
-        printAttempts = false;
+        timing.reconnectStart = millis();
+        wifiState.attempts++;
+        uiFlags.wifiAttemptPrinted = false;
       }
     }
   }
 
-  if (!wifiConnected) {
+  if (!wifiState.connected) {
     printUptime();
     Serial.print("WIFI FAILED TO RECONNECT AFTER ");
     Serial.print(wifi_maxRetries);
     Serial.println(" wifi_ATTEMPTS!");
     tosleep();
-    wifiConnected = false;  //ha gond lenne a tosleep-el
-    return wifiConnected;
+    wifiState.connected = false;  //ha gond lenne a tosleep-el
+    return wifiState.connected;
   }
-  return wifiConnected;
+  return wifiState.connected;
 }
 
-bool testInternet1() {
-
+bool testInternetHTTP(const char* url, const char* expectedResponse) {
   HTTPClient http;
-
-  http.begin("http://www.msftncsi.com/ncsi.txt");
+  http.setTimeout(10000);
+  http.begin(url);
   int httpCode = http.GET();
+  bool result = false;
 
-  if (httpCode > 0) {  // Check for the returning code
-
+  if (httpCode > 0) {
     String payload = http.getString();
     Serial.println(payload);
-
-    if (payload.equals("Microsoft NCSI")) {
-      Serial.println("Igaz érték!");
-      http.end();
-      return true;
-    } else {
-      Serial.println("Hamis érték!");
-      http.end();
-      return false;
-    }
+    result = payload.equals(expectedResponse);
+    Serial.println(result ? "Igaz érték!" : "Hamis érték!");
   } else {
-    Serial.println("Error on HTTP request");
-    http.end();
-    return false;
+    Serial.print("Error on HTTP request, code: ");
+    Serial.println(httpCode);
   }
-}
-
-bool testInternet2() {
-
-  HTTPClient http;
-
-  http.begin("http://www.msftconnecttest.com/connecttest.txt");
-  int httpCode = http.GET();
-
-  if (httpCode > 0) {  // Check for the returning code
-
-    String payload = http.getString();
-    Serial.println(payload);
-
-    if (payload.equals("Microsoft Connect Test")) {
-      Serial.println("Igaz érték!");
-      http.end();
-      return true;
-    } else {
-      Serial.println("Hamis érték!");
-      http.end();
-      return false;
-    }
-  } else {
-    Serial.println("Error on HTTP request");
-    http.end();
-    return false;
-  }
+  http.end();
+  return result;
 }
 
 bool testInternet3() {
@@ -498,11 +471,11 @@ bool testInternet3() {
 
 void handleFirstStart(unsigned long currentMillis) {
   if (WiFi.status() != WL_CONNECTED) {
-    if (currentMillis - startMillis < firstStartDelay) {
-      if (!firstStartPrinted) {
+    if (currentMillis - timing.startMillis < firstStartDelay) {
+      if (!uiFlags.firstStartPrinted) {
         printUptime();
         Serial.println("First start wait begin.");
-        firstStartPrinted = true;
+        uiFlags.firstStartPrinted = true;
       }
       resetbutton();
       wifiresetbutton();
@@ -519,12 +492,13 @@ void handleFirstStart(unsigned long currentMillis) {
       yield();
     }
 
-    startMillis = currentMillis;  // újraindítjuk az időzítést
+    timing.startMillis = currentMillis;  // újraindítjuk az időzítést
   }
-  firstStart = false;
+  uiFlags.firstStart = false;
 }
 
 void setup() {
+  timing.startMillis = millis();
 
   pinMode(wifiresetPin, INPUT_PULLUP);
   pinMode(resetPin, INPUT_PULLUP);
@@ -572,9 +546,10 @@ void setup() {
     blockingDelay(100);
     // Connect to Wi-Fi network with SSID and password
     Serial.println("Setting AP (Access Point)");
-    // NULL sets an open Access Point
     String apName = "ESP-" + String(ESP.getChipModel());
-    WiFi.softAP(apName.c_str(), NULL);
+    WiFi.softAP(apName.c_str(), AP_PASSWORD);
+    Serial.print("AP password: ");
+    Serial.println(AP_PASSWORD);
     IPAddress IP = WiFi.softAPIP();
     Serial.print("AP IP address: ");
     Serial.println(IP);
@@ -592,36 +567,54 @@ void setup() {
         const AsyncWebParameter* p = request->getParam(i);
         if (p->isPost()) {
           // HTTP POST ssid value
-          if (p->name() == PARAM_INPUT_1) {
-            ssid = p->value().c_str();
-            Serial.print("SSID set to: ");
-            Serial.println(ssid);
-            // Write file to save value
-            writeFile(LittleFS, ssidPath, ssid.c_str());
+          if (p->name() == PARAM_SSID) {
+            String val = p->value().c_str();
+            if (val.length() > 0 && val.length() <= 32) {
+              ssid = val;
+              Serial.print("SSID set to: ");
+              Serial.println(ssid);
+              writeFile(LittleFS, ssidPath, ssid.c_str());
+            } else {
+              Serial.println("Invalid SSID length!");
+            }
           }
           // HTTP POST pass value
-          if (p->name() == PARAM_INPUT_2) {
-            pass = p->value().c_str();
-            Serial.print("Password set to: ");
-            Serial.println(String(pass.length()) + " chars");
-            // Write file to save value
-            writeFile(LittleFS, passPath, pass.c_str());
+          if (p->name() == PARAM_PASS) {
+            String val = p->value().c_str();
+            if (val.length() <= 63) {
+              pass = val;
+              Serial.print("Password set to: ");
+              Serial.println(String(pass.length()) + " chars");
+              writeFile(LittleFS, passPath, pass.c_str());
+            } else {
+              Serial.println("Password too long!");
+            }
           }
           // HTTP POST ip value
-          if (p->name() == PARAM_INPUT_3) {
-            ip = p->value().c_str();
-            Serial.print("IP Address set to: ");
-            Serial.println(ip);
-            // Write file to save value
-            writeFile(LittleFS, ipPath, ip.c_str());
+          if (p->name() == PARAM_IP) {
+            IPAddress testIP;
+            String val = p->value().c_str();
+            if (testIP.fromString(val.c_str())) {
+              ip = val;
+              Serial.print("IP Address set to: ");
+              Serial.println(ip);
+              writeFile(LittleFS, ipPath, ip.c_str());
+            } else {
+              Serial.println("Invalid IP format!");
+            }
           }
           // HTTP POST gateway value
-          if (p->name() == PARAM_INPUT_4) {
-            gateway = p->value().c_str();
-            Serial.print("Gateway set to: ");
-            Serial.println(gateway);
-            // Write file to save value
-            writeFile(LittleFS, gatewayPath, gateway.c_str());
+          if (p->name() == PARAM_GATEWAY) {
+            IPAddress testIP;
+            String val = p->value().c_str();
+            if (testIP.fromString(val.c_str())) {
+              gateway = val;
+              Serial.print("Gateway set to: ");
+              Serial.println(gateway);
+              writeFile(LittleFS, gatewayPath, gateway.c_str());
+            } else {
+              Serial.println("Invalid gateway format!");
+            }
           }
           Serial.printf("POST[%s]: %s\n", p->name().c_str(), p->value().c_str());
         }
@@ -639,7 +632,7 @@ void loop() {
 
   unsigned long currentMillis = millis();
 
-  if (firstStart) {
+  if (uiFlags.firstStart) {
     handleFirstStart(currentMillis);
     return;  // így biztosan nem fut le semmi más ebben a körben
   }
@@ -647,68 +640,54 @@ void loop() {
   resetbutton();
   wifiresetbutton();
 
-  currentMillis_loop = millis();
+  timing.currentLoop = millis();
 
-  switch (CurrentState) {
+  switch (currentState) {
 
-    case TESTING_STATE:
-
-      printUptime();
-      Serial.println("Begining Test.");
-      Serial.print("Teszt ciklus index = ");
-      Serial.print(i);
-      Serial.print(" | Hibák száma = ");
-      Serial.println(failedTestsCount);
-
-      if (i == 1 || i == 3) {
-        if (!testInternet3()) {
-          failedTestsCount++;
-          printUptime();
-          Serial.println("Failed testInternet3.");
-          CurrentState = FAILURE_STATE;
-          stateStartMillis_loop = currentMillis_loop;
-        } else {
-          i = 0;
-          failedTestsCount = 0;
-          Nreset_events = 0;
-          CurrentState = SUCCESS_STATE;
-          stateStartMillis_loop = currentMillis_loop;
-        }
-      } else if (i == 2 || i == 4) {
-        if (!testInternet1()) {
-          failedTestsCount++;
-          printUptime();
-          Serial.println("Failed testInternet1.");
-          CurrentState = FAILURE_STATE;
-          stateStartMillis_loop = currentMillis_loop;
-        } else {
-          i = 0;
-          failedTestsCount = 0;
-          Nreset_events = 0;
-          CurrentState = SUCCESS_STATE;
-          stateStartMillis_loop = currentMillis_loop;
-        }
-      } else {
-        if (!testInternet2()) {
-          failedTestsCount++;
-          printUptime();
-          Serial.println("Failed testInternet2.");
-          CurrentState = FAILURE_STATE;
-          stateStartMillis_loop = currentMillis_loop;
-        } else {
-          i = 0;
-          failedTestsCount = 0;
-          Nreset_events = 0;
-          CurrentState = SUCCESS_STATE;
-          stateStartMillis_loop = currentMillis_loop;
-        }
+    case TESTING_STATE: {
+      if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("WiFi disconnected before test!");
+        digitalWrite(wifiledPin, LOW);
+        currentState = FAILURE_STATE;
+        timing.stateStart = timing.currentLoop;
+        testState.failedCount++;
+        break;
       }
+      printUptime();
+      Serial.println("Beginning Test.");
+      Serial.print("Teszt ciklus index = ");
+      Serial.print(testState.cycleIndex);
+      Serial.print(" | Hibák száma = ");
+      Serial.println(testState.failedCount);
+
+      bool testResult;
+      if (testState.cycleIndex == 1 || testState.cycleIndex == 3) {
+        testResult = testInternet3();
+      } else if (testState.cycleIndex == 2 || testState.cycleIndex == 4) {
+        testResult = testInternetHTTP("http://www.msftncsi.com/ncsi.txt", "Microsoft NCSI");
+      } else {
+        testResult = testInternetHTTP("http://www.msftconnecttest.com/connecttest.txt", "Microsoft Connect Test");
+      }
+
+      if (testResult) {
+        testState.cycleIndex = 0;
+        testState.failedCount = 0;
+        testState.resetEvents = 0;
+        currentState = SUCCESS_STATE;
+      } else {
+        testState.failedCount++;
+        printUptime();
+        Serial.println("Test failed.");
+        currentState = FAILURE_STATE;
+      }
+      timing.stateStart = timing.currentLoop;
       break;
+    }
 
     case FAILURE_STATE:
-      if (i > 3 && failedTestsCount >= 3) {
+      if (testState.cycleIndex > 3 && testState.failedCount >= 3) {
 
-        if (!beginResetPrinted) {
+        if (!uiFlags.resetPrinted) {
           printUptime();
           Serial.println("Begining Reset in FAILURE_STATE.");
           while (!reset_device()) {
@@ -718,12 +697,12 @@ void loop() {
           printUptime();
           Serial.println("Reset is done in FAILURE_STATE.");
           Serial.println("RESET_DELAY start in FAILURE_STATE.");
-          currentMillis_loop = millis();
-          stateStartMillis_loop = currentMillis_loop;
-          beginResetPrinted = true;  // Set the flag after printing
+          timing.currentLoop = millis();
+          timing.stateStart = timing.currentLoop;
+          uiFlags.resetPrinted = true;  // Set the flag after printing
         }
 
-        if (currentMillis_loop - stateStartMillis_loop >= RESET_DELAY) {
+        if (timing.currentLoop - timing.stateStart >= RESET_DELAY) {
           printUptime();
           Serial.println("RESET_DELAY end in FAILURE_STATE.");
           Serial.println("Reconnect WIFI in FAILURE_STATE.");
@@ -751,36 +730,36 @@ void loop() {
             digitalWrite(wifiledPin, HIGH);
           }
 
-          i = 0;
-          failedTestsCount = 0;
-          beginResetPrinted = false;
-          CurrentState = TESTING_STATE;
+          testState.cycleIndex = 0;
+          testState.failedCount = 0;
+          uiFlags.resetPrinted = false;
+          currentState = TESTING_STATE;
         }
 
       } else {
-        if (currentMillis_loop - stateStartMillis_loop >= PROBE_DELAY) {
-          if (i < 10) i++;
-          CurrentState = TESTING_STATE;
+        if (timing.currentLoop - timing.stateStart >= PROBE_DELAY) {
+          if (testState.cycleIndex < 10) testState.cycleIndex++;
+          currentState = TESTING_STATE;
         }
       }
       break;
 
     case SUCCESS_STATE:
 
-      if (!successfulTestPrinted) {
+      if (!uiFlags.successPrinted) {
         printUptime();
         Serial.println("Successful Test");
         Serial.println();
         Serial.println("SUCCESS_DELAY delay start.");
-        successfulTestPrinted = true;  // Set the flag to true after printing
+        uiFlags.successPrinted = true;  // Set the flag to true after printing
       }
 
-      if (currentMillis_loop - stateStartMillis_loop >= SUCCESS_DELAY) {
+      if (timing.currentLoop - timing.stateStart >= SUCCESS_DELAY) {
         printUptime();
         Serial.println("SUCCESS_DELAY delay end.");
-        successfulTestPrinted = false;
-        stateStartMillis_loop = currentMillis_loop;
-        CurrentState = TESTING_STATE;
+        uiFlags.successPrinted = false;
+        timing.stateStart = timing.currentLoop;
+        currentState = TESTING_STATE;
       }
       break;
   }
