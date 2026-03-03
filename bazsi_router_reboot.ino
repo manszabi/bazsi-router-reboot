@@ -15,7 +15,7 @@ const char* PARAM_INPUT_1 = "ssid";
 const char* PARAM_INPUT_2 = "pass";
 const char* PARAM_INPUT_3 = "ip";
 const char* PARAM_INPUT_4 = "gateway";
-int res;
+
 
 //Variables to save values from HTML form
 String ssid;
@@ -36,7 +36,7 @@ IPAddress localIP;
 IPAddress localGateway;
 
 //IPAddress localGateway(192, 168, 1, 1); //hardcoded
-IPAddress subnet(255, 255, 0, 0);
+IPAddress subnet(255, 255, 255, 0);
 
 // strapping pins 2, 8, 9
 // Set LED GPIO, relay state
@@ -126,6 +126,7 @@ String readFile(fs::FS& fs, const char* path) {
     fileContent = file.readStringUntil('\n');
     break;
   }
+  file.close();
   return fileContent;
 }
 
@@ -134,12 +135,6 @@ void clearFile(fs::FS& fs, const char* path) {
   File file = fs.open(path, FILE_WRITE);
   if (!file) {
     Serial.println("- failed to open file for clearing");
-    return;
-  }
-  file.close();
-  file = fs.open(path, FILE_WRITE);
-  if (!file) {
-    Serial.println("- failed to reopen file for clearing");
     return;
   }
   file.close();
@@ -154,7 +149,6 @@ void writeFile(fs::FS& fs, const char* path, const char* message) {
     Serial.println("- failed to open file for writing");
     return;
   }
-  if (file.print("")) { Serial.println("- file content erased"); }
   if (file.print(message)) {
     Serial.println("- file written");
   } else {
@@ -163,7 +157,7 @@ void writeFile(fs::FS& fs, const char* path, const char* message) {
   file.close();
 }
 
-void nonBlockingDelay(unsigned long duration) {
+void blockingDelay(unsigned long duration) {
   unsigned long start = millis();
   while (millis() - start < duration) {
     yield();
@@ -173,7 +167,7 @@ void nonBlockingDelay(unsigned long duration) {
 void handleStuckButton(const char* message) {
   Serial.println(message);
   digitalWrite(ledPin, LOW);
-  esp_sleep_enable_timer_wakeup(500 * 1000);
+  esp_sleep_enable_timer_wakeup(60ULL * 1000000ULL);  // 60 sec
   esp_deep_sleep_start();
 }
 
@@ -216,7 +210,7 @@ bool initWiFi() {
   Serial.println("Connecting to WiFi...");
   Serial.print("Trying to connect to SSID: ");
   Serial.println(ssid);
-  nonBlockingDelay(100);
+  blockingDelay(100);
   currentMillis_initWiFi = millis();
   previousMillis_initWiFi = currentMillis_initWiFi;
   while (WiFi.status() != WL_CONNECTED) {
@@ -254,7 +248,7 @@ bool reset_device() {
   currentMillis_reset_device = millis();
   if (step_reset_device == 0) {
     Nreset_events++;
-    if (Nreset_events == maxfailureEvents) {
+    if (Nreset_events >= maxfailureEvents) {
       tosleep();
     }
     Serial.println("Router resetting");
@@ -292,7 +286,7 @@ void tosleep() {
   WiFi.disconnect(true);
   server.end();
   Serial.end();
-  nonBlockingDelay(500);
+  blockingDelay(500);
   esp_deep_sleep_start();
 }
 
@@ -324,7 +318,7 @@ void resetbutton() {
       lastDebounceTime_resetPin = currentMillis_resetbutton;
       Serial.println("Reset button pressed.");
       Serial.println("RESTART ESP32C3 device.");
-      nonBlockingDelay(500);
+      blockingDelay(500);
       ESP.restart();
     }
   }
@@ -343,7 +337,7 @@ void wifiresetbutton() {
       clearFile(LittleFS, passPath);
       clearFile(LittleFS, ssidPath);
       Serial.println("RESTART ESP32C3 device.");
-      nonBlockingDelay(500);
+      blockingDelay(500);
       ESP.restart();
     }
   }
@@ -440,10 +434,6 @@ bool testInternet1() {
     http.end();
     return false;
   }
-
-  http.end();  //Free the resources
-
-  return false;
 }
 
 bool testInternet2() {
@@ -472,10 +462,6 @@ bool testInternet2() {
     http.end();
     return false;
   }
-
-  http.end();  //Free the resources
-
-  return false;
 }
 
 bool testInternet3() {
@@ -498,7 +484,7 @@ bool testInternet3() {
         Serial.println("⚠️ Első ping hiba — lehet, hogy a hálózat ébred.");
       }
     }
-    nonBlockingDelay(1000);  // Kíméletes tesztelés
+    blockingDelay(1000);  // Kíméletes tesztelés
   }
 
   if (successCount < 2) {
@@ -551,8 +537,9 @@ void setup() {
   digitalWrite(relayPin, LOW);
   digitalWrite(ledPin, HIGH);  //bekapcsolja a ledet, +5volt 150 ohm
   Serial.begin(115200);
-  while (!Serial) {};
-  nonBlockingDelay(500);
+  unsigned long serialTimeout = millis();
+  while (!Serial && millis() - serialTimeout < 3000) { yield(); }
+  blockingDelay(500);
 
   printUptime();
 
@@ -572,18 +559,17 @@ void setup() {
   gateway = readFile(LittleFS, gatewayPath);
 
   Serial.println(ssid);
-  Serial.println(pass);
+  Serial.println(String(pass.length()) + " chars password loaded");
   Serial.println(ip);
   Serial.println(gateway);
 
   if (initWiFi()) {
     Serial.println("WIFI OK!");
     digitalWrite(wifiledPin, HIGH);  //led on
-    server.end();
-    nonBlockingDelay(100);
+    blockingDelay(100);
   } else {
     digitalWrite(wifiledPin, LOW);  //led off
-    nonBlockingDelay(100);
+    blockingDelay(100);
     // Connect to Wi-Fi network with SSID and password
     Serial.println("Setting AP (Access Point)");
     // NULL sets an open Access Point
@@ -617,7 +603,7 @@ void setup() {
           if (p->name() == PARAM_INPUT_2) {
             pass = p->value().c_str();
             Serial.print("Password set to: ");
-            Serial.println(pass);
+            Serial.println(String(pass.length()) + " chars");
             // Write file to save value
             writeFile(LittleFS, passPath, pass.c_str());
           }
@@ -642,7 +628,7 @@ void setup() {
       }
       request->send(200, "text/plain", "Done. ESP will restart, connect to your router and go to IP address: " + ip);
       Serial.println("RESTART!");
-      nonBlockingDelay(2000);
+      blockingDelay(2000);
       ESP.restart();
     });
     server.begin();
@@ -741,8 +727,9 @@ void loop() {
           printUptime();
           Serial.println("RESET_DELAY end in FAILURE_STATE.");
           Serial.println("Reconnect WIFI in FAILURE_STATE.");
-          WiFi.disconnect();
-          WiFi.reconnect();
+          WiFi.disconnect(true);
+          blockingDelay(100);
+          WiFi.begin(ssid.c_str(), pass.c_str());
           unsigned long reconnect_countdown = millis();
           while (millis() - reconnect_countdown < interval) {
             yield();  // Wait without blocking other processes
@@ -772,7 +759,7 @@ void loop() {
 
       } else {
         if (currentMillis_loop - stateStartMillis_loop >= PROBE_DELAY) {
-          i = i + 1;
+          if (i < 10) i++;
           CurrentState = TESTING_STATE;
         }
       }
