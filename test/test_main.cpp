@@ -373,7 +373,7 @@ static void scWDT1() {
   setup();
   CHECK(g_wdtEnabled, "a loop task fel van iratkozva a watchdogra");
   CHECK(g_wdtPanic, "trigger_panic = true (alapból csak figyelmeztetne!)");
-  CHECK(g_wdtTimeoutMs == 60000, "timeout 60 mp");
+  CHECK(g_wdtTimeoutMs == 90000, "timeout 90 mp");
   CHECK(g_wdtIdleMask == 0, "az idle taskot NEM figyeltetjük (hurok-veszély)");
   CHECK(logIndex("wdt_reconfigure") >= 0, "a már futó TWDT-t konfiguráltuk újra");
 }
@@ -388,7 +388,7 @@ static void scWDT2() {
     resetbutton(); wifiresetbutton(); feedLoopWDT(); delay(10);
   }
   CHECK(guard < 200000, "a reset pulzus lefutott");
-  CHECK(g_wdtMaxFeedGap < 60000, "a 90 mp-es pulzus alatt végig etetve volt");
+  CHECK(g_wdtMaxFeedGap < g_wdtTimeoutMs, "a 90 mp-es pulzus alatt végig etetve volt");
   CHECK(g_wdtMaxFeedGap <= 50, "az etetési köz ~10 ms nagyságrendű");
 }
 
@@ -399,7 +399,7 @@ static void scWDT3() {
   wifiSim.willConnect = false; wifiSim.begun = false;
   g_wdtTrack = true; g_wdtLastFeed = g_millis; g_wdtMaxFeedGap = 0;
   try { reconnectWifi(); } catch (DeepSleepSignal&) {}
-  CHECK(g_wdtMaxFeedGap < 60000, "a ~100 mp-es újracsatlakozás alatt is etetve volt");
+  CHECK(g_wdtMaxFeedGap < g_wdtTimeoutMs, "a ~100 mp-es újracsatlakozás alatt is etetve volt");
   CHECK(g_wdtMaxFeedGap <= 50, "etetési köz ~10 ms");
 }
 

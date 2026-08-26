@@ -94,8 +94,8 @@ constexpr uint32_t BUTTON_DEBOUNCE_MS = 50;
 constexpr uint32_t BUTTON_POLL_MS = 10;
 // Watchdog timeout. Nagyobb kell, mint a leghosszabb olyan blokkolás, amit NEM
 // tudunk etetni: a http.GET() a connect (5 mp) + válasz (10 mp) timeouttal
-// együtt ~15 mp-ig tarthat. 60 mp így négyszeres tartalékot ad.
-constexpr uint32_t WDT_TIMEOUT_MS = 60 * 1000;
+// együtt ~15 mp-ig tarthat. 90 mp így hatszoros tartalékot ad.
+constexpr uint32_t WDT_TIMEOUT_MS = 90 * 1000;
 constexpr uint32_t RESTART_GRACE_MS = 2000;  // válasz kiküldése újraindítás előtt
 
 constexpr uint64_t SLEEP_DURATION_US = 3600ULL * 1000000ULL;      // 1 óra

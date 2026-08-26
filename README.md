@@ -278,13 +278,18 @@ Az ESP-IDF task watchdogja alapból fut, de önmagában **nem véd meg**:
 
 Ezért az `initWatchdog()` mindhármat kifejezetten beállítja:
 
-- **60 másodperces** timeout – a leghosszabb *nem etethető* blokkolás a
-  `http.GET()` (5 mp connect + 10 mp válasz ≈ 15 mp), erre négyszeres tartalék
+- **90 másodperces** timeout – a leghosszabb *nem etethető* blokkolás a
+  `http.GET()` (5 mp connect + 10 mp válasz ≈ 15 mp), erre hatszoros tartalék
 - **`trigger_panic = true`** – timeoutkor valódi újraindulás
 - **`idle_core_mask = 0`** – csak a saját loop taskot figyeli. Az idle task
   figyelése itt káros lenne, mert a firmware szándékosan blokkol percekig
 - a hosszú várakozások (`waitWithButtons`, `blockingDelay`, a 90 mp-es relé
   pulzus, az újracsatlakozás) **etetik** a watchdogot ~10 ms-onként
+
+> A TWDT timeoutja globális, ezért az AsyncTCP saját taskjának figyelése is
+> 5 mp-ről 90 mp-re lazul (`CONFIG_ASYNC_TCP_USE_WDT=1`, `AsyncTCP.cpp:334`).
+> Ez a gyakorlatban nem számít: az aszinkron szerver csak AP konfigurációs
+> módban fut, és ott a `loop()` amúgy is ezredmásodpercek alatt körbeér.
 
 Az **interrupt watchdog** (`ESP_INT_WDT`) alapból aktív, és a panic kezelő
 alapértelmezése `PRINT_REBOOT`, tehát a megszakítás-szintű megakadásokat az
