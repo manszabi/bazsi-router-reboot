@@ -3,6 +3,7 @@
 #include <LittleFS.h>
 #include <ESPping.h>
 #include <esp_task_wdt.h>
+#include <esp_system.h>
 
 uint32_t g_millis = 0;
 std::vector<std::string> g_log;
@@ -15,6 +16,8 @@ bool   g_fsWritable = true;
 size_t g_fsCapacity = 0;
 bool   g_fsRemoveOk = true;
 bool   g_fsReadable = true;
+esp_reset_reason_t g_resetReason = ESP_RST_POWERON;
+esp_reset_reason_t esp_reset_reason(void) { return g_resetReason; }
 size_t g_fsUsed() { size_t n = 0; for (auto& kv : g_fs) n += kv.second.size(); return n; }
 uint64_t g_wakeupUs = 0;
 uint64_t g_gpioWakeMask = 0;

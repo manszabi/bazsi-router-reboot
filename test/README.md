@@ -47,6 +47,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján:
 | `WF1`–`WF5` | Csatlakozási hiba: újrapróbálkozás vs. AP portál, RTC-számláló |
 | `FS1`–`FS6` | LittleFS hibák: csatolás, írásvédettség, megtelt tár, sérült tartalom, törlés tartalék útvonala |
 | `FT1`–`FT6` | Végzetes hiba: betölthetetlen konfig vs. „nincs még konfig", LED-villogás, gombok |
+| `WD1`–`WD6` | Ismétlődő watchdog újraindulás: számlálás, végzetes leállás, nullázási feltételek |
 | `WDT1`–`WDT4` | Watchdog: konfiguráció, etetés a hosszú blokkolások alatt, `delay()` vs. CPU-pörgetés |
 
 ## Fontos

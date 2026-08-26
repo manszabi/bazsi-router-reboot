@@ -10,6 +10,8 @@
 #include "esp_sleep.h"
 #include "esp_idf_version.h"
 #include "esp_task_wdt.h"
+#include "esp_system.h"
+#include "esp_attr.h"
 
 // Create AsyncWebServer object on port 80
 AsyncWebServer server(80);
@@ -105,6 +107,11 @@ constexpr uint32_t FATAL_SLEEP_AFTER_MS = 5 * 60 * 1000;
 // tudunk etetni: a http.GET() a connect (5 mp) + válasz (10 mp) timeouttal
 // együtt ~15 mp-ig tarthat. 90 mp így hatszoros tartalékot ad.
 constexpr uint32_t WDT_TIMEOUT_MS = 90 * 1000;
+// Ennyi watchdog/panic miatti újraindulás után az eszközt instabilnak
+// tekintjük, és ugyanúgy leállunk, mint a többi végzetes hibánál.
+constexpr uint32_t MAX_WDT_RESETS = 3;
+// Ennyi ideig tartó hibátlan működés után a számláló nullázódik.
+constexpr uint32_t WDT_COUNTER_CLEAR_MS = 60 * 60 * 1000;
 constexpr uint32_t RESTART_GRACE_MS = 2000;  // válasz kiküldése újraindítás előtt
 
 constexpr uint64_t SLEEP_DURATION_US = 3600ULL * 1000000ULL;      // 1 óra
@@ -178,6 +185,15 @@ DeviceMode deviceMode = MODE_MONITOR;
 // Sikerült-e a LittleFS csatolása. Ha nem, a beállítások nem menthetők.
 bool fsReady = false;
 
+// Watchdog/panic miatti újraindulások számlálója.
+// FONTOS: itt RTC_NOINIT_ATTR kell, nem RTC_DATA_ATTR! Az utóbbi csak a deep
+// sleepet éli túl, egy watchdog reset ujrainicializalna - épp azt veszítenénk
+// el, amit számolni akarunk. A NOINIT viszont bekapcsoláskor határozatlan
+// tartalmú, ezért magic értékkel ellenőrizzük az érvényességét.
+constexpr uint32_t WDT_COUNTER_MAGIC = 0x42415A53UL;  // "BAZS"
+RTC_NOINIT_ATTR uint32_t rtcWdtMagic;
+RTC_NOINIT_ATTR uint32_t rtcWdtResets;
+
 volatile bool restartPending = false;
 volatile uint32_t restartAt = 0;
 
@@ -198,6 +214,7 @@ void fatalSleep();
 void apSleep();
 void touchApDeadline();
 void startConfigPortal();
+void enterFatal(const char* reason);
 void enterDeepSleep(uint64_t timerUs);
 bool initWiFi();
 bool reconnectWifi();
@@ -365,6 +382,39 @@ void enterFatal(const char* reason) {
   Serial.println("Reset gomb: ujraindítas. Wifireset gomb: mentett adatok torlese.");
   Serial.print(FATAL_SLEEP_AFTER_MS / 60000);
   Serial.println(" perc mulva az eszkoz elalszik (magatol nem ebred fel).");
+}
+
+// Watchdog/panic miatti újraindulások figyelése. Ha a program ismételten
+// megakad, az újraindítgatás önmagában nem megoldás - inkább jelezzünk.
+void checkWatchdogResets() {
+  const esp_reset_reason_t reason = esp_reset_reason();
+
+  if (rtcWdtMagic != WDT_COUNTER_MAGIC) {
+    // Első indulás bekapcsolás után: a NOINIT terület tartalma szemét.
+    rtcWdtMagic = WDT_COUNTER_MAGIC;
+    rtcWdtResets = 0;
+  }
+
+  // Minden olyan ok, ami azt jelenti: a program hibásan viselkedett.
+  const bool abnormal = (reason == ESP_RST_TASK_WDT || reason == ESP_RST_INT_WDT
+                         || reason == ESP_RST_WDT || reason == ESP_RST_PANIC
+                         || reason == ESP_RST_CPU_LOCKUP);
+
+  if (abnormal) {
+    rtcWdtResets++;
+    Serial.print("Watchdog/panic miatti ujrainditas, sorszam: ");
+    Serial.print(rtcWdtResets);
+    Serial.print(" / ");
+    Serial.println(MAX_WDT_RESETS);
+    if (rtcWdtResets >= MAX_WDT_RESETS) {
+      rtcWdtResets = 0;  // az alvás után tiszta lappal induljon
+      enterFatal("Tul sok watchdog miatti ujrainditas - a program instabil.");
+    }
+  } else if (reason == ESP_RST_POWERON || reason == ESP_RST_EXT
+             || reason == ESP_RST_BROWNOUT) {
+    // Áramtalanítás vagy külső reset: emberi beavatkozás, tiszta lap.
+    rtcWdtResets = 0;
+  }
 }
 
 // Lefagyás elleni védelem.
@@ -1029,13 +1079,17 @@ void setup() {
     handleStuckButton("Wifireset button got stuck.");
   }
 
+  checkWatchdogResets();
+
   Serial.println("Init LittleFS.");
   fsReady = initLittleFS();
 
   if (!fsReady) {
     // A konfigurációt tároló fájlrendszer nem elérhető. Ez NEM azonos azzal,
     // hogy nincs még konfiguráció - itt tényleg hiba van.
-    enterFatal("A LittleFS nem csatolhato, a wifi konfiguracio nem toltheto be.");
+    if (deviceMode != MODE_FATAL) {
+      enterFatal("A LittleFS nem csatolhato, a wifi konfiguracio nem toltheto be.");
+    }
   } else {
     // Load values saved in LittleFS
     ConfigStatus st = CONFIG_OK;
@@ -1142,6 +1196,13 @@ void loop() {
 
   resetbutton();
   wifiresetbutton();
+
+  // Hibátlanul lefutott egy óra: a watchdog számláló nullázható.
+  if (rtcWdtResets != 0 && currentMillis >= WDT_COUNTER_CLEAR_MS) {
+    rtcWdtResets = 0;
+    printUptime();
+    Serial.println("1 ora hibatlan mukodes - a watchdog szamlalo nullazva.");
+  }
 
   switch (currentState) {
 

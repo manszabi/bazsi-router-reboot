@@ -291,6 +291,21 @@ Ezért az `initWatchdog()` mindhármat kifejezetten beállítja:
 > Ez a gyakorlatban nem számít: az aszinkron szerver csak AP konfigurációs
 > módban fut, és ott a `loop()` amúgy is ezredmásodpercek alatt körbeér.
 
+### Ismétlődő watchdog újraindulás
+
+Ha a program ismételten megakad, az újraindítgatás önmagában nem megoldás.
+**3 watchdog/panic miatti újraindulás után** az eszköz ugyanúgy leáll, mint a
+többi végzetes hibánál: mindkét LED villog, 5 perc után deep sleep, és **csak a
+reset gomb ébreszti**.
+
+- A számláló `RTC_NOINIT_ATTR`-ben van. Ez **nem** ugyanaz, mint a deep sleepnél
+  használt `RTC_DATA_ATTR`: az utóbbit egy watchdog reset újrainicializálná,
+  azaz épp azt veszítenénk el, amit számolni akarunk.
+- Rendellenesnek számít: `ESP_RST_TASK_WDT`, `ESP_RST_INT_WDT`, `ESP_RST_WDT`,
+  `ESP_RST_PANIC`, `ESP_RST_CPU_LOCKUP`.
+- **Áramtalanítás** vagy külső reset nullázza (emberi beavatkozás → tiszta lap).
+- **1 óra hibátlan működés** szintén nullázza.
+
 Az **interrupt watchdog** (`ESP_INT_WDT`) alapból aktív, és a panic kezelő
 alapértelmezése `PRINT_REBOOT`, tehát a megszakítás-szintű megakadásokat az
 IDF már eleve kezeli.

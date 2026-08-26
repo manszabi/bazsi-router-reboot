@@ -3,6 +3,7 @@
 #include <LittleFS.h>
 #include <ESPping.h>
 #include <HTTPClient.h>
+#include <esp_system.h>
 #include <cassert>
 #include <unistd.h>
 #include <sys/wait.h>
@@ -26,6 +27,8 @@ bool clearConfigValue(fs::FS& fs, const char* path);
 bool initLittleFS();
 bool fileMatches(fs::FS& fs, const char* path, const char* value, size_t len);
 extern bool fsReady;
+extern uint32_t rtcWdtMagic;
+extern uint32_t rtcWdtResets;
 extern volatile bool savingConfig;
 extern volatile uint32_t apDeadline;
 void resetbutton();
@@ -52,6 +55,7 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   g_millis = 1; g_log.clear(); g_pinState.clear(); g_pinRead.clear();
   g_fs.clear(); g_fsMountOk = true; g_wakeupUs = 0;
   g_fsWritable = true; g_fsCapacity = 0; g_fsRemoveOk = true; g_fsReadable = true;
+  g_resetReason = ESP_RST_POWERON;
   g_gpioWakeMask = 0; g_gpioWakeMode = -1;
   g_httpCode = 200; g_httpSize = -2; g_httpBeginOk = true; g_httpBody = "Microsoft NCSI";
   wifiSim.reset(); pingSim = PingSim();
@@ -727,6 +731,93 @@ static void scWF6() {
 }
 
 
+
+static void scWD1() {
+  // Egy watchdog reset még nem végzetes
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcWdtMagic = 0; rtcWdtResets = 0;      // friss bekapcsolás
+  g_resetReason = ESP_RST_TASK_WDT;
+  setup();
+  CHECK(rtcWdtResets == 1, "első watchdog reset elkönyvelve");
+  CHECK(deviceMode == (DeviceMode)0, "normálisan fut tovább");
+}
+
+static void scWD2() {
+  // A 3. watchdog reset után végzetes hibajelzés
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcWdtMagic = 0; rtcWdtResets = 0;
+  g_resetReason = ESP_RST_TASK_WDT;
+  setup();
+  CHECK(rtcWdtResets == 1, "1. reset");
+
+  coldBoot(true, "TestNet", "pw", "", "");   // a NOINIT tartalom megmarad
+  g_resetReason = ESP_RST_TASK_WDT;
+  setup();
+  CHECK(rtcWdtResets == 2, "2. reset");
+
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_resetReason = ESP_RST_TASK_WDT;
+  setup();
+  CHECK(deviceMode == (DeviceMode)2, "3. reset -> MODE_FATAL");
+  CHECK(wifiSim.softApCount == 0, "nem indult AP portál");
+  CHECK(g_pinState[7] == LOW, "a relé LOW - a router kap áramot");
+}
+
+static void scWD3() {
+  // A végzetes állapot 5 perc után alszik, időzített ébresztés nélkül
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcWdtMagic = 0; rtcWdtResets = 2;       // már volt két reset
+  g_resetReason = ESP_RST_TASK_WDT;
+  rtcWdtMagic = 0x42415A53UL;              // érvényes számláló
+  setup();
+  CHECK(deviceMode == (DeviceMode)2, "MODE_FATAL");
+  bool slept = false; uint64_t us = 1;
+  const uint32_t t0 = g_millis;
+  try { while (g_millis - t0 < 8u*60*1000) loop(); }
+  catch (DeepSleepSignal& d) { slept = true; us = d.us; }
+  CHECK(slept, "elaludt");
+  CHECK(us == 0, "NINCS időzített ébresztés - csak gombbal ébred");
+  CHECK(g_gpioWakeMask == (1ULL << 3), "a reset gomb ébreszti");
+  CHECK(rtcWdtResets == 0, "a számláló nullázva, hogy ébredés után tiszta lap legyen");
+}
+
+static void scWD4() {
+  // Áramtalanítás / külső reset nullázza a számlálót
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcWdtMagic = 0x42415A53UL; rtcWdtResets = 2;
+  g_resetReason = ESP_RST_POWERON;
+  setup();
+  CHECK(rtcWdtResets == 0, "bekapcsolás -> tiszta lap");
+  CHECK(deviceMode == (DeviceMode)0, "normálisan fut");
+}
+
+static void scWD5() {
+  // Szoftveres újraindítás (reset gomb) NEM számít watchdog hibának,
+  // de nem is nulláz - a beragadt hiba így nem tüntethető el véletlenül.
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcWdtMagic = 0x42415A53UL; rtcWdtResets = 2;
+  g_resetReason = ESP_RST_SW;
+  setup();
+  CHECK(rtcWdtResets == 2, "szoftveres reset nem növel és nem nulláz");
+  CHECK(deviceMode == (DeviceMode)0, "normálisan fut");
+}
+
+static void scWD6() {
+  // 1 óra hibátlan működés után a számláló nullázódik
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcWdtMagic = 0x42415A53UL; rtcWdtResets = 2;
+  g_resetReason = ESP_RST_SW;
+  g_httpBody = "Microsoft Connect Test";   // a tesztek sikeresek -> egészséges futás
+  setup();
+  CHECK(rtcWdtResets == 2, "két korábbi reset még számon van tartva");
+  // Egy órányi hibátlan futás. Az időt előreugratjuk: a nullázás a loop()
+  // elején történik, de a firstStart fázist előbb le kell zárni.
+  loop();                       // firstStart lezárása
+  g_millis = 61u * 60 * 1000;
+  loop();                       // most fut le a nullázás
+  CHECK(rtcWdtResets == 0, "1 óra hibátlan működés után nullázódott");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -777,6 +868,12 @@ static const Scenario kScenarios[] = {
   { "WF4: fájlírás közben SOHA nem alszik el", scWF4 },
   { "WF5: minden HTTP kérés kitolja az 5 perces határidőt", scWF5 },
   { "WF6: kapcsolatvesztés -> 3 próba, majd azonnal router reset", scWF6 },
+  { "WD1: egy watchdog reset még nem végzetes", scWD1 },
+  { "WD2: 3 watchdog reset után végzetes hibajelzés", scWD2 },
+  { "WD3: a hibajelzés 5 perc után alszik, csak gombbal ébred", scWD3 },
+  { "WD4: áramtalanítás nullázza a watchdog számlálót", scWD4 },
+  { "WD5: szoftveres reset nem növel és nem nulláz", scWD5 },
+  { "WD6: 1 óra hibátlan működés nullázza a számlálót", scWD6 },
 };
 
 
