@@ -44,6 +44,8 @@ Egyetlen forgatókönyv futtatása név-előtag alapján:
 | `C1` | Konfig fájlok írása/olvasása, csonkítás, hiányzó fájl |
 | `B1` | Gomb debounce: zajtüske vs. tartós nyomás |
 | `F1` | Tartalék beállító űrlap, ha a `data/` mappa nincs feltöltve |
+| `R1`–`R4` | Újrapróbálkozási politika: rossz jelszó vs. hiányzó hálózat, 2 napos határ |
+| `L1`–`L4` | Diagnosztikai napló: rögzítés, /log oldal, körpuffer, spam-védelem |
 | `PO1`–`PO3` | Áramszünet: mekkora router-indulási késést tolerál |
 | `X1`–`X6` | Határesetek: gomb a relé pulzus közben, nyílt hálózat, SSID/jelszó határértékek |
 | `CPU1`–`CPU2` | A loop() nem pörgeti a CPU-t a várakozó állapotokban |

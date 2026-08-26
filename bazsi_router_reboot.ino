@@ -1080,8 +1080,10 @@ void startConfigPortal() {
   // mi történt az eszközzel - és épp AP módban vagy, amikor baj van.
   server.on("/log", HTTP_GET, [](AsyncWebServerRequest* request) {
     touchApDeadline();
-    // Stream válasz: nem kell több kilobájtos puffert foglalni.
-    AsyncResponseStream* r = request->beginResponseStream("text/html");
+    // A stream puffere igény szerint nő (resizeAdd), de akkor soronként
+    // újraallokálna. Egy bőséges kezdőmérettel ez egyetlen foglalás lesz:
+    // fejléc + állapot + 32 sor x ~70 bájt + lábléc alatta marad.
+    AsyncResponseStream* r = request->beginResponseStream("text/html", 4096);
     r->print(F("<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
                "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
                "<title>Naplo</title></head><body><h2>Diagnosztikai naplo</h2>"));
@@ -1109,7 +1111,9 @@ void startConfigPortal() {
       }
       r->print(F("</table>"));
     }
-    r->print(F("<p><i>A naplo az aramtalanitast nem eli tul.</i></p>"
+    r->print(F("<p><i>Az uptime minden indulaskor nullarol indul, ezert a "
+               "BOOT sorok jelzik az ujraindulasokat. A naplo az "
+               "aramtalanitast nem eli tul.</i></p>"
                "<p><a href=\"/\">Vissza a beallitasokhoz</a></p></body></html>"));
     request->send(r);
   });
@@ -1466,7 +1470,11 @@ void loop() {
         currentState = SUCCESS_STATE;
       } else {
         testState.failedCount++;
-        logEvent(EV_TEST_FAIL, (uint16_t)testState.cycleIndex);
+        // Csak a hibasorozat első tagját naplózzuk: a 12 mp-enként ismétlődő
+        // bejegyzések különben percek alatt kiszorítanák a fontos eseményeket.
+        if (testState.failedCount == 1) {
+          logEvent(EV_TEST_FAIL, (uint16_t)testState.cycleIndex);
+        }
         printUptime();
         Serial.println("Test failed.");
         currentState = FAILURE_STATE;

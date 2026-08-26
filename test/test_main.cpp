@@ -1273,8 +1273,10 @@ static void scL2() {
   g_handlers["/log#1"](&req);
   CHECK(req._code == 200, "a /log továbbra is működik túlcsordulás után");
   // csak az utolsó 32 fér el
-  CHECK(req._body.find("TEST FAIL") != std::string::npos, "a friss események láthatók");
-  CHECK(req._body.find("BOOT") == std::string::npos,
+  CHECK(req._body.find(">TEST FAIL<") != std::string::npos, "a friss események láthatók");
+  // Pontosan táblázatcellára illesztünk: a "BOOT" szó a magyarázó
+  // szövegben is szerepel az oldalon.
+  CHECK(req._body.find(">BOOT<") == std::string::npos,
         "a régi BOOT már kicsúszott a körpufferből");
 }
 
