@@ -45,13 +45,17 @@ extern uint32_t g_wdtIdleMask;
 extern bool     g_wdtPanic;
 extern uint32_t g_wdtMaxFeedGap;   // leghosszabb szakasz etetés nélkül
 extern uint32_t g_wdtLastFeed;
+extern uint32_t g_wdtFeedBeforeEnable;  // etetes a feliratkozas ELOTT
 extern bool     g_wdtTrack;
 int64_t esp_timer_get_time();
 void esp_sleep_enable_timer_wakeup(uint64_t);
 void esp_deep_sleep_start();
 void esp_sleep_disable_wakeup_source(int);
 #define ESP_SLEEP_WAKEUP_ALL 0
-void esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown(uint64_t, int);
+// Mindket nev letezik, hogy a sketch mindket aga leforduljon.
+int esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown(uint64_t, int);
+int esp_deep_sleep_enable_gpio_wakeup(uint64_t, int);
+extern int g_gpioWakeResult;   // 0 = sikeres armolas, mas = hiba
 #define ESP_GPIO_WAKEUP_GPIO_LOW 0
 #define BIT(n) (1ULL << (n))
 #define F(x) (x)

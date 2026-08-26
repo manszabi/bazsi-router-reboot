@@ -78,6 +78,7 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   g_fsWritable = true; g_fsCapacity = 0; g_fsRemoveOk = true; g_fsReadable = true;
   g_resetReason = ESP_RST_POWERON;
   rtcRetryRounds = 0;
+  g_gpioWakeResult = 0;
   g_gpioWakeMask = 0; g_gpioWakeMode = -1;
   g_httpCode = 200; g_httpSize = -2; g_httpBeginOk = true; g_httpBody = "Microsoft NCSI";
   wifiSim.reset(); pingSim = PingSim();
@@ -815,6 +816,7 @@ static void scWD4() {
   rtcWdtMagic = 0x42415A53UL; rtcWdtResets = 2;
   g_resetReason = ESP_RST_POWERON;
   rtcRetryRounds = 0;
+  g_gpioWakeResult = 0;
   setup();
   CHECK(rtcWdtResets == 0, "bekapcsolás -> tiszta lap");
   CHECK(deviceMode == (DeviceMode)0, "normálisan fut");
@@ -1369,6 +1371,56 @@ static void scSB4() {
   CHECK(found, "STUCK BUTTON esemény a wifireset gombbal (param=1)");
 }
 
+
+static void scWDT5() {
+  // A setup() blokkoló ciklusai a watchdog bekapcsolása ELŐTT futnak.
+  // Ott nem szabad etetni: a task még nincs feliratkozva, az
+  // esp_task_wdt_reset() ESP_ERR_NOT_FOUND-ot ad, amire a core log_e()-t hív.
+  // Egy sikertelen indulási csatlakozás 20 mp-e ~2000 hibasort jelentene.
+  coldBoot(false, "MyNetwork", "pw", "", "");   // nem sikerül csatlakozni
+  g_wdtFeedBeforeEnable = 0;
+  setup();
+  printf("     [info] etetes a feliratkozas elott: %u\n",
+         (unsigned)g_wdtFeedBeforeEnable);
+  CHECK(g_wdtEnabled, "a watchdog bekapcsolt a setup() végén");
+  CHECK(g_wdtFeedBeforeEnable == 0,
+        "a feliratkozás ELŐTT egyszer sem etettünk");
+}
+
+
+static void scSN1() {
+  // Ha a gomb-ébresztés armolása HIBÁZIK (pl. valaki nem RTC-képes lábra tette
+  // a gombot), az időzítő nélküli alvás örökre elérhetetlenné tenné az eszközt.
+  // Ilyenkor biztonsági hálóként mégis armolunk egy hosszú időzítőt.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_fsMountOk = false;                  // -> MODE_FATAL
+  g_gpioWakeResult = -1;                // az armolás elbukik
+  setup();
+  CHECK(deviceMode == (DeviceMode)2, "MODE_FATAL");
+  bool slept = false; uint64_t us = 1;
+  const uint32_t t0 = g_millis;
+  try { while (g_millis - t0 < 8u*60*1000) loop(); }
+  catch (DeepSleepSignal& d) { slept = true; us = d.us; }
+  CHECK(slept, "elaludt");
+  CHECK(g_gpioWakeMask == 0, "a gomb-ébresztés tényleg nem armolódott");
+  CHECK(us == 3600ULL*1000000ULL,
+        "helyette 1 órás időzítő - az eszköz nem válik elérhetetlenné");
+}
+
+static void scSN2() {
+  // Ha az armolás sikerül, marad az eredeti viselkedés: NINCS időzítő
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_fsMountOk = false;
+  setup();
+  bool slept = false; uint64_t us = 1;
+  const uint32_t t0 = g_millis;
+  try { while (g_millis - t0 < 8u*60*1000) loop(); }
+  catch (DeepSleepSignal& d) { slept = true; us = d.us; }
+  CHECK(slept, "elaludt");
+  CHECK(g_gpioWakeMask == (1ULL << 3), "gomb-ébresztés armolva");
+  CHECK(us == 0, "és NINCS időzített ébresztés");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -1399,6 +1451,9 @@ static const Scenario kScenarios[] = {
   { "WDT2: a 90 mp-es relé pulzus alatt is etetve van", scWDT2 },
   { "WDT3: a ~100 mp-es újracsatlakozás alatt is etetve van", scWDT3 },
   { "WDT4: a hosszú várakozás delay()-jel megy, nem CPU-pörgetéssel", scWDT4 },
+  { "WDT5: a watchdog bekapcsolása előtt nem etetünk", scWDT5 },
+  { "SN1: ha a gomb-ébresztés armolása hibázik, időzítő a biztonsági háló", scSN1 },
+  { "SN2: sikeres armolásnál nincs időzítő", scSN2 },
   { "FS1: nem csatolható LittleFS - a portál elindul, a mentés nem hazudik", scFS1 },
   { "FS2: írásra nem nyitható fájlrendszer", scFS2 },
   { "FS3: megtelt fájlrendszer - rövid írás elkapva", scFS3 },

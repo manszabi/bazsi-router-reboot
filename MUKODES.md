@@ -293,6 +293,10 @@ Induláskor **mindkét** gombot ellenőrizzük. Ha bármelyik nyomva van:
 
 Minden alvás előtt a **relé `LOW`**, tehát a router kap áramot.
 
+> Biztonsági háló: ha a gombos ébresztés élesítése bármiért hibázna (pl. valaki
+> nem RTC-képes lábra teszi a reset gombot), az eszköz a „csak gombbal" alvások
+> esetén is armol egy 1 órás időzítőt – így nem válhat elérhetetlenné.
+
 > ⚠️ Deep sleep alatt az ESP32-C3 `GPIO6–21` lábai nagyimpedanciásak, így a relé
 > (`D5` = GPIO7) **lebeg**. Ez szoftverből nem javítható – aktív-HIGH
 > relémodulnál külső 10 kΩ lehúzó ellenállás kell a GND felé.

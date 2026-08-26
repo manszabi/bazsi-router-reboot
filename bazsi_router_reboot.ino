@@ -197,6 +197,12 @@ DeviceMode deviceMode = MODE_MONITOR;
 // Sikerült-e a LittleFS csatolása. Ha nem, a beállítások nem menthetők.
 bool fsReady = false;
 
+// Fut-e már a watchdog. A setup() blokkoló ciklusai (pl. az initWiFi() 20 mp-es
+// várakozása) még az initWatchdog() ELŐTT futnak; ott a feedLoopWDT() hívás
+// ESP_ERR_NOT_FOUND-ot kapna ("task not found"), amire a core log_e()-t hív -
+// ez 20 mp alatt kétezer hibasort jelentene, ha be van kapcsolva a debug log.
+bool watchdogEnabled = false;
+
 // Watchdog/panic miatti újraindulások számlálója.
 // FONTOS: itt RTC_NOINIT_ATTR kell, nem RTC_DATA_ATTR! Az utóbbi csak a deep
 // sleepet éli túl, egy watchdog reset ujrainicializalna - épp azt veszítenénk
@@ -263,6 +269,7 @@ void internetFailSleep();
 void fatalSleep();
 void apSleep();
 void touchApDeadline();
+void feedWatchdog();
 void wifiGiveUp();
 bool routerResetAndRetry();
 bool wifiAuthFailed();
@@ -527,6 +534,7 @@ void initWatchdog() {
   // lenne (az idle taskokat leiratkoztatjuk), és a timer elindulása egy belső
   // részleten (waiting_for_task) múlna - így viszont garantált.
   enableLoopWDT();
+  watchdogEnabled = true;
 
   esp_task_wdt_config_t cfg = {};
   cfg.timeout_ms = WDT_TIMEOUT_MS;
@@ -540,11 +548,19 @@ void initWatchdog() {
   if (err != ESP_OK) {
     Serial.print("Watchdog config failed, error ");
     Serial.println((int)err);
+    watchdogEnabled = false;
     return;
   }
   Serial.print("Watchdog enabled, timeout ");
   Serial.print(WDT_TIMEOUT_MS / 1000);
   Serial.println(" s");
+}
+
+// Csak akkor etetünk, ha a loop task már fel van iratkozva.
+void feedWatchdog() {
+  if (watchdogEnabled) {
+    feedLoopWDT();
+  }
 }
 
 void blockingDelay(uint32_t duration) {
@@ -553,7 +569,7 @@ void blockingDelay(uint32_t duration) {
     const uint32_t elapsed = millis() - start;
     const uint32_t left = duration - elapsed;
     delay(left > BUTTON_POLL_MS ? BUTTON_POLL_MS : left);
-    feedLoopWDT();
+    feedWatchdog();
   }
 }
 
@@ -563,7 +579,7 @@ void waitWithButtons(uint32_t duration) {
   while (millis() - start < duration) {
     resetbutton();
     wifiresetbutton();
-    feedLoopWDT();
+    feedWatchdog();
     delay(BUTTON_POLL_MS);
   }
 }
@@ -673,7 +689,7 @@ bool initWiFi() {
   while (WiFi.status() != WL_CONNECTED) {
     resetbutton();
     wifiresetbutton();
-    feedLoopWDT();
+    feedWatchdog();
     delay(BUTTON_POLL_MS);
     if (millis() - startAttempt >= interval) {
       printUptime();
@@ -745,9 +761,8 @@ void enterDeepSleep(uint64_t timerUs) {
 
   // Tiszta lappal indulunk, hogy biztosan csak az legyen élesítve, amit akarunk.
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
-  if (timerUs > 0) {
-    esp_sleep_enable_timer_wakeup(timerUs);
-  }
+
+  esp_err_t gpioErr = ESP_FAIL;
 #if SOC_GPIO_SUPPORT_DEEPSLEEP_WAKEUP
   // A reset gomb ébressze fel az eszközt. Csak RTC-képes láb használható
   // (ESP32-C3: GPIO0-GPIO5); a resetPin a XIAO ESP32-C3-on D1 = GPIO3.
@@ -756,11 +771,22 @@ void enterDeepSleep(uint64_t timerUs) {
   // Az IDF 6.0 átnevezte ezt az API-t, az arduino-esp32 pedig idf ">=5.3,<6.2"
   // tartományt deklarál, tehát mindkét névvel találkozhatunk.
 #if ESP_IDF_VERSION_MAJOR >= 6
-  esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown(1ULL << resetPin, ESP_GPIO_WAKEUP_GPIO_LOW);
+  gpioErr = esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown(1ULL << resetPin, ESP_GPIO_WAKEUP_GPIO_LOW);
 #else
-  esp_deep_sleep_enable_gpio_wakeup(1ULL << resetPin, ESP_GPIO_WAKEUP_GPIO_LOW);
+  gpioErr = esp_deep_sleep_enable_gpio_wakeup(1ULL << resetPin, ESP_GPIO_WAKEUP_GPIO_LOW);
 #endif
 #endif
+
+  // Biztonsági háló: ébresztőforrás nélkül az eszköz külső resetig aludna.
+  // Ha nem kértünk időzítőt ÉS a gombébresztés armolása nem sikerült (pl. mert
+  // valaki nem RTC-képes lábra tette a gombot), inkább mégis armolunk egy
+  // hosszú időzítőt, mint hogy az eszköz elérhetetlenné váljon.
+  if (timerUs == 0 && gpioErr != ESP_OK) {
+    timerUs = SLEEP_DURATION_US;
+  }
+  if (timerUs > 0) {
+    esp_sleep_enable_timer_wakeup(timerUs);
+  }
   esp_deep_sleep_start();
 }
 
@@ -788,7 +814,7 @@ bool routerResetAndRetry() {
   while (!reset_device()) {
     resetbutton();
     wifiresetbutton();
-    feedLoopWDT();
+    feedWatchdog();
     delay(BUTTON_POLL_MS);
   }
   printUptime();
@@ -970,7 +996,7 @@ size_t readBounded(WiFiClient& stream, char* buf, size_t maxLen, uint32_t timeou
       }
       resetbutton();
       wifiresetbutton();
-      feedLoopWDT();
+      feedWatchdog();
       // delay() és nem yield(): a yield() csak azonos prioritású taskok között
       // ad át vezérlést, tehát üresen pörgetné a CPU-t a válaszra várva.
       delay(BUTTON_POLL_MS);
@@ -1074,7 +1100,7 @@ void handleFirstStart(uint32_t currentMillis) {
       }
       resetbutton();
       wifiresetbutton();
-      feedLoopWDT();
+      feedWatchdog();
       delay(BUTTON_POLL_MS);  // vTaskDelay: 10 percig ne pörgesse a CPU-t
       return;  // csak itt kilép, visszaadja a vezérlést a loop()-nak
     }
@@ -1559,7 +1585,7 @@ void loop() {
           while (!reset_device()) {
             resetbutton();
             wifiresetbutton();
-            feedLoopWDT();
+            feedWatchdog();
             delay(BUTTON_POLL_MS);
           }
           printUptime();
