@@ -415,6 +415,11 @@ beírt adatok sem vesznek el.
 
 MIT License – lásd a [LICENSE](LICENSE) fájlt.
 
+## 📊 Működési táblázat
+
+Az eszköz teljes viselkedése – mikor mit csinál és meddig, minden esettel:
+[MUKODES.md](MUKODES.md)
+
 ## 🧪 Tesztek
 
 A firmware vezérlési logikája hardver nélkül is tesztelhető: a `test/` mappa a
