@@ -35,12 +35,27 @@ void pinMode(uint8_t, uint8_t);
 void digitalWrite(uint8_t, uint8_t);
 int digitalRead(uint8_t);
 void yield();
+void delay(uint32_t ms);
+void feedLoopWDT();
+void enableLoopWDT();
+extern bool     g_wdtEnabled;
+extern uint32_t g_wdtTimeoutMs;
+extern uint32_t g_wdtIdleMask;
+extern bool     g_wdtPanic;
+extern uint32_t g_wdtMaxFeedGap;   // leghosszabb szakasz etetés nélkül
+extern uint32_t g_wdtLastFeed;
+extern bool     g_wdtTrack;
 int64_t esp_timer_get_time();
 void esp_sleep_enable_timer_wakeup(uint64_t);
 void esp_deep_sleep_start();
+void esp_sleep_disable_wakeup_source(int);
+#define ESP_SLEEP_WAKEUP_ALL 0
 void esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown(uint64_t, int);
 #define ESP_GPIO_WAKEUP_GPIO_LOW 0
 #define BIT(n) (1ULL << (n))
+// A valódi RTC_DATA_ATTR deep sleepet túlélő memóriába tesz. A teszt egyetlen
+// processzben fut, ezért itt sima globális - a persztenciát kézzel modellezzük.
+#define RTC_DATA_ATTR
 extern uint64_t g_wakeupUs;
 extern uint64_t g_gpioWakeMask;
 extern int g_gpioWakeMode;

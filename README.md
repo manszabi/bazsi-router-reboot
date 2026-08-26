@@ -132,7 +132,7 @@ Az eszköz három állapotban működik:
 |---|---|
 | **Elalvás oka** | 5 sikertelen router reset, vagy sikertelen Wi-Fi újracsatlakozás |
 | **Alvás hossza** | 1 óra (timer), vagy 60 mp beragadt gomb esetén |
-| **Ébresztés** | timer **vagy** a reset gomb (D1) lenyomása |
+| **Ébresztés** | timer **vagy** a reset gomb (D1) lenyomása. Végzetes hiba utáni alvásnál **csak a gomb** |
 | **Ébredés után** | teljes újraindulás – a `setup()` fut le elölről |
 
 Az ESP32-C3 deep sleepből mindig **újraindulással** ébred: a RAM tartalma elvész,
@@ -261,6 +261,148 @@ ellenőrizve a core, illetve az ESP-IDF forrásában:
   (IDF 6.0-ban átnevezték – a kód mindkét nevet kezeli), és csak RTC-képes
   lábat fogad el; a `D1` = GPIO3 megfelel.
 
+## 🐕 Watchdog – védelem lefagyás ellen
+
+Ha a program megakadna (végtelen ciklus, deadlock), a legrosszabb eset az, hogy
+**a relé bekapcsolt állapotban ragad, és a router tartósan áram nélkül marad**.
+A watchdog ezt oldja meg: újraindítja az ESP-t, a `setup()` pedig azonnal
+`LOW`-ra állítja a relét, tehát a router visszakapja az áramot.
+
+Az ESP-IDF task watchdogja alapból fut, de önmagában **nem véd meg**:
+
+| | Alapértelmezés | Következmény |
+|---|---|---|
+| `loopTaskWDTEnabled` | `false` (Arduino `main.cpp`) | a `loop()` megakadását észre sem veszi |
+| `ESP_TASK_WDT_PANIC` | `n` | timeoutkor csak figyelmeztetést ír ki, nem indít újra |
+| `ESP_TASK_WDT_TIMEOUT_S` | `5` | rövidebb, mint a firmware szándékos blokkolásai |
+
+Ezért az `initWatchdog()` mindhármat kifejezetten beállítja:
+
+- **90 másodperces** timeout – a leghosszabb *nem etethető* blokkolás a
+  `http.GET()` (5 mp connect + 10 mp válasz ≈ 15 mp), erre hatszoros tartalék
+- **`trigger_panic = true`** – timeoutkor valódi újraindulás
+- **`idle_core_mask = 0`** – csak a saját loop taskot figyeli. Az idle task
+  figyelése itt káros lenne, mert a firmware szándékosan blokkol percekig
+- a hosszú várakozások (`waitWithButtons`, `blockingDelay`, a 90 mp-es relé
+  pulzus, az újracsatlakozás) **etetik** a watchdogot ~10 ms-onként
+
+> A TWDT timeoutja globális, ezért az AsyncTCP saját taskjának figyelése is
+> 5 mp-ről 90 mp-re lazul (`CONFIG_ASYNC_TCP_USE_WDT=1`, `AsyncTCP.cpp:334`).
+> Ez a gyakorlatban nem számít: az aszinkron szerver csak AP konfigurációs
+> módban fut, és ott a `loop()` amúgy is ezredmásodpercek alatt körbeér.
+
+### Ismétlődő watchdog újraindulás
+
+Ha a program ismételten megakad, az újraindítgatás önmagában nem megoldás.
+**3 watchdog/panic miatti újraindulás után** az eszköz ugyanúgy leáll, mint a
+többi végzetes hibánál: mindkét LED villog, 5 perc után deep sleep, és **csak a
+reset gomb ébreszti**.
+
+- A számláló `RTC_NOINIT_ATTR`-ben van. Ez **nem** ugyanaz, mint a deep sleepnél
+  használt `RTC_DATA_ATTR`: az utóbbit egy watchdog reset újrainicializálná,
+  azaz épp azt veszítenénk el, amit számolni akarunk.
+- Rendellenesnek számít: `ESP_RST_TASK_WDT`, `ESP_RST_INT_WDT`, `ESP_RST_WDT`,
+  `ESP_RST_PANIC`, `ESP_RST_CPU_LOCKUP`.
+- **Áramtalanítás** vagy külső reset nullázza (emberi beavatkozás → tiszta lap).
+- **1 óra hibátlan működés** szintén nullázza.
+
+Az **interrupt watchdog** (`ESP_INT_WDT`) alapból aktív, és a panic kezelő
+alapértelmezése `PRINT_REBOOT`, tehát a megszakítás-szintű megakadásokat az
+IDF már eleve kezeli.
+
+> A hosszú várakozások `delay()`-t használnak `yield()` helyett. A `yield()`
+> csak azonos prioritású taskok között ad át vezérlést, tehát a korábbi
+> változat a 90 mp-es relé pulzus alatt 100%-on pörgette a CPU-t; a `delay()`
+> `vTaskDelay()`-re fordul, ami ténylegesen felfüggeszti a taskot.
+
+## 📶 Ha nem sikerül csatlakozni a Wi-Fihez
+
+Egységes politika **minden** ágon: **3 próba, köztük 30 másodperc szünet**
+(próbánként 20 mp csatlakozási timeout).
+
+### Induláskor
+
+| Helyzet | Viselkedés |
+|---|---|
+| Nincs mentett SSID | Azonnal **AP beállító portál** |
+| Van SSID, de nem érhető el | **10 perc várakozás** (`firstStartDelay`), majd 3 próba → ha így sem megy: **AP portál** |
+
+A 10 perces várakozás a lényeg: áramszünet után az ESP másodpercek alatt
+elindul, a router viszont percekig bootol.
+
+### Működés közben megszakad a kapcsolat
+
+```
+kapcsolatvesztés → 3 próba (30 mp szünetekkel)
+                 → sikertelen → ROUTER ÚJRAINDÍTÁS (relé ki 90 mp, be)
+                 → 10 perc várakozás (RESET_DELAY)
+                 → 3 próba (30 mp szünetekkel)
+                 → sikertelen → AP beállító portál
+```
+
+### Az AP beállító mód
+
+Az AP mód **5 perc** tétlenség után deep sleepbe megy, **időzített ébresztés
+nélkül** – ugyanúgy, mint a végzetes LittleFS hibánál. Visszahozni a reset
+gombbal vagy áramtalanítással lehet.
+
+Két védelem gondoskodik arról, hogy a mentés ne vesszen el:
+
+- **Minden HTTP kérés újraindítja az 5 perces visszaszámlálást.** Ha az utolsó
+  pillanatban nyitod meg az oldalt, kapsz még egy teljes időablakot.
+- **Fájlírás közben az eszköz soha nem alszik el** (`savingConfig` jelző), így
+  nem maradhat félig kiírt konfiguráció.
+
+## 🚨 Végzetes hiba – a konfiguráció nem tölthető be
+
+A wifi beállítások a LittleFS-en vannak. Ha ezek **nem tölthetők be**, a program
+nem fut tovább: nem tesztel, nem kapcsolja a relét, és AP módba sem lép.
+Mindkét LED (`D3` és `D4`) **együtt, gyorsan villog** (5 Hz).
+
+Fontos a megkülönböztetés – a „nincs még konfiguráció" **nem hiba**:
+
+| Helyzet | Minősítés | Viselkedés |
+|---|---|---|
+| A konfig fájlok nem léteznek (első indítás) | `CONFIG_MISSING` | normális → **AP beállító portál** |
+| A fájlok léteznek, de üresek (wifireset után) | `CONFIG_OK`, üres érték | normális → **AP beállító portál** |
+| A LittleFS nem csatolható | hiba | **hibajelzés**, villogás |
+| A fájl létezik, de nem nyitható / hibás olvasás | `CONFIG_ERROR` | **hibajelzés**, villogás |
+
+Hibajelzés közben:
+
+- a **relé `LOW`** marad, tehát a router végig kap áramot
+- a **gombok élnek**: a reset gomb újraindít, a wifireset gomb törli a mentett adatokat
+- a watchdog aktív
+- **5 perc után az eszköz deep sleepbe megy** – és **időzített ébresztés nélkül**.
+  Egy sérült fájlrendszer magától nem gyógyul meg, ezért értelmetlen lenne
+  óránként felébredni és újra villogni. Visszahozni a **reset gombbal** vagy
+  áramtalanítással lehet.
+
+## 💾 LittleFS hibakezelés
+
+A beállítások LittleFS-en tárolódnak, ezért minden fájlművelet hibája
+kezelve van – és ami fontosabb, **egyik sem hazudik sikert**.
+
+| Hiba | Viselkedés |
+|---|---|
+| A fájlrendszer nem csatolható | Konkrét ok kiírása (a `begin()` csak `ESP_FAIL`-nél formáz, hiányzó partíciónál nem), majd végzetes hibajelzés – lásd fent |
+| Hiányzó konfigurációs fájl | `CONFIG_MISSING` – nem hiba, AP beállító portál |
+| A fájl nem nyitható írásra | `writeConfigValue()` `false`-t ad, a mentés nem történik meg |
+| Rövid írás (megtelt FS) | A `print()` visszatérési értéke ellenőrizve, `false` |
+| Az írás „sikerült", de a tartalom hibás | **Visszaolvasásos ellenőrzés** fogja meg |
+| A törlés (csonkolás) nem megy | Tartalék: a fájl törlése `remove()`-val |
+| Mentés a beállító oldalról | Hiba esetén HTTP 500 magyarázattal és **nincs újraindítás** |
+| Érvénytelen űrlapadat (rossz SSID hossz, IP formátum, hiányzó SSID) | Ugyanúgy HTTP 500 az ok megnevezésével, **nincs újraindítás** |
+
+A visszaolvasás azért kell, mert a `File::close()` és a `File::flush()` is
+`void` a core-ban – a lezáráskor jelentkező hibát másképp nem lehetne észlelni.
+
+A beállító oldalról mentés hibája korábban a legkellemetlenebb módon jelent
+volna meg: az eszköz „Done"-t válaszol, újraindul, és mivel nem mentett semmit,
+ismét AP módban jön fel – a felhasználó pedig végtelen körben próbálkozik
+magyarázat nélkül. Most a hibát megkapja, és az eszköz nem indul újra, tehát a
+beírt adatok sem vesznek el.
+
 ## 🔒 Biztonság
 
 - A LittleFS-en tárolt Wi-Fi adatok (`/ssid.txt`, `/pass.txt`, `/ip.txt`,
@@ -273,6 +415,11 @@ ellenőrizve a core, illetve az ESP-IDF forrásában:
 ## 📄 Licenc
 
 MIT License – lásd a [LICENSE](LICENSE) fájlt.
+
+## 📊 Működési táblázat
+
+Az eszköz teljes viselkedése – mikor mit csinál és meddig, minden esettel:
+[MUKODES.md](MUKODES.md)
 
 ## 🧪 Tesztek
 
