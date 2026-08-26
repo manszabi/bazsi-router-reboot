@@ -125,7 +125,9 @@ Az eszköz három állapotban működik:
 | **Reset** (D1) | ESP32-C3 azonnali újraindítása; deep sleepből felébreszti az eszközt |
 | **Wi-Fi Reset** (D0) | Mentett Wi-Fi adatok törlése + ESP újraindítás → visszaáll AP módba |
 
-> ⚠️ Ha induláskor valamelyik gomb beragadva marad, az ESP 60 másodpercre deep sleep módba lép (védelem).
+> ⚠️ Induláskor **mindkét** gombot ellenőrizzük. Ha bármelyik beragadva marad, a
+> két LED 3 másodpercig **felváltva** villog (megkülönböztetésül a végzetes
+> hibától, ahol együtt villognak), majd az ESP 60 másodpercre deep sleep módba lép.
 > Ilyenkor a gombos ébresztés **nincs** bekapcsolva, különben a beragadt gomb végtelen boot loopot okozna.
 
 ### Deep sleep és ébredés

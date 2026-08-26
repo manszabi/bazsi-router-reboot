@@ -23,7 +23,7 @@ Az eszköz mindig pontosan egy üzemmódban van.
 |---|---|---|
 | Kimenetek alapállapotba (relé `LOW`, státusz LED be) | azonnal | |
 | Soros port indítása | max. **3 mp** + 0,5 mp | |
-| Beragadt gomb ellenőrzés | azonnal | Ha nyomva: **60 mp** deep sleep, majd újra |
+| Beragadt gomb ellenőrzés (**mindkettő**: `D0` és `D1`) | azonnal | Ha bármelyik nyomva: LED-ek **felváltva** villognak 3 mp-ig, majd **60 mp** deep sleep |
 | Watchdog reset számláló ellenőrzés | azonnal | 3. rendellenes reset → `MODE_FATAL` |
 | LittleFS csatolás | azonnal | Hiba → `MODE_FATAL` |
 | Konfiguráció beolvasása | azonnal | Olvasási hiba → `MODE_FATAL` |
@@ -266,8 +266,19 @@ Rendellenesnek számít: `ESP_RST_TASK_WDT`, `ESP_RST_INT_WDT`, `ESP_RST_WDT`,
 | Reset | `D1` = GPIO3 | Azonnali újraindítás; deep sleepből ébreszt | **50 mp** folyamatos nyomás |
 | Wi-Fi reset | `D0` = GPIO2 | Mentett adatok törlése + újraindítás | **50 mp** folyamatos nyomás |
 
-Induláskor beragadt gomb → **60 mp** deep sleep (gombos ébresztés nélkül, hogy
-ne legyen újraindítási hurok).
+### Beragadt gomb induláskor
+
+Induláskor **mindkét** gombot ellenőrizzük. Ha bármelyik nyomva van:
+
+1. A két LED **felváltva** villog **3 másodpercig** (ellentétes fázisban)
+2. Az eszköz **60 mp** deep sleepbe megy
+3. **Gombos ébresztés nélkül** – különben a beragadt gomb azonnal
+   újraébresztené, és végtelen boot loop lenne
+4. Az esemény bekerül a diagnosztikai naplóba (`STUCK BUTTON`, a paraméter
+   megmondja melyik gomb)
+
+> A **felváltva** villogás szándékosan más, mint a végzetes hiba jelzése, ahol a
+> két LED **együtt** villog. Ránézésre megkülönböztethető.
 
 ---
 
@@ -295,4 +306,5 @@ Minden alvás előtt a **relé `LOW`**, tehát a router kap áramot.
 | be | be | Minden rendben, van Wi-Fi |
 | be | ki | Nincs Wi-Fi kapcsolat |
 | ki | ki | Router áramtalanítva (reset pulzus alatt), vagy alvás |
-| **együtt villog 5 Hz** | **együtt villog 5 Hz** | **Végzetes hiba** |
+| **együtt villog 5 Hz** | **együtt villog 5 Hz** | **Végzetes hiba** (LittleFS / konfig / watchdog) |
+| **felváltva villog 5 Hz** | **felváltva villog 5 Hz** | **Beragadt gomb** induláskor |

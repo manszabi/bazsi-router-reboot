@@ -4,6 +4,7 @@
 #include <ESPping.h>
 #include <HTTPClient.h>
 #include <esp_system.h>
+
 #include <ESPAsyncWebServer.h>
 extern std::map<std::string, ArRequestHandlerFunction> g_handlers;
 #include <cassert>
@@ -1305,6 +1306,69 @@ static void scL3() {
   CHECK(found, "a FATAL esemény a LittleFS okkal (param=1) rögzítve");
 }
 
+
+static void scSB1() {
+  // Beragadt RESET gomb -> 60 mp alvas, gombebresztes nelkul
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_pinRead[3] = LOW;                       // D1 = GPIO3
+  bool slept = false; uint64_t us = 0;
+  try { setup(); } catch (DeepSleepSignal& d) { slept = true; us = d.us; }
+  CHECK(slept, "elaludt");
+  CHECK(us == 60ULL * 1000000ULL, "60 másodperces ébresztés");
+  CHECK(g_gpioWakeMask == 0, "gomb-ébresztés NINCS armolva (boot loop ellen)");
+  CHECK(g_pinState[7] == LOW, "a relé LOW - a router kap áramot");
+}
+
+static void scSB2() {
+  // Beragadt WIFIRESET gomb -> ugyanaz a kezeles
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_pinRead[2] = LOW;                       // D0 = GPIO2
+  bool slept = false; uint64_t us = 0;
+  try { setup(); } catch (DeepSleepSignal& d) { slept = true; us = d.us; }
+  CHECK(slept, "a wifireset gomb beragadását is elkapja");
+  CHECK(us == 60ULL * 1000000ULL, "60 másodperces ébresztés");
+  CHECK(g_gpioWakeMask == 0, "gomb-ébresztés NINCS armolva");
+}
+
+static void scSB3() {
+  // A ket LED FELVALTVA villog (ellentetes fazis) - ez kulonbozteti meg a
+  // vegzetes hibatol, ahol egyszerre villognak.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_pinRead[3] = LOW;
+  g_log.clear();
+  try { setup(); } catch (DeepSleepSignal&) {}
+
+  // A firmware egymas utan irja a ket labat, ezert a naplo szomszedos parjait
+  // nezzuk: a valtakozo mintat a "led BE + wifiled KI" es a forditottja adja.
+  int alternating = 0, simultaneous = 0;
+  for (size_t i = 0; i + 1 < g_log.size(); i++) {
+    if (g_log[i] == "pin6=HIGH" && g_log[i+1] == "pin5=LOW") alternating++;
+    else if (g_log[i] == "pin6=LOW" && g_log[i+1] == "pin5=HIGH") alternating++;
+    else if (g_log[i] == "pin6=HIGH" && g_log[i+1] == "pin5=HIGH") simultaneous++;
+    else if (g_log[i] == "pin6=LOW" && g_log[i+1] == "pin5=LOW") simultaneous++;
+  }
+  printf("     [info] valtakozo par: %d, egyutt-villogo par: %d\n",
+         alternating, simultaneous);
+  CHECK(alternating >= 10, "sokszor váltottak FELVÁLTVA (ellentétes fázis)");
+  CHECK(simultaneous == 0, "egyszer sem villogtak EGYÜTT (az a végzetes hiba jele)");
+  CHECK(g_pinState[6] == LOW && g_pinState[5] == LOW, "alvás előtt mindkettő lekapcsolva");
+}
+
+static void scSB4() {
+  // A beragadt gomb bekerul a diagnosztikai naploba
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcEvMagic = 0; rtcEvNext = 0;
+  g_pinRead[2] = LOW;                       // wifireset
+  try { setup(); } catch (DeepSleepSignal&) {}
+  bool found = false, bootLogged = false;
+  for (uint32_t i = 0; i < rtcEvNext && i < 32; i++) {
+    if (rtcEvents[i].code == 11 && rtcEvents[i].param == 1) found = true;
+    if (rtcEvents[i].code == 1) bootLogged = true;
+  }
+  CHECK(bootLogged, "a BOOT esemény is bekerült (a gombellenőrzés előtt)");
+  CHECK(found, "STUCK BUTTON esemény a wifireset gombbal (param=1)");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -1391,6 +1455,10 @@ static const Scenario kScenarios[] = {
   { "L1: eseménynapló és a /log oldal", scL1 },
   { "L2: körpuffer túlcsordulás", scL2 },
   { "L3: a végzetes hiba oka naplózva", scL3 },
+  { "SB1: beragadt reset gomb -> 60 mp alvás", scSB1 },
+  { "SB2: beragadt wifireset gomb -> ugyanaz", scSB2 },
+  { "SB3: a LED-ek FELVÁLTVA villognak elalvás előtt", scSB3 },
+  { "SB4: a beragadt gomb naplózva", scSB4 },
 };
 
 

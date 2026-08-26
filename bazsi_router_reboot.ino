@@ -110,6 +110,9 @@ constexpr uint32_t FATAL_BLINK_MS = 100;
 // Ennyi hibajelzés után az ESP elalszik. Időzített ébresztés NÉLKÜL: csak a
 // reset gomb vagy az áramtalanítás hozza vissza.
 constexpr uint32_t FATAL_SLEEP_AFTER_MS = 5 * 60 * 1000;
+// Beragadt gomb jelzése elalvás előtt: a két LED FELVÁLTVA villog, hogy meg
+// lehessen különböztetni a végzetes hibától, ahol EGYÜTT villognak.
+constexpr uint32_t STUCK_BLINK_MS = 3000;
 // Watchdog timeout. Nagyobb kell, mint a leghosszabb olyan blokkolás, amit NEM
 // tudunk etetni: a http.GET() a connect (5 mp) + válasz (10 mp) timeouttal
 // együtt ~15 mp-ig tarthat. 90 mp így hatszoros tartalékot ad.
@@ -222,7 +225,8 @@ enum EventCode : uint8_t {
   EV_CONFIG_SAVED = 7,  // param: 0
   EV_SLEEP = 8,         // param: ok (1=retry 2=internet 3=AP timeout 4=fatal)
   EV_FATAL = 9,         // param: ok (1=FS mount 2=konfig olvasás 3=watchdog)
-  EV_WDT_RESET = 10     // param: hányadik watchdog reset
+  EV_WDT_RESET = 10,    // param: hányadik watchdog reset
+  EV_STUCK_BUTTON = 11  // param: 0 = reset gomb, 1 = wifireset gomb
 };
 
 struct EventEntry {
@@ -296,6 +300,7 @@ const char* eventName(uint8_t code) {
     case EV_SLEEP: return "SLEEP";
     case EV_FATAL: return "FATAL";
     case EV_WDT_RESET: return "WDT RESET";
+    case EV_STUCK_BUTTON: return "STUCK BUTTON";
     default: return "?";
   }
 }
@@ -564,10 +569,27 @@ void waitWithButtons(uint32_t duration) {
 // Szándékosan nem az enterDeepSleep()-et hívja: itt a Wi-Fi és a webszerver
 // még el sem indult, és gombébresztést sem szabad armolni - a beragadt gomb
 // azonnal újraébresztené az eszközt, azaz végtelen boot loop lenne.
-void handleStuckButton(const char* message) {
+void handleStuckButton(const char* message, uint16_t which) {
   Serial.println(message);
-  digitalWrite(ledPin, LOW);
+  Serial.print("Alvas ");
+  Serial.print((unsigned long)(STUCK_BUTTON_SLEEP_US / 1000000ULL));
+  Serial.println(" masodpercre, utana ujraprobalkozas.");
   Serial.flush();
+  logEvent(EV_STUCK_BUTTON, which);
+
+  // A két LED FELVÁLTVA villog. Ez szándékosan más, mint a végzetes hiba
+  // jelzése (ott egyszerre villognak), így ránézésre megkülönböztethető.
+  const uint32_t start = millis();
+  bool on = false;
+  while (millis() - start < STUCK_BLINK_MS) {
+    on = !on;
+    digitalWrite(ledPin, on ? HIGH : LOW);
+    digitalWrite(wifiledPin, on ? LOW : HIGH);  // ellentétes fázis
+    delay(FATAL_BLINK_MS);
+  }
+  digitalWrite(ledPin, LOW);
+  digitalWrite(wifiledPin, LOW);
+
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
   esp_sleep_enable_timer_wakeup(STUCK_BUTTON_SLEEP_US);
   esp_deep_sleep_start();
@@ -1314,14 +1336,16 @@ void setup() {
 
   printUptime();
 
+  logEvent(EV_BOOT, (uint16_t)esp_reset_reason());
+
+  // Mindkét gombot ellenőrizzük: ha bármelyik beragadt, nem indulunk el.
   if (digitalRead(resetPin) == LOW) {
-    handleStuckButton("Reset button got stuck.");
+    handleStuckButton("Reset button got stuck.", 0);
   }
   if (digitalRead(wifiresetPin) == LOW) {
-    handleStuckButton("Wifireset button got stuck.");
+    handleStuckButton("Wifireset button got stuck.", 1);
   }
 
-  logEvent(EV_BOOT, (uint16_t)esp_reset_reason());
   checkWatchdogResets();
 
   Serial.println("Init LittleFS.");
