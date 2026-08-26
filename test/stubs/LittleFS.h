@@ -7,6 +7,7 @@ extern bool g_fsMountOk;
 extern bool   g_fsWritable;   // false = minden megnyitás írásra elbukik
 extern size_t g_fsCapacity;   // 0 = korlátlan; egyébként a tárolható összméret
 extern bool   g_fsRemoveOk;   // a remove() sikerül-e
+extern bool   g_fsReadable;   // false = a létező fájl sem nyitható olvasásra
 extern size_t g_fsUsed();
 
 class File : public Stream {
@@ -49,7 +50,7 @@ private:
 namespace fs {
 class FS {
 public:
-  File open(const char* p) { return File(p, g_fs.count(p) > 0); }
+  File open(const char* p) { return File(p, g_fsReadable && g_fs.count(p) > 0); }
   File open(const char* p, const char* mode) {
     (void)mode;
     if (!g_fsWritable) return File();   // nem nyitható írásra

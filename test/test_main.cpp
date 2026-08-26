@@ -19,7 +19,8 @@ void trimInPlace(char*);
 bool testInternetHTTP(const char* url, const char* expected);
 void initWatchdog();
 bool testInternetPing(IPAddress& target, const char* name);
-bool readConfigValue(fs::FS& fs, const char* path, char* out, size_t outSize);
+enum ConfigStatus : uint8_t;
+ConfigStatus readConfigValue(fs::FS& fs, const char* path, char* out, size_t outSize);
 bool writeConfigValue(fs::FS& fs, const char* path, const char* msg);
 bool clearConfigValue(fs::FS& fs, const char* path);
 bool initLittleFS();
@@ -44,7 +45,7 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
                      const char* ip, const char* gw, uint32_t latency = 500) {
   g_millis = 1; g_log.clear(); g_pinState.clear(); g_pinRead.clear();
   g_fs.clear(); g_fsMountOk = true; g_wakeupUs = 0;
-  g_fsWritable = true; g_fsCapacity = 0; g_fsRemoveOk = true;
+  g_fsWritable = true; g_fsCapacity = 0; g_fsRemoveOk = true; g_fsReadable = true;
   g_gpioWakeMask = 0; g_gpioWakeMode = -1;
   g_httpCode = 200; g_httpSize = -2; g_httpBeginOk = true; g_httpBody = "Microsoft NCSI";
   wifiSim.reset(); pingSim = PingSim();
@@ -327,12 +328,12 @@ static void sc21() {
   { g_fs.clear();
     char buf[33];
     writeConfigValue(LittleFS, "/t.txt", "MyNetwork");
-    CHECK(readConfigValue(LittleFS, "/t.txt", buf, sizeof(buf)), "true, ha van tartalom");
+    CHECK(readConfigValue(LittleFS, "/t.txt", buf, sizeof(buf)) == (ConfigStatus)0, "CONFIG_OK, ha van tartalom");
     CHECK(std::string(buf) == "MyNetwork", "az érték visszaolvasva");
     writeConfigValue(LittleFS, "/t.txt", "");
-    CHECK(!readConfigValue(LittleFS, "/t.txt", buf, sizeof(buf)), "üres fájl -> false");
+    CHECK(readConfigValue(LittleFS, "/t.txt", buf, sizeof(buf)) == (ConfigStatus)0, "üres fájl -> CONFIG_OK (nincs érték, de nem hiba)");
     CHECK(buf[0] == '\0', "és a buffer ki lett ürítve");
-    CHECK(!readConfigValue(LittleFS, "/nincs.txt", buf, sizeof(buf)), "hiányzó fájl -> false");
+    CHECK(readConfigValue(LittleFS, "/nincs.txt", buf, sizeof(buf)) == (ConfigStatus)1, "hiányzó fájl -> CONFIG_MISSING");
     g_fs["/t.txt"] = "sor1\nsor2";
     readConfigValue(LittleFS, "/t.txt", buf, sizeof(buf));
     CHECK(std::string(buf) == "sor1", "csak az első sort olvassa");
@@ -423,13 +424,14 @@ static void scWDT4() {
 
 
 static void scFS1() {
-  // Nem csatolható fájlrendszer: a portál elindul, de a mentés nem hazudik sikert
+  // Nem csatolható fájlrendszer -> fsReady = false, és végzetes hiba
+  // (a részletes viselkedést az FT1 fedi)
   coldBoot(false, "", "", "", "");
   g_fsMountOk = false;
   try { setup(); } catch (DeepSleepSignal&) { CHECK(false, "nem szabadna elaludnia"); }
   CHECK(!fsReady, "fsReady = false");
-  CHECK(deviceMode == (DeviceMode)1, "a konfig portál ettől még elindul");
-  CHECK(!g_wdtEnabled || true, "a setup() végigfutott");
+  CHECK(deviceMode == (DeviceMode)2, "MODE_FATAL - mentés úgysem lenne lehetséges");
+  CHECK(g_wdtEnabled, "a watchdog hibajelzés közben is aktív");
 }
 
 static void scFS2() {
@@ -486,8 +488,130 @@ static void scFS6() {
   setup();
   char buf[33];
   memset(buf, 'X', sizeof(buf));
-  CHECK(!readConfigValue(LittleFS, "/nincs_ilyen.txt", buf, sizeof(buf)), "hiányzó fájl -> false");
+  CHECK(readConfigValue(LittleFS, "/nincs_ilyen.txt", buf, sizeof(buf)) == (ConfigStatus)1, "hiányzó fájl -> CONFIG_MISSING");
   CHECK(buf[0] == '\0', "a buffer akkor is ki lett ürítve");
+}
+
+
+static void scFT1() {
+  // Csatolhatatlan fájlrendszer -> végzetes hiba, NEM AP portál
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_fsMountOk = false;
+  setup();
+  CHECK(deviceMode == (DeviceMode)2, "MODE_FATAL");
+  CHECK(wifiSim.softApCount == 0, "NEM indult AP portál");
+  CHECK(wifiSim.beginCount == 0, "meg sem próbált csatlakozni");
+  CHECK(g_pinState[7] == LOW, "a relé LOW - a router kap áramot");
+}
+
+static void scFT2() {
+  // A fájl létezik, de nem olvasható -> végzetes hiba
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_fsReadable = false;
+  setup();
+  CHECK(deviceMode == (DeviceMode)2, "MODE_FATAL");
+  CHECK(wifiSim.softApCount == 0, "NEM indult AP portál");
+}
+
+static void scFT3() {
+  // ELSŐ INDÍTÁS: nincs egyetlen konfig fájl sem -> ez NEM hiba
+  coldBoot(false, "", "", "", "");
+  g_fs.clear();
+  setup();
+  CHECK(deviceMode == (DeviceMode)1, "MODE_CONFIG - AP portál, nem hibajelzés");
+  CHECK(wifiSim.softApCount == 1, "elindult az AP");
+}
+
+static void scFT4() {
+  // WIFIRESET UTÁN: a fájlok léteznek, de üresek -> ez sem hiba
+  coldBoot(false, "", "", "", "");
+  g_fs["/ssid.txt"] = ""; g_fs["/pass.txt"] = "";
+  g_fs["/ip.txt"] = "";   g_fs["/gateway.txt"] = "";
+  setup();
+  CHECK(deviceMode == (DeviceMode)1, "MODE_CONFIG - AP portál, nem hibajelzés");
+  CHECK(wifiSim.softApCount == 1, "elindult az AP");
+}
+
+static void scFT5() {
+  // A villogás: mindkét LED EGYSZERRE, gyorsan
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_fsMountOk = false;
+  setup();
+  g_log.clear();
+  int toggles = 0;
+  const uint32_t t0 = g_millis;
+  while (g_millis - t0 < 1000) {
+    const int before = g_pinState[6];
+    loop();
+    if (g_pinState[6] != before) {
+      toggles++;
+      CHECK(g_pinState[6] == g_pinState[5], "a két LED mindig azonos fázisban");
+      if (toggles > 2) break;   // ne árasszuk el a kimenetet
+    }
+  }
+  CHECK(toggles >= 2, "villog (1 mp alatt többször váltott)");
+
+  // periódus ellenőrzése: 100 ms-onként vált -> 1 mp alatt ~10 váltás
+  g_pinState[6] = LOW; g_pinState[5] = LOW;
+  int t2 = 0;
+  const uint32_t t1 = g_millis;
+  while (g_millis - t1 < 1000) {
+    const int before = g_pinState[6];
+    loop();
+    if (g_pinState[6] != before) t2++;
+  }
+  CHECK(t2 >= 8 && t2 <= 12, "~10 váltás másodpercenként (100 ms-os félperiódus)");
+}
+
+static void scFT6() {
+  // Hibajelzés közben is működjenek a gombok, és NE fusson az állapotgép
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_fsMountOk = false;
+  setup();
+  for (int i = 0; i < 50; i++) loop();
+  CHECK(pingSim.calls == 0, "nem futott internet teszt");
+  CHECK(g_pinState[7] == LOW, "a relé végig LOW maradt");
+
+  bool restarted = false;
+  g_pinRead[3] = LOW;
+  try { loop(); g_millis += 100; loop(); }
+  catch (RestartSignal&) { restarted = true; }
+  CHECK(restarted, "a reset gomb hibajelzés közben is újraindít");
+}
+
+
+static void scFT7() {
+  // 5 perc hibajelzés után alvás - IDŐZÍTETT ÉBRESZTÉS NÉLKÜL
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_fsMountOk = false;
+  setup();
+  CHECK(deviceMode == (DeviceMode)2, "MODE_FATAL");
+
+  bool slept = false; uint64_t us = 1;
+  const uint32_t t0 = g_millis;
+  try {
+    while (g_millis - t0 < 6u * 60 * 1000) loop();
+  } catch (DeepSleepSignal& d) { slept = true; us = d.us; }
+
+  CHECK(slept, "elaludt");
+  const uint32_t elapsed = g_millis - t0;
+  CHECK(elapsed >= 5u * 60 * 1000, "csak 5 perc után (nem korábban)");
+  CHECK(elapsed < 5u * 60 * 1000 + 2000, "és nem sokkal később");
+  CHECK(us == 0, "NINCS időzített ébresztés - magától nem ébred fel");
+  CHECK(g_gpioWakeMask == (1ULL << 3), "a reset gomb viszont felébreszti");
+  CHECK(g_pinState[7] == LOW, "a relé LOW - a router kap áramot alvás közben is");
+  CHECK(logIndex("wakeup_disable_all") < logIndex("DEEP_SLEEP"),
+        "előbb minden ébresztőforrást töröltünk");
+}
+
+static void scFT8() {
+  // A normál (nem végzetes) elalvás viszont továbbra is időzítve ébred
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  wifiSim.willConnect = false; wifiSim.begun = false;
+  uint64_t us = 0;
+  try { reconnectWifi(); } catch (DeepSleepSignal& d) { us = d.us; }
+  CHECK(us == 3600ULL * 1000000ULL, "1 órás ébresztés megmaradt a normál útvonalon");
 }
 
 struct Scenario { const char* name; void (*fn)(); };
@@ -526,6 +650,14 @@ static const Scenario kScenarios[] = {
   { "FS4: visszaolvasásos ellenőrzés kiszúrja a hibás tartalmat", scFS4 },
   { "FS5: törlés tartalék útvonala (csonkolás -> remove)", scFS5 },
   { "FS6: hiányzó fájl olvasása", scFS6 },
+  { "FT1: csatolhatatlan LittleFS -> hibajelzés, nem AP portál", scFT1 },
+  { "FT2: létező de olvashatatlan konfig -> hibajelzés", scFT2 },
+  { "FT3: első indítás (nincs fájl) -> AP portál, NEM hiba", scFT3 },
+  { "FT4: wifireset után (üres fájlok) -> AP portál, NEM hiba", scFT4 },
+  { "FT5: mindkét LED egyszerre, gyorsan villog", scFT5 },
+  { "FT6: hibajelzés közben nem fut az állapotgép, a gombok élnek", scFT6 },
+  { "FT7: 5 perc hibajelzés után alvás, időzített ébresztés NÉLKÜL", scFT7 },
+  { "FT8: a normál elalvás továbbra is 1 óra múlva ébred", scFT8 },
 };
 
 

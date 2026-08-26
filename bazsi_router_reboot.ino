@@ -92,6 +92,11 @@ constexpr uint32_t BUTTON_DEBOUNCE_MS = 50;
 // Gombok mintavételi köze. 10 ms bőven elég az 50 ms-os debounce-hoz, viszont
 // delay()-jel várunk, nem yield()-del, így a CPU nem pörög üresen.
 constexpr uint32_t BUTTON_POLL_MS = 10;
+// Végzetes hiba jelzése: mindkét LED együtt, gyorsan villog (5 Hz).
+constexpr uint32_t FATAL_BLINK_MS = 100;
+// Ennyi hibajelzés után az ESP elalszik. Időzített ébresztés NÉLKÜL: csak a
+// reset gomb vagy az áramtalanítás hozza vissza.
+constexpr uint32_t FATAL_SLEEP_AFTER_MS = 5 * 60 * 1000;
 // Watchdog timeout. Nagyobb kell, mint a leghosszabb olyan blokkolás, amit NEM
 // tudunk etetni: a http.GET() a connect (5 mp) + válasz (10 mp) timeouttal
 // együtt ~15 mp-ig tarthat. 90 mp így hatszoros tartalékot ad.
@@ -124,6 +129,8 @@ struct TimingState {
   uint32_t startMillis = 0;            // setup() időbélyege
   uint32_t resetBtnDownSince = 0;      // debounce: mióta LOW a reset gomb
   uint32_t wifiResetBtnDownSince = 0;  // debounce: mióta LOW a wifireset gomb
+  uint32_t blinkLast = 0;              // hibajelző villogás
+  uint32_t fatalStart = 0;             // mióta tart a hibajelzés
 };
 
 struct UIFlags {
@@ -131,6 +138,7 @@ struct UIFlags {
   bool resetPrinted = false;       // volt: beginResetPrinted
   bool firstStartPrinted = false;  // volt: firstStartPrinted
   bool firstStart = true;          // volt: firstStart
+  bool blinkOn = false;            // hibajelző LED állapot
 };
 
 TestState testState;
@@ -146,7 +154,16 @@ enum State : uint8_t {
 // Az eszköz vagy a routert figyeli, vagy a Wi-Fi beállító portált szolgálja ki.
 enum DeviceMode : uint8_t {
   MODE_MONITOR = 0,
-  MODE_CONFIG = 1
+  MODE_CONFIG = 1,
+  MODE_FATAL = 2  // a konfiguráció nem tölthető be: a program nem fut tovább
+};
+
+// A konfiguráció betöltésének háromféle kimenetele. A hiányzó fájl NEM hiba:
+// ez az állapot az első indításnál és a wifireset gomb után is normális.
+enum ConfigStatus : uint8_t {
+  CONFIG_OK = 0,       // beolvasva (az érték lehet üres is)
+  CONFIG_MISSING = 1,  // a fájl nem létezik -> nincs még konfiguráció
+  CONFIG_ERROR = 2     // a fájl létezik, de nem olvasható -> végzetes hiba
 };
 
 State currentState = TESTING_STATE;
@@ -167,6 +184,8 @@ void wifiresetbutton();
 void blockingDelay(uint32_t duration);
 void waitWithButtons(uint32_t duration);
 void tosleep();
+void fatalSleep();
+void enterDeepSleep(uint64_t timerUs);
 bool initWiFi();
 bool reconnectWifi();
 bool writeConfigValue(fs::FS& fs, const char* path, const char* message);
@@ -232,30 +251,43 @@ bool fileMatches(fs::FS& fs, const char* path, const char* value, size_t len) {
 }
 
 // Egy konfigurációs érték beolvasása fix méretű bufferbe (String allokáció nélkül)
-bool readConfigValue(fs::FS& fs, const char* path, char* out, size_t outSize) {
+ConfigStatus readConfigValue(fs::FS& fs, const char* path, char* out, size_t outSize) {
   out[0] = '\0';
+
+  // A hiányzó fájl nem hiba: első indításkor és wifireset után is ez a helyzet.
+  if (!fs.exists(path)) {
+    Serial.printf("- %s missing (no config yet)\r\n", path);
+    return CONFIG_MISSING;
+  }
+
   File file = fs.open(path);
   if (!file || file.isDirectory()) {
     Serial.printf("- failed to open %s for reading\r\n", path);
     if (file) {
       file.close();
     }
-    return false;
+    return CONFIG_ERROR;
   }
   // Méret szerint olvasunk: a Stream::readBytesUntil() EOF-nál kivárná a teljes
   // 1 másodperces stream-timeoutot, fájlonként (indulásnál ez 4 mp veszteség).
   const size_t fileSize = file.size();
   const size_t toRead = (fileSize < outSize - 1) ? fileSize : outSize - 1;
   const size_t n = file.read((uint8_t*)out, toRead);
-  out[n] = '\0';
   file.close();
+  if (n != toRead) {
+    Serial.printf("- short read on %s (%u / %u)\r\n", path, (unsigned)n, (unsigned)toRead);
+    out[0] = '\0';
+    return CONFIG_ERROR;
+  }
+  out[n] = '\0';
 
   char* nl = strchr(out, '\n');  // csak az első sor érdekel
   if (nl != nullptr) {
     *nl = '\0';
   }
   trimInPlace(out);
-  return out[0] != '\0';
+  // Az üres tartalom is érvényes eredmény: a wifireset csonkolt fájlt hagy hátra.
+  return CONFIG_OK;
 }
 
 // Írás ellenőrzéssel. true csak akkor, ha a tartalom vissza is olvasható.
@@ -304,6 +336,22 @@ bool clearConfigValue(fs::FS& fs, const char* path) {
   }
   Serial.println("- FAILED to clear file!");
   return false;
+}
+
+// Végzetes hiba: a konfiguráció nem tölthető be. Ilyenkor a program nem fut
+// tovább (nincs teszt, nincs relé kapcsolás, nincs elalvás), csak jelez.
+void enterFatal(const char* reason) {
+  deviceMode = MODE_FATAL;
+  timing.fatalStart = millis();
+  timing.blinkLast = timing.fatalStart;
+  digitalWrite(relayPin, LOW);  // a router mindenképp kapjon áramot
+  Serial.println();
+  Serial.println("!!! VEGZETES HIBA !!!");
+  Serial.println(reason);
+  Serial.println("A program leallt, mindket LED gyorsan villog.");
+  Serial.println("Reset gomb: ujraindítas. Wifireset gomb: mentett adatok torlese.");
+  Serial.print(FATAL_SLEEP_AFTER_MS / 60000);
+  Serial.println(" perc mulva az eszkoz elalszik (magatol nem ebred fel).");
 }
 
 // Lefagyás elleni védelem.
@@ -366,6 +414,7 @@ void handleStuckButton(const char* message) {
   Serial.println(message);
   digitalWrite(ledPin, LOW);
   Serial.flush();
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
   esp_sleep_enable_timer_wakeup(STUCK_BUTTON_SLEEP_US);
   esp_deep_sleep_start();
 }
@@ -500,25 +549,25 @@ bool reset_device() {
 // alatt LEBEG - szoftverből nem tartható. A relé vezérlőbemenetére külső
 // lehúzó ellenállás kell (aktív-HIGH modulnál 10k GND felé), különben az
 // alvás alatt véletlenül áramtalaníthatja a routert.
-void tosleep() {
+// Közös elalvás. timerUs = 0 esetén NINCS időzített ébresztés: az eszköz
+// magától nem tér vissza, csak a reset gombra vagy áramtalanításra.
+void enterDeepSleep(uint64_t timerUs) {
   digitalWrite(ledPin, LOW);  //led gnd, led off
   digitalWrite(relayPin, LOW);
   digitalWrite(wifiledPin, LOW);
-  printUptime();
-  Serial.print("Failed ");
-  Serial.print(maxfailureEvents);
-  Serial.println(" NCSI activity test, or WIFI disconnected, go to sleep ESP32-C3 device.");
-  Serial.println("Going to sleep now");
   WiFi.disconnect(true);
   server.end();
   Serial.flush();
   Serial.end();
 
-  esp_sleep_enable_timer_wakeup(SLEEP_DURATION_US);
+  // Tiszta lappal indulunk, hogy biztosan csak az legyen élesítve, amit akarunk.
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+  if (timerUs > 0) {
+    esp_sleep_enable_timer_wakeup(timerUs);
+  }
 #if SOC_GPIO_SUPPORT_DEEPSLEEP_WAKEUP
-  // A reset gomb ébressze is fel az eszközt, ne csak az 1 órás timer.
-  // Csak RTC-képes láb használható (ESP32-C3: GPIO0-GPIO5); a resetPin a
-  // XIAO ESP32-C3-on D1 = GPIO3, tehát megfelel.
+  // A reset gomb ébressze fel az eszközt. Csak RTC-képes láb használható
+  // (ESP32-C3: GPIO0-GPIO5); a resetPin a XIAO ESP32-C3-on D1 = GPIO3.
   // Szándékosan NINCS itt a wifireset gomb, és a handleStuckButton() sem
   // armol gombébresztést: egy beragadt gomb így nem tud boot loopot okozni.
   // Az IDF 6.0 átnevezte ezt az API-t, az arduino-esp32 pedig idf ">=5.3,<6.2"
@@ -530,6 +579,24 @@ void tosleep() {
 #endif
 #endif
   esp_deep_sleep_start();
+}
+
+void tosleep() {
+  printUptime();
+  Serial.print("Failed ");
+  Serial.print(maxfailureEvents);
+  Serial.println(" NCSI activity test, or WIFI disconnected, go to sleep ESP32-C3 device.");
+  Serial.println("Going to sleep now");
+  enterDeepSleep(SLEEP_DURATION_US);  // 1 óra múlva magától újrapróbálja
+}
+
+// Végzetes hiba után elalvás. Időzített ébresztés NINCS: a hiba magától nem
+// múlik el, ezért értelmetlen lenne óránként felébredni és újra villogni.
+void fatalSleep() {
+  printUptime();
+  Serial.println("5 perc hibajelzes utan az ESP elalszik.");
+  Serial.println("Idozitett ebresztes NINCS - reset gomb vagy aramtalanitas kell.");
+  enterDeepSleep(0);
 }
 
 void resetbutton() {
@@ -917,11 +984,25 @@ void setup() {
 
   Serial.println("Init LittleFS.");
   fsReady = initLittleFS();
-  // Load values saved in LittleFS
-  readConfigValue(LittleFS, ssidPath, ssid, sizeof(ssid));
-  readConfigValue(LittleFS, passPath, pass, sizeof(pass));
-  readConfigValue(LittleFS, ipPath, ipStr, sizeof(ipStr));
-  readConfigValue(LittleFS, gatewayPath, gatewayStr, sizeof(gatewayStr));
+
+  if (!fsReady) {
+    // A konfigurációt tároló fájlrendszer nem elérhető. Ez NEM azonos azzal,
+    // hogy nincs még konfiguráció - itt tényleg hiba van.
+    enterFatal("A LittleFS nem csatolhato, a wifi konfiguracio nem toltheto be.");
+  } else {
+    // Load values saved in LittleFS
+    ConfigStatus st = CONFIG_OK;
+    if (readConfigValue(LittleFS, ssidPath, ssid, sizeof(ssid)) == CONFIG_ERROR) st = CONFIG_ERROR;
+    if (readConfigValue(LittleFS, passPath, pass, sizeof(pass)) == CONFIG_ERROR) st = CONFIG_ERROR;
+    if (readConfigValue(LittleFS, ipPath, ipStr, sizeof(ipStr)) == CONFIG_ERROR) st = CONFIG_ERROR;
+    if (readConfigValue(LittleFS, gatewayPath, gatewayStr, sizeof(gatewayStr)) == CONFIG_ERROR) st = CONFIG_ERROR;
+
+    if (st == CONFIG_ERROR) {
+      // A fájl létezik, de nem olvasható: sérült fájlrendszer. Ilyenkor nem
+      // indulunk AP módba sem, mert a mentés is elbukna - inkább jelzünk.
+      enterFatal("A mentett wifi konfiguracio nem olvashato (serult fajlrendszer).");
+    }
+  }
 
   Serial.println(ssid);
   Serial.print((unsigned)strlen(pass));
@@ -932,16 +1013,16 @@ void setup() {
   // Ne írjuk a hitelesítő adatokat minden WiFi.begin()-nél az NVS-be (flash kímélés)
   WiFi.persistent(false);
 
-  if (initWiFi()) {
-    Serial.println("WIFI OK!");
-    deviceMode = MODE_MONITOR;
-    digitalWrite(wifiledPin, HIGH);  //led on
-  } else {
-    // Nincs használható Wi-Fi: konfigurációs portál AP módban.
-    if (!fsReady) {
-      Serial.println("⚠️ LittleFS mount failed - the config page cannot be served!");
+  // Végzetes hibánál nem próbálkozunk sem csatlakozással, sem AP portállal.
+  if (deviceMode != MODE_FATAL) {
+    if (initWiFi()) {
+      Serial.println("WIFI OK!");
+      deviceMode = MODE_MONITOR;
+      digitalWrite(wifiledPin, HIGH);  //led on
+    } else {
+      // Nincs használható Wi-Fi (üres vagy hiányzó konfig): AP módú portál.
+      startConfigPortal();
     }
-    startConfigPortal();
   }
 
   // Utolsó lépés: innentől figyeli a watchdog a loop()-ot. A setup() saját
@@ -958,6 +1039,27 @@ void loop() {
     Serial.println("RESTART!");
     Serial.flush();
     ESP.restart();
+  }
+
+  if (deviceMode == MODE_FATAL) {
+    // Mindkét LED együtt, gyorsan villog. A program szándékosan nem fut
+    // tovább: nem tesztel, nem kapcsolja a relét, nem alszik el.
+    if (currentMillis - timing.blinkLast >= FATAL_BLINK_MS) {
+      timing.blinkLast = currentMillis;
+      uiFlags.blinkOn = !uiFlags.blinkOn;
+      digitalWrite(ledPin, uiFlags.blinkOn ? HIGH : LOW);
+      digitalWrite(wifiledPin, uiFlags.blinkOn ? HIGH : LOW);
+    }
+    // A hiba magától nem múlik el: 5 perc jelzés után elalszunk, hogy ne
+    // fogyasszunk és ne villogjunk feleslegesen napokig.
+    if (currentMillis - timing.fatalStart >= FATAL_SLEEP_AFTER_MS) {
+      fatalSleep();
+    }
+    // A gombok élnek, hogy újraindítani vagy resetelni lehessen az eszközt.
+    resetbutton();
+    wifiresetbutton();
+    delay(BUTTON_POLL_MS);
+    return;
   }
 
   if (deviceMode == MODE_CONFIG) {

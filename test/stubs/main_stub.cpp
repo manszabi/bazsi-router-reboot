@@ -14,6 +14,7 @@ bool g_fsMountOk = true;
 bool   g_fsWritable = true;
 size_t g_fsCapacity = 0;
 bool   g_fsRemoveOk = true;
+bool   g_fsReadable = true;
 size_t g_fsUsed() { size_t n = 0; for (auto& kv : g_fs) n += kv.second.size(); return n; }
 uint64_t g_wakeupUs = 0;
 uint64_t g_gpioWakeMask = 0;
@@ -81,6 +82,10 @@ void esp_sleep_enable_timer_wakeup(uint64_t us) { g_wakeupUs = us; simLog("timer
 void esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown(uint64_t mask, int mode) {
   g_gpioWakeMask = mask; g_gpioWakeMode = mode;
   simLog("gpio_wakeup(mask=" + std::to_string(mask) + ",mode=" + std::to_string(mode) + ")");
+}
+void esp_sleep_disable_wakeup_source(int) {
+  g_wakeupUs = 0; g_gpioWakeMask = 0; g_gpioWakeMode = -1;
+  simLog("wakeup_disable_all");
 }
 void esp_deep_sleep_start() { simLog("DEEP_SLEEP"); throw DeepSleepSignal{g_wakeupUs}; }
 size_t strlcpy(char* d, const char* s, size_t n) {

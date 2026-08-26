@@ -48,6 +48,8 @@ extern bool     g_wdtTrack;
 int64_t esp_timer_get_time();
 void esp_sleep_enable_timer_wakeup(uint64_t);
 void esp_deep_sleep_start();
+void esp_sleep_disable_wakeup_source(int);
+#define ESP_SLEEP_WAKEUP_ALL 0
 void esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown(uint64_t, int);
 #define ESP_GPIO_WAKEUP_GPIO_LOW 0
 #define BIT(n) (1ULL << (n))

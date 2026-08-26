@@ -132,7 +132,7 @@ Az eszköz három állapotban működik:
 |---|---|
 | **Elalvás oka** | 5 sikertelen router reset, vagy sikertelen Wi-Fi újracsatlakozás |
 | **Alvás hossza** | 1 óra (timer), vagy 60 mp beragadt gomb esetén |
-| **Ébresztés** | timer **vagy** a reset gomb (D1) lenyomása |
+| **Ébresztés** | timer **vagy** a reset gomb (D1) lenyomása. Végzetes hiba utáni alvásnál **csak a gomb** |
 | **Ébredés után** | teljes újraindulás – a `setup()` fut le elölről |
 
 Az ESP32-C3 deep sleepből mindig **újraindulással** ébred: a RAM tartalma elvész,
@@ -300,6 +300,31 @@ IDF már eleve kezeli.
 > változat a 90 mp-es relé pulzus alatt 100%-on pörgette a CPU-t; a `delay()`
 > `vTaskDelay()`-re fordul, ami ténylegesen felfüggeszti a taskot.
 
+## 🚨 Végzetes hiba – a konfiguráció nem tölthető be
+
+A wifi beállítások a LittleFS-en vannak. Ha ezek **nem tölthetők be**, a program
+nem fut tovább: nem tesztel, nem kapcsolja a relét, és AP módba sem lép.
+Mindkét LED (`D3` és `D4`) **együtt, gyorsan villog** (5 Hz).
+
+Fontos a megkülönböztetés – a „nincs még konfiguráció" **nem hiba**:
+
+| Helyzet | Minősítés | Viselkedés |
+|---|---|---|
+| A konfig fájlok nem léteznek (első indítás) | `CONFIG_MISSING` | normális → **AP beállító portál** |
+| A fájlok léteznek, de üresek (wifireset után) | `CONFIG_OK`, üres érték | normális → **AP beállító portál** |
+| A LittleFS nem csatolható | hiba | **hibajelzés**, villogás |
+| A fájl létezik, de nem nyitható / hibás olvasás | `CONFIG_ERROR` | **hibajelzés**, villogás |
+
+Hibajelzés közben:
+
+- a **relé `LOW`** marad, tehát a router végig kap áramot
+- a **gombok élnek**: a reset gomb újraindít, a wifireset gomb törli a mentett adatokat
+- a watchdog aktív
+- **5 perc után az eszköz deep sleepbe megy** – és **időzített ébresztés nélkül**.
+  Egy sérült fájlrendszer magától nem gyógyul meg, ezért értelmetlen lenne
+  óránként felébredni és újra villogni. Visszahozni a **reset gombbal** vagy
+  áramtalanítással lehet.
+
 ## 💾 LittleFS hibakezelés
 
 A beállítások LittleFS-en tárolódnak, ezért minden fájlművelet hibája
@@ -307,8 +332,8 @@ kezelve van – és ami fontosabb, **egyik sem hazudik sikert**.
 
 | Hiba | Viselkedés |
 |---|---|
-| A fájlrendszer nem csatolható | Konkrét ok kiírása (a `begin()` csak `ESP_FAIL`-nél formáz, hiányzó partíciónál nem), `fsReady = false`, a portál ettől még elindul |
-| Hiányzó konfigurációs fájl | „nincs érték" – a buffer üresre állítva, DHCP / AP mód |
+| A fájlrendszer nem csatolható | Konkrét ok kiírása (a `begin()` csak `ESP_FAIL`-nél formáz, hiányzó partíciónál nem), majd végzetes hibajelzés – lásd fent |
+| Hiányzó konfigurációs fájl | `CONFIG_MISSING` – nem hiba, AP beállító portál |
 | A fájl nem nyitható írásra | `writeConfigValue()` `false`-t ad, a mentés nem történik meg |
 | Rövid írás (megtelt FS) | A `print()` visszatérési értéke ellenőrizve, `false` |
 | Az írás „sikerült", de a tartalom hibás | **Visszaolvasásos ellenőrzés** fogja meg |
