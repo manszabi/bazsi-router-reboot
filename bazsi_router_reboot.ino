@@ -154,6 +154,9 @@ DeviceMode deviceMode = MODE_MONITOR;
 
 // Az aszinkron webszerver callbackjéből nem szabad blokkolni/újraindítani,
 // ezért csak jelzünk, az újraindítást a loop() végzi el.
+// Sikerült-e a LittleFS csatolása. Ha nem, a beállítások nem menthetők.
+bool fsReady = false;
+
 volatile bool restartPending = false;
 volatile uint32_t restartAt = 0;
 
@@ -166,6 +169,7 @@ void waitWithButtons(uint32_t duration);
 void tosleep();
 bool initWiFi();
 bool reconnectWifi();
+bool writeConfigValue(fs::FS& fs, const char* path, const char* message);
 
 // Whitespace levágása helyben, allokáció nélkül
 void trimInPlace(char* s) {
@@ -185,10 +189,45 @@ void trimInPlace(char* s) {
 // Initialize LittleFS
 bool initLittleFS() {
   if (!LittleFS.begin(true)) {
-    Serial.println("An error has occurred while mounting LittleFS");
+    // A begin() csak ESP_FAIL esetén próbál formázni. Ha a partíció egyáltalán
+    // nincs meg, ESP_ERR_NOT_FOUND jön, és formázás nélkül elbukik.
+    Serial.println("LittleFS mount FAILED (a formázási kísérlet után is).");
+    Serial.println("Valószínű ok: a kiválasztott partíciós séma nem tartalmaz");
+    Serial.println("'spiffs' cimkéju partíciót (Arduino IDE: Tools > Partition Scheme).");
     return false;
   }
-  Serial.println("LittleFS mounted successfully");
+  Serial.print("LittleFS mounted, used ");
+  Serial.print(LittleFS.usedBytes());
+  Serial.print(" / ");
+  Serial.print(LittleFS.totalBytes());
+  Serial.println(" bytes");
+  return true;
+}
+
+// A kiírt tartalom ellenőrzése visszaolvasással. Erre azért van szükség, mert
+// a File::close() és a File::flush() is void: a lezáráskor jelentkező hibát
+// (pl. megtelt fájlrendszer) másképp nem lehetne észrevenni.
+bool fileMatches(fs::FS& fs, const char* path, const char* value, size_t len) {
+  File file = fs.open(path);
+  if (!file) {
+    return false;
+  }
+  if (file.size() != len) {
+    file.close();
+    return false;
+  }
+  char chunk[32];
+  size_t off = 0;
+  while (off < len) {
+    const size_t want = (len - off > sizeof(chunk)) ? sizeof(chunk) : (len - off);
+    const size_t got = file.read((uint8_t*)chunk, want);
+    if (got != want || memcmp(chunk, value + off, got) != 0) {
+      file.close();
+      return false;
+    }
+    off += got;
+  }
+  file.close();
   return true;
 }
 
@@ -219,31 +258,52 @@ bool readConfigValue(fs::FS& fs, const char* path, char* out, size_t outSize) {
   return out[0] != '\0';
 }
 
-void clearFile(fs::FS& fs, const char* path) {
-  Serial.printf("Clearing file: %s\r\n", path);
-  File file = fs.open(path, FILE_WRITE);
-  if (!file) {
-    Serial.println("- failed to open file for clearing");
-    return;
-  }
-  file.close();
-  Serial.println("- file cleared");
-}
-
-// Write file to LittleFS
-void writeFile(fs::FS& fs, const char* path, const char* message) {
+// Írás ellenőrzéssel. true csak akkor, ha a tartalom vissza is olvasható.
+bool writeConfigValue(fs::FS& fs, const char* path, const char* message) {
   Serial.printf("Writing file: %s\r\n", path);
+  const size_t len = strlen(message);
+
   File file = fs.open(path, FILE_WRITE);
   if (!file) {
     Serial.println("- failed to open file for writing");
-    return;
+    return false;
   }
-  if (file.print(message)) {
-    Serial.println("- file written");
-  } else {
-    Serial.println("- write failed or empty file");
-  }
+  // Üres értéknél a print() jogosan ad 0-t; ez nem hiba, csak csonkolás.
+  const size_t written = (len > 0) ? file.print(message) : 0;
+  file.flush();
   file.close();
+
+  if (written != len) {
+    Serial.print("- short write: ");
+    Serial.print((unsigned)written);
+    Serial.print(" / ");
+    Serial.print((unsigned)len);
+    Serial.println(" bájt (megtelt a fájlrendszer?)");
+    return false;
+  }
+  if (!fileMatches(fs, path, message, len)) {
+    Serial.println("- verify FAILED: a visszaolvasott tartalom nem egyezik");
+    return false;
+  }
+  Serial.println("- file written");
+  return true;
+}
+
+// Érték törlése. Először csonkolással próbáljuk; ha az nem megy, a fájlt
+// magát töröljük - a readConfigValue() a hiányzó fájlt is "nincs érték"-ként
+// kezeli, tehát a végeredmény ugyanaz.
+bool clearConfigValue(fs::FS& fs, const char* path) {
+  Serial.printf("Clearing file: %s\r\n", path);
+  if (writeConfigValue(fs, path, "")) {
+    Serial.println("- file cleared");
+    return true;
+  }
+  if (fs.remove(path)) {
+    Serial.println("- file removed instead");
+    return true;
+  }
+  Serial.println("- FAILED to clear file!");
+  return false;
 }
 
 // Lefagyás elleni védelem.
@@ -504,10 +564,15 @@ void wifiresetbutton() {
   if (now - timing.wifiResetBtnDownSince >= BUTTON_DEBOUNCE_MS) {
     Serial.println("WIFIRESET button is pulling down!");
     Serial.println("RESET saved wifi data!");
-    clearFile(LittleFS, gatewayPath);
-    clearFile(LittleFS, ipPath);
-    clearFile(LittleFS, passPath);
-    clearFile(LittleFS, ssidPath);
+    bool cleared = true;
+    cleared &= clearConfigValue(LittleFS, gatewayPath);
+    cleared &= clearConfigValue(LittleFS, ipPath);
+    cleared &= clearConfigValue(LittleFS, passPath);
+    cleared &= clearConfigValue(LittleFS, ssidPath);
+    if (!cleared) {
+      // Az újraindítás után a régi adatokkal jönne fel - legalább tudja a felhasználó.
+      Serial.println("!!! A mentett wifi adatok törlése NEM sikerült !!!");
+    }
     Serial.println("RESTART ESP32C3 device.");
     Serial.flush();
     ESP.restart();
@@ -720,6 +785,15 @@ void startConfigPortal() {
   });
 
   server.on("/", HTTP_POST, [](AsyncWebServerRequest* request) {
+    if (!fsReady) {
+      // Nincs értelme menteni: a fájlrendszer nem áll rendelkezésre.
+      request->send(500, "text/plain",
+                    "LittleFS nem elerheto, a beallitasok nem menthetok. "
+                    "Ellenorizd a particios semat (Tools > Partition Scheme).");
+      return;
+    }
+
+    bool saveOk = true;
     const int params = request->params();
     for (int i = 0; i < params; i++) {
       const AsyncWebParameter* p = request->getParam(i);
@@ -734,7 +808,7 @@ void startConfigPortal() {
           strlcpy(ssid, val.c_str(), sizeof(ssid));
           Serial.print("SSID set to: ");
           Serial.println(ssid);
-          writeFile(LittleFS, ssidPath, ssid);
+          saveOk &= writeConfigValue(LittleFS, ssidPath, ssid);
         } else {
           Serial.println("Invalid SSID length!");
         }
@@ -744,7 +818,7 @@ void startConfigPortal() {
           Serial.print("Password set to: ");
           Serial.print(val.length());
           Serial.println(" chars");
-          writeFile(LittleFS, passPath, pass);
+          saveOk &= writeConfigValue(LittleFS, passPath, pass);
         } else {
           Serial.println("Password too long!");
         }
@@ -753,12 +827,12 @@ void startConfigPortal() {
         if (val.length() == 0) {
           ipStr[0] = '\0';
           Serial.println("IP empty, using DHCP.");
-          writeFile(LittleFS, ipPath, "");
+          saveOk &= writeConfigValue(LittleFS, ipPath, "");
         } else if (val.length() <= IPSTR_MAX_LEN && testIP.fromString(val.c_str())) {
           strlcpy(ipStr, val.c_str(), sizeof(ipStr));
           Serial.print("IP Address set to: ");
           Serial.println(ipStr);
-          writeFile(LittleFS, ipPath, ipStr);
+          saveOk &= writeConfigValue(LittleFS, ipPath, ipStr);
         } else {
           Serial.println("Invalid IP format!");
         }
@@ -767,12 +841,12 @@ void startConfigPortal() {
         if (val.length() == 0) {
           gatewayStr[0] = '\0';
           Serial.println("Gateway empty, using DHCP.");
-          writeFile(LittleFS, gatewayPath, "");
+          saveOk &= writeConfigValue(LittleFS, gatewayPath, "");
         } else if (val.length() <= IPSTR_MAX_LEN && testIP.fromString(val.c_str())) {
           strlcpy(gatewayStr, val.c_str(), sizeof(gatewayStr));
           Serial.print("Gateway set to: ");
           Serial.println(gatewayStr);
-          writeFile(LittleFS, gatewayPath, gatewayStr);
+          saveOk &= writeConfigValue(LittleFS, gatewayPath, gatewayStr);
         } else {
           Serial.println("Invalid gateway format!");
         }
@@ -784,6 +858,16 @@ void startConfigPortal() {
       } else {
         Serial.printf("POST[%s]: %s\n", name.c_str(), val.c_str());
       }
+    }
+
+    if (!saveOk) {
+      // Ne hazudjunk sikert és főleg ne indítsunk újra: az újraindítás
+      // eldobná a beírt adatokat, a felhasználó pedig ugyanitt kötne ki.
+      Serial.println("A beallitasok mentese SIKERTELEN.");
+      request->send(500, "text/plain",
+                    "A beallitasok mentese nem sikerult (LittleFS irasi hiba). "
+                    "Az eszkoz NEM indul ujra, probald meg ismet.");
+      return;
     }
 
     char message[96];
@@ -832,7 +916,7 @@ void setup() {
   }
 
   Serial.println("Init LittleFS.");
-  const bool fsReady = initLittleFS();
+  fsReady = initLittleFS();
   // Load values saved in LittleFS
   readConfigValue(LittleFS, ssidPath, ssid, sizeof(ssid));
   readConfigValue(LittleFS, passPath, pass, sizeof(pass));

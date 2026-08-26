@@ -300,6 +300,30 @@ IDF már eleve kezeli.
 > változat a 90 mp-es relé pulzus alatt 100%-on pörgette a CPU-t; a `delay()`
 > `vTaskDelay()`-re fordul, ami ténylegesen felfüggeszti a taskot.
 
+## 💾 LittleFS hibakezelés
+
+A beállítások LittleFS-en tárolódnak, ezért minden fájlművelet hibája
+kezelve van – és ami fontosabb, **egyik sem hazudik sikert**.
+
+| Hiba | Viselkedés |
+|---|---|
+| A fájlrendszer nem csatolható | Konkrét ok kiírása (a `begin()` csak `ESP_FAIL`-nél formáz, hiányzó partíciónál nem), `fsReady = false`, a portál ettől még elindul |
+| Hiányzó konfigurációs fájl | „nincs érték" – a buffer üresre állítva, DHCP / AP mód |
+| A fájl nem nyitható írásra | `writeConfigValue()` `false`-t ad, a mentés nem történik meg |
+| Rövid írás (megtelt FS) | A `print()` visszatérési értéke ellenőrizve, `false` |
+| Az írás „sikerült", de a tartalom hibás | **Visszaolvasásos ellenőrzés** fogja meg |
+| A törlés (csonkolás) nem megy | Tartalék: a fájl törlése `remove()`-val |
+| Mentés a beállító oldalról | Hiba esetén HTTP 500 magyarázattal és **nincs újraindítás** |
+
+A visszaolvasás azért kell, mert a `File::close()` és a `File::flush()` is
+`void` a core-ban – a lezáráskor jelentkező hibát másképp nem lehetne észlelni.
+
+A beállító oldalról mentés hibája korábban a legkellemetlenebb módon jelent
+volna meg: az eszköz „Done"-t válaszol, újraindul, és mivel nem mentett semmit,
+ismét AP módban jön fel – a felhasználó pedig végtelen körben próbálkozik
+magyarázat nélkül. Most a hibát megkapja, és az eszköz nem indul újra, tehát a
+beírt adatok sem vesznek el.
+
 ## 🔒 Biztonság
 
 - A LittleFS-en tárolt Wi-Fi adatok (`/ssid.txt`, `/pass.txt`, `/ip.txt`,

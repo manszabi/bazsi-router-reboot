@@ -4,6 +4,10 @@
 
 extern std::map<std::string,std::string> g_fs;
 extern bool g_fsMountOk;
+extern bool   g_fsWritable;   // false = minden megnyitás írásra elbukik
+extern size_t g_fsCapacity;   // 0 = korlátlan; egyébként a tárolható összméret
+extern bool   g_fsRemoveOk;   // a remove() sikerül-e
+extern size_t g_fsUsed();
 
 class File : public Stream {
 public:
@@ -19,7 +23,25 @@ public:
     size_t c = n < data_.size() - pos_ ? n : data_.size() - pos_;
     memcpy(b, data_.data() + pos_, c); pos_ += c; return c;
   }
-  size_t print(const char* s) { g_fs[path_] = s; return strlen(s) ? strlen(s) : 1; }
+  // Szimulált írás: a kapacitás túllépésekor rövidebb visszatérési érték,
+  // mint a valóságban egy megtelt fájlrendszernél.
+  size_t print(const char* s) {
+    if (!ok_) return 0;
+    std::string want(s);
+    if (g_fsCapacity) {
+      size_t other = 0;
+      for (auto& kv : g_fs) if (kv.first != path_) other += kv.second.size();
+      if (other + want.size() > g_fsCapacity) {
+        size_t room = g_fsCapacity > other ? g_fsCapacity - other : 0;
+        want = want.substr(0, room);
+        g_fs[path_] = want;
+        return want.size();
+      }
+    }
+    g_fs[path_] = want;
+    return want.size();
+  }
+  void flush() {}
 private:
   std::string path_, data_; size_t pos_ = 0; bool ok_;
 };
@@ -29,8 +51,15 @@ class FS {
 public:
   File open(const char* p) { return File(p, g_fs.count(p) > 0); }
   File open(const char* p, const char* mode) {
-    (void)mode; g_fs[p] = ""; return File(p, true);
+    (void)mode;
+    if (!g_fsWritable) return File();   // nem nyitható írásra
+    g_fs[p] = "";                        // FILE_WRITE csonkol
+    return File(p, true);
   }
+  bool remove(const char* p) { if (!g_fsRemoveOk) return false; return g_fs.erase(p) > 0; }
+  bool remove(const String& p) { return remove(p.c_str()); }
+  size_t totalBytes() { return g_fsCapacity ? g_fsCapacity : 1048576; }
+  size_t usedBytes() { return g_fsUsed(); }
   bool begin(bool) { return g_fsMountOk; }
   bool exists(const char* p) { return g_fs.count(p) > 0; }
   bool exists(const String& p) { return g_fs.count(p.c_str()) > 0; }

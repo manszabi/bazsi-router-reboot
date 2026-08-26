@@ -11,6 +11,10 @@ std::map<int,int> g_pinRead;
 bool g_serialOn = false;
 std::map<std::string,std::string> g_fs;
 bool g_fsMountOk = true;
+bool   g_fsWritable = true;
+size_t g_fsCapacity = 0;
+bool   g_fsRemoveOk = true;
+size_t g_fsUsed() { size_t n = 0; for (auto& kv : g_fs) n += kv.second.size(); return n; }
 uint64_t g_wakeupUs = 0;
 uint64_t g_gpioWakeMask = 0;
 int g_gpioWakeMode = -1;

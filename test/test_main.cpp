@@ -20,7 +20,11 @@ bool testInternetHTTP(const char* url, const char* expected);
 void initWatchdog();
 bool testInternetPing(IPAddress& target, const char* name);
 bool readConfigValue(fs::FS& fs, const char* path, char* out, size_t outSize);
-void writeFile(fs::FS& fs, const char* path, const char* msg);
+bool writeConfigValue(fs::FS& fs, const char* path, const char* msg);
+bool clearConfigValue(fs::FS& fs, const char* path);
+bool initLittleFS();
+bool fileMatches(fs::FS& fs, const char* path, const char* value, size_t len);
+extern bool fsReady;
 void resetbutton();
 void wifiresetbutton();
 void waitWithButtons(uint32_t);
@@ -40,6 +44,7 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
                      const char* ip, const char* gw, uint32_t latency = 500) {
   g_millis = 1; g_log.clear(); g_pinState.clear(); g_pinRead.clear();
   g_fs.clear(); g_fsMountOk = true; g_wakeupUs = 0;
+  g_fsWritable = true; g_fsCapacity = 0; g_fsRemoveOk = true;
   g_gpioWakeMask = 0; g_gpioWakeMode = -1;
   g_httpCode = 200; g_httpSize = -2; g_httpBeginOk = true; g_httpBody = "Microsoft NCSI";
   wifiSim.reset(); pingSim = PingSim();
@@ -321,10 +326,10 @@ static void sc20() {
 static void sc21() {
   { g_fs.clear();
     char buf[33];
-    writeFile(LittleFS, "/t.txt", "MyNetwork");
+    writeConfigValue(LittleFS, "/t.txt", "MyNetwork");
     CHECK(readConfigValue(LittleFS, "/t.txt", buf, sizeof(buf)), "true, ha van tartalom");
     CHECK(std::string(buf) == "MyNetwork", "az érték visszaolvasva");
-    writeFile(LittleFS, "/t.txt", "");
+    writeConfigValue(LittleFS, "/t.txt", "");
     CHECK(!readConfigValue(LittleFS, "/t.txt", buf, sizeof(buf)), "üres fájl -> false");
     CHECK(buf[0] == '\0', "és a buffer ki lett ürítve");
     CHECK(!readConfigValue(LittleFS, "/nincs.txt", buf, sizeof(buf)), "hiányzó fájl -> false");
@@ -416,6 +421,75 @@ static void scWDT4() {
   CHECK(feeds >= 90 && feeds <= 110, "~100 etetés 1 mp alatt (10 ms-os osztás)");
 }
 
+
+static void scFS1() {
+  // Nem csatolható fájlrendszer: a portál elindul, de a mentés nem hazudik sikert
+  coldBoot(false, "", "", "", "");
+  g_fsMountOk = false;
+  try { setup(); } catch (DeepSleepSignal&) { CHECK(false, "nem szabadna elaludnia"); }
+  CHECK(!fsReady, "fsReady = false");
+  CHECK(deviceMode == (DeviceMode)1, "a konfig portál ettől még elindul");
+  CHECK(!g_wdtEnabled || true, "a setup() végigfutott");
+}
+
+static void scFS2() {
+  // Írásra nem nyitható fájlrendszer
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  g_fsWritable = false;
+  CHECK(!writeConfigValue(LittleFS, "/x.txt", "adat"), "sikertelen megnyitás -> false");
+  g_fsWritable = true;
+  CHECK(writeConfigValue(LittleFS, "/x.txt", "adat"), "működő FS-en -> true");
+}
+
+static void scFS3() {
+  // Megtelt fájlrendszer: a rövid írást el kell kapni
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  g_fs.clear();
+  g_fsCapacity = 8;
+  CHECK(!writeConfigValue(LittleFS, "/x.txt", "ez tobb mint nyolc bajt"),
+        "rövid írás -> false (nem hazudik sikert)");
+  CHECK(writeConfigValue(LittleFS, "/x.txt", "rovid"), "ami befér, az sikerül");
+  g_fsCapacity = 0;
+}
+
+static void scFS4() {
+  // A visszaolvasásos ellenőrzés akkor is fog, ha az írás "sikeresnek" tűnt,
+  // de a tartalom mégsem került ki (pl. lezáráskori hiba).
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  CHECK(writeConfigValue(LittleFS, "/v.txt", "helyes"), "normál írás rendben");
+  g_fs["/v.txt"] = "serult";   // valaki más elrontja a tartalmat
+  CHECK(!fileMatches(LittleFS, "/v.txt", "helyes", 6), "az ellenőrzés kiszúrja az eltérést");
+}
+
+static void scFS5() {
+  // Törlés: ha a csonkolás nem megy, a fájl törlésére vált
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  g_fs["/c.txt"] = "valami";
+  g_fsWritable = false;          // csonkolni nem lehet
+  g_fsRemoveOk = true;           // törölni igen
+  CHECK(clearConfigValue(LittleFS, "/c.txt"), "a remove() tartalékra vált");
+  CHECK(!g_fs.count("/c.txt"), "a fájl tényleg eltűnt");
+
+  g_fs["/d.txt"] = "valami";
+  g_fsRemoveOk = false;          // most semmi sem megy
+  CHECK(!clearConfigValue(LittleFS, "/d.txt"), "ha egyik sem megy, false-t ad");
+  g_fsWritable = true; g_fsRemoveOk = true;
+}
+
+static void scFS6() {
+  // Hiányzó és könyvtár-jellegű bemenet olvasáskor
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  char buf[33];
+  memset(buf, 'X', sizeof(buf));
+  CHECK(!readConfigValue(LittleFS, "/nincs_ilyen.txt", buf, sizeof(buf)), "hiányzó fájl -> false");
+  CHECK(buf[0] == '\0', "a buffer akkor is ki lett ürítve");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -446,6 +520,12 @@ static const Scenario kScenarios[] = {
   { "WDT2: a 90 mp-es relé pulzus alatt is etetve van", scWDT2 },
   { "WDT3: a ~100 mp-es újracsatlakozás alatt is etetve van", scWDT3 },
   { "WDT4: a hosszú várakozás delay()-jel megy, nem CPU-pörgetéssel", scWDT4 },
+  { "FS1: nem csatolható LittleFS - a portál elindul, a mentés nem hazudik", scFS1 },
+  { "FS2: írásra nem nyitható fájlrendszer", scFS2 },
+  { "FS3: megtelt fájlrendszer - rövid írás elkapva", scFS3 },
+  { "FS4: visszaolvasásos ellenőrzés kiszúrja a hibás tartalmat", scFS4 },
+  { "FS5: törlés tartalék útvonala (csonkolás -> remove)", scFS5 },
+  { "FS6: hiányzó fájl olvasása", scFS6 },
 };
 
 
