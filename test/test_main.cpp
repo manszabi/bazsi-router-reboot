@@ -21,7 +21,7 @@ bool initWiFi(); bool reconnectWifi(); bool reset_device();
 void trimInPlace(char*);
 bool testInternetHTTP(const char* url, const char* expected);
 void initWatchdog();
-bool testInternetPing(IPAddress& target, const char* name);
+bool testInternetPing(const IPAddress& target, const char* name);
 enum ConfigStatus : uint8_t;
 ConfigStatus readConfigValue(fs::FS& fs, const char* path, char* out, size_t outSize);
 bool writeConfigValue(fs::FS& fs, const char* path, const char* msg);
@@ -39,7 +39,6 @@ void wifiresetbutton();
 void waitWithButtons(uint32_t);
 void touchApDeadline();
 void startConfigPortal();
-extern IPAddress pingTargetCloudflare;
 
 static int failures = 0, checks = 0;
 #define CHECK(cond, msg) do { checks++; if(!(cond)) { printf("  \033[31mFAIL\033[0m %s\n", msg); failures++; } \
@@ -338,14 +337,14 @@ static void sc18() {
 
 static void sc19() {
   pingSim = PingSim(); pingSim.ok = true;
-  CHECK(testInternetPing(pingTargetCloudflare, "Test"), "sikeres");
+  CHECK(testInternetPing(IPAddress(1, 1, 1, 1), "Test"), "sikeres");
   CHECK(pingSim.calls == 2, "csak 2 pinget futtatott a 4-ből (korai kilépés)");
 
 }
 
 static void sc20() {
   pingSim = PingSim(); pingSim.ok = false;
-  CHECK(!testInternetPing(pingTargetCloudflare, "Test"), "sikertelen");
+  CHECK(!testInternetPing(IPAddress(1, 1, 1, 1), "Test"), "sikertelen");
   CHECK(pingSim.calls == 3, "3 ping után eldőlt, a 4. felesleges lett volna");
 
   // ============ KONFIG I/O ============
@@ -1004,6 +1003,33 @@ static void scP7() {
   CHECK(apDeadline > before, "a kérés kitolta az 5 perces határidőt");
 }
 
+
+static void scCPU1() {
+  // A loop() a várakozó állapotokban átadja a CPU-t (delay), nem pörög.
+  // Enélkül a SUCCESS_STATE 1 percig 100%-on járatná a processzort.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpBody = "Microsoft Connect Test";
+  setup();
+  loop();                       // firstStart lezárása
+  loop();                       // teszt -> SUCCESS_STATE
+  CHECK(currentState == (State)2, "SUCCESS_STATE");
+  const uint32_t before = g_millis;
+  loop();
+  CHECK(g_millis > before, "a loop() ténylegesen várakozik (delay), nem pörög");
+  CHECK(g_millis - before <= 20, "de csak ~10 ms-ot, a válaszkészség megmarad");
+}
+
+static void scCPU2() {
+  // A 10 perces first start várakozás alatt sem pörög
+  coldBoot(false, "MyNetwork", "pw", "", "");
+  setup();
+  CHECK(deviceMode == (DeviceMode)0, "monitor mód, first start várakozás");
+  const uint32_t before = g_millis;
+  loop();
+  CHECK(g_millis > before, "a várakozás delay-jel megy");
+  CHECK(g_millis - before <= 20, "10 ms-os szemcsézettség");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -1072,6 +1098,8 @@ static const Scenario kScenarios[] = {
   { "P5: írásra képtelen FS -> 500", scP5 },
   { "P6: statikus IP mentése, a jelszó nem szivárog a válaszba", scP6 },
   { "P7: a GET oldal kitolja az AP határidőt", scP7 },
+  { "CPU1: a loop() a várakozó állapotokban nem pörgeti a CPU-t", scCPU1 },
+  { "CPU2: a first start várakozás sem pörget", scCPU2 },
 };
 
 

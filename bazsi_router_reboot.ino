@@ -17,10 +17,10 @@
 AsyncWebServer server(80);
 
 // Search for parameter in HTTP POST request
-const char* PARAM_SSID    = "ssid";
-const char* PARAM_PASS    = "pass";
-const char* PARAM_IP      = "ip";
-const char* PARAM_GATEWAY = "gateway";
+const char PARAM_SSID[]    = "ssid";
+const char PARAM_PASS[]    = "pass";
+const char PARAM_IP[]      = "ip";
+const char PARAM_GATEWAY[] = "gateway";
 
 // Tartalék űrlap arra az esetre, ha a data/ mappa nincs feltöltve a LittleFS-re.
 // Flashben él, RAM-ot nem foglal.
@@ -38,7 +38,7 @@ const char FALLBACK_FORM[] =
   "<input type=\"submit\" value=\"Submit\"></form></body></html>";
 
 // AP password (WPA2: min. 8 karakter)
-const char* AP_PASSWORD = "bazsi1234";
+const char AP_PASSWORD[] = "bazsi1234";
 
 // A HTML űrlapról érkező értékek. Fix méretű bufferek: nincs heap-töredezettség,
 // és a szabvány szerinti maximumok egyben validációt is jelentenek.
@@ -52,20 +52,13 @@ char ipStr[IPSTR_MAX_LEN + 1]      = { 0 };
 char gatewayStr[IPSTR_MAX_LEN + 1] = { 0 };
 
 // File paths to save input values permanently
-const char* ssidPath = "/ssid.txt";
-const char* passPath = "/pass.txt";
-const char* ipPath = "/ip.txt";
-const char* gatewayPath = "/gateway.txt";
+const char ssidPath[] = "/ssid.txt";
+const char passPath[] = "/pass.txt";
+const char ipPath[] = "/ip.txt";
+const char gatewayPath[] = "/gateway.txt";
 
-IPAddress localIP;
-IPAddress localGateway;
-IPAddress subnet(255, 255, 255, 0);
-// Tartalék DNS statikus IP esetén (a DHCP-től ilyenkor nem kapunk DNS-t)
-IPAddress dnsFallback(1, 1, 1, 1);
-// Ping célok: két különböző szolgáltató, hogy egyikük kiesése ne tűnjön
-// internetkimaradásnak
-IPAddress pingTargetCloudflare(1, 1, 1, 1);
-IPAddress pingTargetGoogle(8, 8, 8, 8);
+// Az IPAddress a core 3.x-ben ~28 bájt (16 bájtos unió + típus + zóna + vptr),
+// ezért egyik sem globális: mind ott jön létre, ahol használjuk.
 
 // strapping pins 2, 8, 9
 // Set LED GPIO, relay state
@@ -122,6 +115,8 @@ constexpr uint8_t PING_ATTEMPTS = 4;
 constexpr uint8_t PING_MIN_SUCCESS = 2;
 constexpr uint32_t PING_GAP_MS = 1000;
 constexpr size_t HTTP_MAX_PAYLOAD = 96;  // a várt válaszok < 32 bájt
+constexpr uint32_t HTTP_CONNECT_TIMEOUT_MS = 5000;
+constexpr uint32_t HTTP_RESPONSE_TIMEOUT_MS = 10000;
 constexpr uint32_t HTTP_READ_TIMEOUT_MS = 1500;
 constexpr uint8_t MAX_CYCLE_INDEX = 10;
 constexpr uint8_t RESET_TRIGGER_FAILURES = 3;
@@ -209,7 +204,7 @@ void resetbutton();
 void wifiresetbutton();
 void blockingDelay(uint32_t duration);
 void waitWithButtons(uint32_t duration);
-void tosleep();
+void internetFailSleep();
 void fatalSleep();
 void apSleep();
 void touchApDeadline();
@@ -479,6 +474,9 @@ void waitWithButtons(uint32_t duration) {
   }
 }
 
+// Szándékosan nem az enterDeepSleep()-et hívja: itt a Wi-Fi és a webszerver
+// még el sem indult, és gombébresztést sem szabad armolni - a beragadt gomb
+// azonnal újraébresztené az eszközt, azaz végtelen boot loop lenne.
 void handleStuckButton(const char* message) {
   Serial.println(message);
   digitalWrite(ledPin, LOW);
@@ -527,6 +525,8 @@ bool initWiFi() {
 
   // Statikus IP csak akkor, ha meg is adták. Üres mező = DHCP, nem hiba.
   bool staticOk = false;
+  IPAddress localIP;
+  IPAddress localGateway;
   if (ipStr[0] != '\0' || gatewayStr[0] != '\0') {
     const bool ipValid = localIP.fromString(ipStr);
     const bool gatewayValid = localGateway.fromString(gatewayStr);
@@ -542,6 +542,8 @@ bool initWiFi() {
   if (staticOk) {
     // DNS-t is meg kell adni: statikus konfignál a DHCP-s DNS elveszik,
     // enélkül a névfeloldás (és így a HTTP teszt) mindig elbukna.
+    const IPAddress subnet(255, 255, 255, 0);
+    const IPAddress dnsFallback(1, 1, 1, 1);  // ha a gateway nem szolgál ki DNS-t
     if (!WiFi.config(localIP, localGateway, subnet, localGateway, dnsFallback)) {
       Serial.println("⚠️ STA Failed to configure");
     } else {
@@ -584,7 +586,7 @@ bool reset_device() {
   if (testState.resetStep == 0) {
     testState.resetEvents++;
     if (testState.resetEvents >= maxfailureEvents) {
-      tosleep();
+      internetFailSleep();
     }
     Serial.println("Router resetting");
     Serial.print("Powering OFF the router. Instance = ");
@@ -650,13 +652,18 @@ void enterDeepSleep(uint64_t timerUs) {
   esp_deep_sleep_start();
 }
 
-void tosleep() {
+// Az internet tartósan nem jön vissza a router újraindításai után sem.
+// A Wi-Fi ilyenkor működik, csak a kapcsolat rossz a szolgáltató felé, ezért
+// van értelme később magától újrapróbálni - ez az EGYETLEN időzített alvás.
+void internetFailSleep() {
   printUptime();
-  Serial.print("Failed ");
-  Serial.print(maxfailureEvents);
-  Serial.println(" NCSI activity test, or WIFI disconnected, go to sleep ESP32-C3 device.");
-  Serial.println("Going to sleep now");
-  enterDeepSleep(SLEEP_DURATION_US);  // 1 óra múlva magától újrapróbálja
+  Serial.print("A router ujrainditasa ");
+  Serial.print(maxfailureEvents - 1);
+  Serial.println(" alkalommal sem hozta vissza az internetet.");
+  Serial.print("Alvas ");
+  Serial.print((unsigned long)(SLEEP_DURATION_US / 60000000ULL));
+  Serial.println(" percre, utana automatikus ujraprobalkozas.");
+  enterDeepSleep(SLEEP_DURATION_US);
 }
 
 // Az AP beállító mód visszaszámlálásának újraindítása. Minden HTTP kérésnél
@@ -742,7 +749,7 @@ bool reconnectWifi() {
 
     if (initWiFi()) {
       printUptime();
-      Serial.println("WIFI RECONECTED!");
+      Serial.println("WIFI RECONNECTED!");
       digitalWrite(wifiledPin, HIGH);
       return true;
     }
@@ -762,7 +769,7 @@ bool reconnectWifi() {
   printUptime();
   Serial.print("WIFI FAILED TO RECONNECT AFTER ");
   Serial.print(wifi_maxRetries);
-  Serial.println(" wifi_ATTEMPTS!");
+  Serial.println(" attempts!");
   // A folytatásról a hívó dönt (mindenhol: AP beállító mód).
   return false;
 }
@@ -795,8 +802,8 @@ bool testInternetHTTP(const char* url, const char* expectedResponse) {
   WiFiClient client;
   HTTPClient http;
   http.setReuse(false);
-  http.setConnectTimeout(5000);
-  http.setTimeout(10000);
+  http.setConnectTimeout((int32_t)HTTP_CONNECT_TIMEOUT_MS);
+  http.setTimeout((uint16_t)HTTP_RESPONSE_TIMEOUT_MS);
 
   if (!http.begin(client, url)) {
     Serial.println("Error: HTTP begin failed");
@@ -833,7 +840,7 @@ bool testInternetHTTP(const char* url, const char* expectedResponse) {
   return result;
 }
 
-bool testInternetPing(IPAddress& target, const char* targetName) {
+bool testInternetPing(const IPAddress& target, const char* targetName) {
   Serial.print("Ping teszt futtatása (");
   Serial.print(targetName);
   Serial.print(" - ");
@@ -842,7 +849,8 @@ bool testInternetPing(IPAddress& target, const char* targetName) {
   uint8_t successCount = 0;
 
   for (uint8_t j = 0; j < PING_ATTEMPTS; j++) {
-    const bool pingOK = Ping.ping(target, 1);  // 1 próbálkozás pingenként
+    IPAddress dest = target;  // a Ping.ping() érték szerint vár paramétert
+    const bool pingOK = Ping.ping(dest, 1);  // 1 próbálkozás pingenként
     Serial.print("Ping ");
     Serial.print(j + 1);
     if (pingOK) {
@@ -883,7 +891,7 @@ void handleFirstStart(uint32_t currentMillis) {
       resetbutton();
       wifiresetbutton();
       feedLoopWDT();
-      yield();
+      delay(BUTTON_POLL_MS);  // vTaskDelay: 10 percig ne pörgesse a CPU-t
       return;  // csak itt kilép, visszaadja a vezérlést a loop()-nak
     }
 
@@ -1269,9 +1277,9 @@ void loop() {
 
       bool testResult;
       if (testState.cycleIndex == 1) {
-        testResult = testInternetPing(pingTargetCloudflare, "Cloudflare");
+        testResult = testInternetPing(IPAddress(1, 1, 1, 1), "Cloudflare");
       } else if (testState.cycleIndex == 3) {
-        testResult = testInternetPing(pingTargetGoogle, "Google");
+        testResult = testInternetPing(IPAddress(8, 8, 8, 8), "Google");
       } else if (testState.cycleIndex == 2 || testState.cycleIndex == 4) {
         testResult = testInternetHTTP("http://www.msftncsi.com/ncsi.txt", "Microsoft NCSI");
       } else {
@@ -1299,7 +1307,7 @@ void loop() {
 
         if (!uiFlags.resetPrinted) {
           printUptime();
-          Serial.println("Begining Reset in FAILURE_STATE.");
+          Serial.println("Beginning Reset in FAILURE_STATE.");
           while (!reset_device()) {
             resetbutton();
             wifiresetbutton();
@@ -1371,4 +1379,10 @@ void loop() {
       }
       break;
   }
+
+  // A várakozó állapotok (SUCCESS 1 perc, FAILURE 12 mp) alatt a loop()-nak
+  // nincs dolga. delay() nélkül 1. prioritáson pörögne 100% CPU-val; a
+  // vTaskDelay viszont ténylegesen felfüggeszti a taskot. Minden időzítés
+  // ezredmásodpercekben mér, tehát a 10 ms-os szemcsézettség nem számít.
+  delay(BUTTON_POLL_MS);
 }

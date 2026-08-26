@@ -114,7 +114,9 @@ Az eszköz három állapotban működik:
    - Relé **kikapcsol** → router visszakap áramot
    - **10 perc** várakozás (RESET_DELAY) – idő a router bootolásához
    - Wi-Fi újracsatlakozás
-2. Ha **5 sikertelen reset ciklus** → ESP deep sleep módba lép (1 óra)
+2. Ha **4 router újraindítás** sem hozza vissza az internetet → deep sleep 1 órára,
+   majd magától ébred és újrapróbálja. (A `maxfailureEvents = 5` a *reset esemény*
+   számláló határa; a számláló még a reset előtt nő, ezért 4 tényleges újraindítás történik.)
 
 ### 3. Fizikai gombok
 
@@ -210,7 +212,7 @@ board_build.filesystem = littlefs
 | `RESET_PULSE` | 90s | Router áramtalanítás időtartama |
 | `RESET_DELAY` | 10 perc | Várakozás a router reset után (bootolási idő) |
 | `firstStartDelay` | 10 perc | Első indítás utáni várakozás |
-| `maxfailureEvents` | 5 | Ennyi reset után deep sleep |
+| `maxfailureEvents` | 5 | A reset esemény számláló határa → **4** tényleges router újraindítás után deep sleep |
 | `wifi_maxRetries` | 3 | Wi-Fi újracsatlakozási próbálkozások |
 
 ## 📊 Soros monitor

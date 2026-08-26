@@ -94,8 +94,11 @@ Akkor indul, ha **3 sikertelen teszt** és a **ciklus index > 3** (kb. 4 kör).
 
 | Reset sorszám | Következmény |
 |:---:|---|
-| 1–4 | Újabb router reset ciklus |
-| **5.** | **Deep sleep 1 órára**, majd magától ébred és újrapróbálja |
+| 1–4 | Lefut a router újraindítás |
+| **5. esemény** | Már nem indítja újra a routert: **deep sleep 1 órára**, majd magától ébred és újrapróbálja |
+
+Tehát **4 tényleges router újraindítás** történik: a `maxfailureEvents = 5`
+számláló még a relé kapcsolása előtt nő, és az ötödik eseménynél alszik el.
 
 Ez az egyetlen alvás, ami **magától felébred** – itt a Wi-Fi működik, csak az
 internet nem, tehát érdemes később újrapróbálni.
