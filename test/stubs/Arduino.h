@@ -53,6 +53,9 @@ void esp_sleep_disable_wakeup_source(int);
 void esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown(uint64_t, int);
 #define ESP_GPIO_WAKEUP_GPIO_LOW 0
 #define BIT(n) (1ULL << (n))
+// A valódi RTC_DATA_ATTR deep sleepet túlélő memóriába tesz. A teszt egyetlen
+// processzben fut, ezért itt sima globális - a persztenciát kézzel modellezzük.
+#define RTC_DATA_ATTR
 extern uint64_t g_wakeupUs;
 extern uint64_t g_gpioWakeMask;
 extern int g_gpioWakeMode;

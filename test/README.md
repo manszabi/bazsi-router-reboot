@@ -44,6 +44,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján:
 | `C1` | Konfig fájlok írása/olvasása, csonkítás, hiányzó fájl |
 | `B1` | Gomb debounce: zajtüske vs. tartós nyomás |
 | `F1` | Tartalék beállító űrlap, ha a `data/` mappa nincs feltöltve |
+| `WF1`–`WF5` | Csatlakozási hiba: újrapróbálkozás vs. AP portál, RTC-számláló |
 | `FS1`–`FS6` | LittleFS hibák: csatolás, írásvédettség, megtelt tár, sérült tartalom, törlés tartalék útvonala |
 | `FT1`–`FT6` | Végzetes hiba: betölthetetlen konfig vs. „nincs még konfig", LED-villogás, gombok |
 | `WDT1`–`WDT4` | Watchdog: konfiguráció, etetés a hosszú blokkolások alatt, `delay()` vs. CPU-pörgetés |

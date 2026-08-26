@@ -87,6 +87,10 @@ constexpr uint32_t RESET_PULSE = 90 * 1000;
 constexpr uint32_t firstStartDelay = 10 * 60 * 1000;
 constexpr uint8_t maxfailureEvents = 5;  // failure sleep
 constexpr uint8_t wifi_maxRetries = 3;
+// Ennyi sikertelen INDULÁSI csatlakozási kör után lépünk AP beállító módba.
+// Egy kör ~72 perc (10 perc várakozás + ~2 perc próbálkozás + 1 óra alvás),
+// tehát kb. 3,5 óra türelem, mielőtt feltételeznénk, hogy rossz a jelszó.
+constexpr uint32_t MAX_CONNECT_ROUNDS = 3;
 constexpr uint32_t wifiInterval = 20 * 1000;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 50;
 // Gombok mintavételi köze. 10 ms bőven elég az 50 ms-os debounce-hoz, viszont
@@ -173,6 +177,12 @@ DeviceMode deviceMode = MODE_MONITOR;
 // ezért csak jelzünk, az újraindítást a loop() végzi el.
 // Sikerült-e a LittleFS csatolása. Ha nem, a beállítások nem menthetők.
 bool fsReady = false;
+
+// Egymást követő sikertelen indulási csatlakozási körök száma.
+// RTC memóriában: a deep sleep ciklust túléli, viszont bekapcsoláskor és a
+// reset gombra nullázódik - a felhasználói beavatkozás tiszta lappal indít.
+// (ESP32-C3: SOC_RTC_FAST_MEM_SUPPORTED = 1, tehát az attribútum tényleg hat.)
+RTC_DATA_ATTR uint32_t rtcConnectRounds = 0;
 
 volatile bool restartPending = false;
 volatile uint32_t restartAt = 0;
@@ -1018,10 +1028,37 @@ void setup() {
     if (initWiFi()) {
       Serial.println("WIFI OK!");
       deviceMode = MODE_MONITOR;
+      rtcConnectRounds = 0;
       digitalWrite(wifiledPin, HIGH);  //led on
-    } else {
-      // Nincs használható Wi-Fi (üres vagy hiányzó konfig): AP módú portál.
+
+    } else if (ssid[0] == '\0') {
+      // Nincs mentett hálózat: csak a beállító portál segíthet.
+      rtcConnectRounds = 0;
       startConfigPortal();
+
+    } else {
+      // Van mentett hálózat, csak most nem érhető el. NEM megyünk azonnal AP
+      // módba: áramszünet után a router jóval lassabban indul, mint az ESP,
+      // és AP módban az eszköz emberi beavatkozásig használhatatlan lenne.
+      rtcConnectRounds++;
+      printUptime();
+      Serial.print("Sikertelen csatlakozasi kor: ");
+      Serial.print(rtcConnectRounds);
+      Serial.print(" / ");
+      Serial.println(MAX_CONNECT_ROUNDS);
+
+      if (rtcConnectRounds >= MAX_CONNECT_ROUNDS) {
+        // Ennyi idő után valószínűbb a hibás jelszó, mint a lassú router.
+        Serial.println("Tul sok sikertelen kor - beallito portal indul.");
+        rtcConnectRounds = 0;
+        startConfigPortal();
+      } else {
+        // Monitor mód: a handleFirstStart() kivárja a firstStartDelay-t, majd
+        // újrapróbálja; sikertelenség esetén 1 órás alvás, és jön a next kör.
+        Serial.println("Ujraprobalkozas kovetkezik, nem lepunk AP modba.");
+        deviceMode = MODE_MONITOR;
+        digitalWrite(wifiledPin, LOW);
+      }
     }
   }
 
@@ -1093,6 +1130,9 @@ void loop() {
       // A kapcsolat magától is helyreállhat (auto-reconnect), ilyenkor a LED
       // korábban hazudott volna.
       digitalWrite(wifiledPin, HIGH);
+      if (rtcConnectRounds != 0) {
+        rtcConnectRounds = 0;  // működik a hálózat: a hibaszámláló nullázódik
+      }
       printUptime();
       Serial.println("Beginning Test.");
       Serial.print("Teszt ciklus index = ");

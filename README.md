@@ -300,6 +300,40 @@ IDF már eleve kezeli.
 > változat a 90 mp-es relé pulzus alatt 100%-on pörgette a CPU-t; a `delay()`
 > `vTaskDelay()`-re fordul, ami ténylegesen felfüggeszti a taskot.
 
+## 📶 Ha nem sikerül csatlakozni a Wi-Fihez
+
+Külön kezeljük a „nincs mentett hálózat" és a „van, de most nem érhető el"
+esetet. Ez utóbbi tipikusan **áramszünet után** fordul elő: az ESP másodpercek
+alatt elindul, a router viszont percekig bootol.
+
+| Helyzet | Viselkedés |
+|---|---|
+| Nincs mentett SSID | Azonnal **AP beállító portál** – más nem is segítene |
+| Van SSID, de most nem érhető el | **Nem** megy AP módba. Vár, újrapróbál, majd 1 órás alvás után az egész kör újraindul |
+| 3 sikertelen kör után (~3,5 óra) | Mégis **AP portál** – ennyi idő után valószínűbb a hibás jelszó, mint a lassú router |
+
+### Egy újrapróbálkozási kör
+
+```
+indulás → initWiFi (20 mp timeout)
+        → firstStartDelay várakozás (10 perc, közben a router felállhat)
+        → reconnectWifi: 3 próba, köztük 20 mp (~2 perc)
+        → sikertelen → deep sleep 1 óra → újraindulás, következő kör
+```
+
+A körök számlálója **RTC memóriában** van (`RTC_DATA_ATTR`), ezért túléli a deep
+sleepet, viszont **bekapcsoláskor és a reset gombra nullázódik** – a felhasználói
+beavatkozás mindig tiszta lappal indít. Sikeres csatlakozás szintén nullázza.
+
+> Az ESP32-C3 támogatja az RTC memóriát (`SOC_RTC_FAST_MEM_SUPPORTED = 1`),
+> enélkül az attribútum némán hatástalan lenne.
+
+### Csatlakozásvesztés futás közben
+
+Ha a kapcsolat **működés közben** szakad meg, az a normál állapotgépre tartozik:
+a teszt sikertelen lesz, a hibaszámláló nő, és 3 hiba után a rendszer
+újraindítja a routert – pontosan ez az eszköz feladata.
+
 ## 🚨 Végzetes hiba – a konfiguráció nem tölthető be
 
 A wifi beállítások a LittleFS-en vannak. Ha ezek **nem tölthetők be**, a program
