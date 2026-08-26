@@ -4,6 +4,7 @@
 #include <ESPping.h>
 #include <esp_task_wdt.h>
 #include <esp_system.h>
+#include <ESPAsyncWebServer.h>
 
 uint32_t g_millis = 0;
 std::vector<std::string> g_log;
@@ -62,6 +63,7 @@ HardwareSerial Serial;
 EspClass ESP;
 WiFiClass WiFi;
 LittleFSClass LittleFS;
+std::map<std::string, ArRequestHandlerFunction> g_handlers;
 PingClass Ping;
 WifiSim wifiSim;
 PingSim pingSim;

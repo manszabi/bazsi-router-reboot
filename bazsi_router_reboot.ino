@@ -432,6 +432,13 @@ void checkWatchdogResets() {
 // percekig (90 mp-es relé pulzus), és egy hosszú timeout mellett is kockázatos
 // újraindítási hurkot okozna.
 void initWatchdog() {
+  // FONTOS a sorrend: előbb iratkozunk fel, csak utána konfigurálunk.
+  // Az esp_task_wdt_reconfigure() a végén csak akkor indítja újra a timert, ha
+  // a figyelt taskok listája nem üres. Fordított sorrendben a listánk épp üres
+  // lenne (az idle taskokat leiratkoztatjuk), és a timer elindulása egy belső
+  // részleten (waiting_for_task) múlna - így viszont garantált.
+  enableLoopWDT();
+
   esp_task_wdt_config_t cfg = {};
   cfg.timeout_ms = WDT_TIMEOUT_MS;
   cfg.idle_core_mask = 0;
@@ -446,7 +453,6 @@ void initWatchdog() {
     Serial.println((int)err);
     return;
   }
-  enableLoopWDT();
   Serial.print("Watchdog enabled, timeout ");
   Serial.print(WDT_TIMEOUT_MS / 1000);
   Serial.println(" s");
@@ -955,6 +961,9 @@ void startConfigPortal() {
     // közbeni deep sleep félig kiírt konfigurációt hagyna hátra.
     savingConfig = true;
     bool saveOk = true;
+    bool ssidProvided = false;
+    // Az első hiba oka, hogy a felhasználó konkrét visszajelzést kapjon.
+    const char* failReason = nullptr;
     const int params = request->params();
     for (int i = 0; i < params; i++) {
       const AsyncWebParameter* p = request->getParam(i);
@@ -966,12 +975,15 @@ void startConfigPortal() {
 
       if (name == PARAM_SSID) {
         if (val.length() > 0 && val.length() <= SSID_MAX_LEN) {
+          ssidProvided = true;
           strlcpy(ssid, val.c_str(), sizeof(ssid));
           Serial.print("SSID set to: ");
           Serial.println(ssid);
           saveOk &= writeConfigValue(LittleFS, ssidPath, ssid);
         } else {
           Serial.println("Invalid SSID length!");
+          saveOk = false;
+          failReason = "Ervenytelen SSID hossz (1-32 karakter).";
         }
       } else if (name == PARAM_PASS) {
         if (val.length() <= PASS_MAX_LEN) {
@@ -982,6 +994,8 @@ void startConfigPortal() {
           saveOk &= writeConfigValue(LittleFS, passPath, pass);
         } else {
           Serial.println("Password too long!");
+          saveOk = false;
+          if (failReason == nullptr) failReason = "A jelszo tul hosszu (max 63 karakter).";
         }
       } else if (name == PARAM_IP) {
         IPAddress testIP;
@@ -996,6 +1010,8 @@ void startConfigPortal() {
           saveOk &= writeConfigValue(LittleFS, ipPath, ipStr);
         } else {
           Serial.println("Invalid IP format!");
+          saveOk = false;
+          if (failReason == nullptr) failReason = "Ervenytelen IP cim formatum.";
         }
       } else if (name == PARAM_GATEWAY) {
         IPAddress testIP;
@@ -1010,6 +1026,8 @@ void startConfigPortal() {
           saveOk &= writeConfigValue(LittleFS, gatewayPath, gatewayStr);
         } else {
           Serial.println("Invalid gateway format!");
+          saveOk = false;
+          if (failReason == nullptr) failReason = "Ervenytelen gateway formatum.";
         }
       }
 
@@ -1021,6 +1039,13 @@ void startConfigPortal() {
       }
     }
 
+    // SSID nélkül az eszköz nem tudna hova csatlakozni: ilyet ne fogadjunk el
+    // sikerként, mert az újraindulás után ugyanitt kötnénk ki.
+    if (!ssidProvided) {
+      saveOk = false;
+      if (failReason == nullptr) failReason = "Hianyzo SSID.";
+    }
+
     savingConfig = false;
     touchApDeadline();
 
@@ -1028,9 +1053,12 @@ void startConfigPortal() {
       // Ne hazudjunk sikert és főleg ne indítsunk újra: az újraindítás
       // eldobná a beírt adatokat, a felhasználó pedig ugyanitt kötne ki.
       Serial.println("A beallitasok mentese SIKERTELEN.");
-      request->send(500, "text/plain",
-                    "A beallitasok mentese nem sikerult (LittleFS irasi hiba). "
-                    "Az eszkoz NEM indul ujra, probald meg ismet.");
+      char err[160];
+      snprintf(err, sizeof(err),
+               "A beallitasok mentese nem sikerult: %s "
+               "Az eszkoz NEM indul ujra, probald meg ismet.",
+               failReason ? failReason : "LittleFS irasi hiba.");
+      request->send(500, "text/plain", err);
       return;
     }
 
@@ -1098,7 +1126,7 @@ void setup() {
     if (readConfigValue(LittleFS, ipPath, ipStr, sizeof(ipStr)) == CONFIG_ERROR) st = CONFIG_ERROR;
     if (readConfigValue(LittleFS, gatewayPath, gatewayStr, sizeof(gatewayStr)) == CONFIG_ERROR) st = CONFIG_ERROR;
 
-    if (st == CONFIG_ERROR) {
+    if (st == CONFIG_ERROR && deviceMode != MODE_FATAL) {
       // A fájl létezik, de nem olvasható: sérült fájlrendszer. Ilyenkor nem
       // indulunk AP módba sem, mert a mentés is elbukna - inkább jelzünk.
       enterFatal("A mentett wifi konfiguracio nem olvashato (serult fajlrendszer).");
@@ -1155,7 +1183,7 @@ void loop() {
 
   if (deviceMode == MODE_FATAL) {
     // Mindkét LED együtt, gyorsan villog. A program szándékosan nem fut
-    // tovább: nem tesztel, nem kapcsolja a relét, nem alszik el.
+    // tovább: nem tesztel és nem kapcsolja a relét.
     if (currentMillis - timing.blinkLast >= FATAL_BLINK_MS) {
       timing.blinkLast = currentMillis;
       uiFlags.blinkOn = !uiFlags.blinkOn;
@@ -1175,8 +1203,8 @@ void loop() {
   }
 
   if (deviceMode == MODE_CONFIG) {
-    // Konfig módban nincs internetteszt és nincs elalvás: a portálnak
-    // életben kell maradnia, amíg a felhasználó be nem küldi az adatokat.
+    // Konfig módban nincs internetteszt. A portál AP_TIMEOUT_MS tétlenségig
+    // él; minden kérés és a folyamatban lévő mentés kitolja a határidőt.
     resetbutton();
     wifiresetbutton();
     // Nem alszunk el, ha épp mentés folyik, vagy ha a sikeres mentés utáni

@@ -392,6 +392,7 @@ kezelve van – és ami fontosabb, **egyik sem hazudik sikert**.
 | Az írás „sikerült", de a tartalom hibás | **Visszaolvasásos ellenőrzés** fogja meg |
 | A törlés (csonkolás) nem megy | Tartalék: a fájl törlése `remove()`-val |
 | Mentés a beállító oldalról | Hiba esetén HTTP 500 magyarázattal és **nincs újraindítás** |
+| Érvénytelen űrlapadat (rossz SSID hossz, IP formátum, hiányzó SSID) | Ugyanúgy HTTP 500 az ok megnevezésével, **nincs újraindítás** |
 
 A visszaolvasás azért kell, mert a `File::close()` és a `File::flush()` is
 `void` a core-ban – a lezáráskor jelentkező hibát másképp nem lehetne észlelni.

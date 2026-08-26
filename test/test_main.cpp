@@ -4,6 +4,8 @@
 #include <ESPping.h>
 #include <HTTPClient.h>
 #include <esp_system.h>
+#include <ESPAsyncWebServer.h>
+extern std::map<std::string, ArRequestHandlerFunction> g_handlers;
 #include <cassert>
 #include <unistd.h>
 #include <sys/wait.h>
@@ -31,10 +33,12 @@ extern uint32_t rtcWdtMagic;
 extern uint32_t rtcWdtResets;
 extern volatile bool savingConfig;
 extern volatile uint32_t apDeadline;
+extern volatile bool restartPending;
 void resetbutton();
 void wifiresetbutton();
 void waitWithButtons(uint32_t);
 void touchApDeadline();
+void startConfigPortal();
 extern IPAddress pingTargetCloudflare;
 
 static int failures = 0, checks = 0;
@@ -818,6 +822,188 @@ static void scWD6() {
   CHECK(rtcWdtResets == 0, "1 óra hibátlan működés után nullázódott");
 }
 
+
+static void scE1() {
+  // Teljes egészséges ciklus: boot -> teszt -> SUCCESS -> újabb teszt
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpBody = "Microsoft Connect Test";
+  setup();
+  loop();                                  // firstStart lezárása
+  CHECK(deviceMode == (DeviceMode)0, "monitor mód");
+  loop();                                  // 1. teszt
+  CHECK(currentState == (State)2, "sikeres teszt -> SUCCESS_STATE");
+  CHECK(g_pinState[5] == HIGH, "wifi LED világít");
+  const uint32_t t0 = g_millis;
+  int guard = 0;
+  while (currentState == (State)2 && ++guard < 100000) { loop(); g_millis += 10; }
+  CHECK(g_millis - t0 >= 60000, "SUCCESS_DELAY teljes 1 perc volt");
+  CHECK(g_millis - t0 < 62000, "és nem több");
+}
+
+static void scE2() {
+  // Internet kiesik, WiFi jó: 4 kör teszt -> router reset -> 10 perc -> vissza
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpBody = "Valami mas";               // minden HTTP teszt bukik
+  pingSim.ok = false;                      // a pingek is
+  setup();
+  loop();
+  g_log.clear();
+  int guard = 0;
+  while (logIndex("pin7=HIGH") < 0 && ++guard < 300000) { loop(); g_millis += 10; }
+  CHECK(guard < 300000, "eljutott a router resetig");
+  const int relayOn = logIndex("pin7=HIGH");
+  const int relayOff = logIndex("pin7=LOW");
+  CHECK(relayOn >= 0 && relayOff > relayOn, "relé be, majd ki");
+  // a reset után visszatér tesztelni
+  guard = 0;
+  while (currentState != (State)0 && ++guard < 300000) { loop(); g_millis += 10; }
+  CHECK(guard < 300000, "visszatért TESTING_STATE-be a reset után");
+  CHECK(deviceMode == (DeviceMode)0, "monitor módban maradt (a WiFi jó volt)");
+}
+
+static void scE3() {
+  // Router reset után a WiFi sem jön vissza -> AP mód
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  loop();                                   // firstStart lezárása, monitor mód
+  CHECK(deviceMode == (DeviceMode)0, "monitor mód");
+  wifiSim.willConnect = false; wifiSim.begun = false;   // elvágjuk a WiFi-t
+  g_log.clear();
+  int guard = 0;
+  bool slept = false;
+  try { while (deviceMode == (DeviceMode)0 && ++guard < 500000) { loop(); g_millis += 10; } }
+  catch (DeepSleepSignal&) { slept = true; }
+  CHECK(!slept, "nem aludt el - AP módba kell kerülnie");
+  CHECK(deviceMode == (DeviceMode)1, "AP beállító módba került");
+  CHECK(wifiSim.softApCount == 1, "pontosan egyszer indult AP");
+  CHECK(logIndex("pin7=HIGH") >= 0, "közben lefutott egy router újraindítás");
+  CHECK(g_pinState[7] == LOW, "a relé a végén LOW - a router kap áramot");
+}
+
+static void scE4() {
+  // startConfigPortal() ismételt hívása nem duplikálja az AP-t
+  coldBoot(false, "", "", "", "");
+  setup();
+  CHECK(wifiSim.softApCount == 1, "egyszer indult");
+  startConfigPortal();
+  startConfigPortal();
+  CHECK(wifiSim.softApCount == 1, "ismételt hívás nem indít újabb AP-t");
+}
+
+static void scE5() {
+  // Wifireset gomb AP módban: törli a mentett adatokat és újraindít
+  coldBoot(false, "RegiHalozat", "regijelszo", "", "");
+  setup();   // nem sikerul csatlakozni -> monitor mod, majd handleFirstStart
+  g_fs["/ssid.txt"] = "RegiHalozat";
+  bool restarted = false;
+  g_pinRead[2] = LOW;                      // D0 = GPIO2 wifireset
+  try { loop(); g_millis += 100; loop(); }
+  catch (RestartSignal&) { restarted = true; }
+  CHECK(restarted, "a wifireset gomb újraindított");
+  CHECK(g_fs["/ssid.txt"].empty() || !g_fs.count("/ssid.txt"),
+        "a mentett SSID törölve lett");
+}
+
+
+// A regisztrált POST handler meghajtása egy hamis kéréssel
+static int postConfig(const char* ssidVal, const char* passVal,
+                      const char* ipVal, const char* gwVal,
+                      std::string* body = nullptr) {
+  AsyncWebServerRequest req;
+  if (ssidVal) req.addParam("ssid", ssidVal);
+  if (passVal) req.addParam("pass", passVal);
+  if (ipVal)   req.addParam("ip", ipVal);
+  if (gwVal)   req.addParam("gateway", gwVal);
+  g_handlers["/#2"](&req);
+  if (body) *body = req._body;
+  return req._code;
+}
+
+static void scP1() {
+  // Érvényes mentés: 200, fájlok kiírva, újraindítás beütemezve
+  coldBoot(false, "", "", "", "");
+  setup();
+  CHECK(deviceMode == (DeviceMode)1, "AP mód");
+  const int code = postConfig("MyNetwork", "titkosjelszo", "", "");
+  CHECK(code == 200, "HTTP 200");
+  CHECK(g_fs["/ssid.txt"] == "MyNetwork", "SSID kiírva");
+  CHECK(g_fs["/pass.txt"] == "titkosjelszo", "jelszó kiírva");
+  CHECK(g_fs["/ip.txt"].empty(), "üres IP -> DHCP");
+  CHECK(restartPending, "újraindítás beütemezve");
+  CHECK(!savingConfig, "a mentés jelző visszaállt");
+}
+
+static void scP2() {
+  // Túl hosszú SSID: NEM szabad sikert jelenteni és NEM szabad újraindulni
+  coldBoot(false, "", "", "", "");
+  setup();
+  std::string body;
+  const char* longSsid = "012345678901234567890123456789012345";  // 36 karakter
+  const int code = postConfig(longSsid, "jelszo", "", "", &body);
+  CHECK(code == 500, "HTTP 500 - nem hazudik sikert");
+  CHECK(!restartPending, "NEM indul újra, az adatok nem vesznek el");
+  CHECK(body.find("SSID") != std::string::npos, "a válasz megnevezi az okot");
+}
+
+static void scP3() {
+  // Hiányzó SSID: szintén hiba
+  coldBoot(false, "", "", "", "");
+  setup();
+  const int code = postConfig(nullptr, "jelszo", "", "");
+  CHECK(code == 500, "HTTP 500 hiányzó SSID esetén");
+  CHECK(!restartPending, "nem indul újra");
+}
+
+static void scP4() {
+  // Érvénytelen IP formátum
+  coldBoot(false, "", "", "", "");
+  setup();
+  std::string body;
+  const int code = postConfig("MyNetwork", "jelszo", "nem-ip-cim", "", &body);
+  CHECK(code == 500, "HTTP 500 rossz IP esetén");
+  CHECK(!restartPending, "nem indul újra");
+  CHECK(body.find("IP") != std::string::npos, "a válasz megnevezi az okot");
+}
+
+static void scP5() {
+  // Írásra képtelen fájlrendszer: 500, nincs újraindulás
+  coldBoot(false, "", "", "", "");
+  setup();
+  g_fsWritable = false;
+  const int code = postConfig("MyNetwork", "jelszo", "", "");
+  CHECK(code == 500, "HTTP 500 írási hiba esetén");
+  CHECK(!restartPending, "nem indul újra");
+  g_fsWritable = true;
+}
+
+static void scP6() {
+  // Statikus IP mentése, és a jelszó nem szivárog ki
+  coldBoot(false, "", "", "", "");
+  setup();
+  std::string body;
+  const int code = postConfig("MyNetwork", "SzuperTitok", "192.168.1.200",
+                              "192.168.1.1", &body);
+  CHECK(code == 200, "HTTP 200");
+  CHECK(g_fs["/ip.txt"] == "192.168.1.200", "statikus IP kiírva");
+  CHECK(g_fs["/gateway.txt"] == "192.168.1.1", "gateway kiírva");
+  CHECK(body.find("SzuperTitok") == std::string::npos,
+        "a jelszó NEM jelenik meg a válaszban");
+  CHECK(body.find("192.168.1.200") != std::string::npos,
+        "az IP viszont igen, hogy tudja hova menjen");
+}
+
+static void scP7() {
+  // A GET oldal kiszolgálása és a határidő kitolása
+  coldBoot(false, "", "", "", "");
+  setup();
+  const uint32_t before = apDeadline;
+  g_millis += 60000;
+  AsyncWebServerRequest req;
+  g_handlers["/#1"](&req);                      // HTTP_GET "/"
+  CHECK(req._code == 200, "a beállító oldal kiszolgálva");
+  CHECK(apDeadline > before, "a kérés kitolta az 5 perces határidőt");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -874,6 +1060,18 @@ static const Scenario kScenarios[] = {
   { "WD4: áramtalanítás nullázza a watchdog számlálót", scWD4 },
   { "WD5: szoftveres reset nem növel és nem nulláz", scWD5 },
   { "WD6: 1 óra hibátlan működés nullázza a számlálót", scWD6 },
+  { "E1: teljes egészséges ciklus (teszt -> SUCCESS -> teszt)", scE1 },
+  { "E2: internet kiesik -> router reset -> visszatérés", scE2 },
+  { "E3: reset után a WiFi sem jön vissza -> AP mód", scE3 },
+  { "E4: startConfigPortal() ismételt hívása nem duplikál", scE4 },
+  { "E5: wifireset gomb törli a mentett adatokat", scE5 },
+  { "P1: érvényes mentés -> 200, fájlok kiírva, újraindítás", scP1 },
+  { "P2: túl hosszú SSID -> 500, nincs újraindulás", scP2 },
+  { "P3: hiányzó SSID -> 500", scP3 },
+  { "P4: érvénytelen IP -> 500", scP4 },
+  { "P5: írásra képtelen FS -> 500", scP5 },
+  { "P6: statikus IP mentése, a jelszó nem szivárog a válaszba", scP6 },
+  { "P7: a GET oldal kitolja az AP határidőt", scP7 },
 };
 
 
