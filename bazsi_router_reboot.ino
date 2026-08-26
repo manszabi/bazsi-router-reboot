@@ -17,10 +17,10 @@
 AsyncWebServer server(80);
 
 // Search for parameter in HTTP POST request
-const char* PARAM_SSID    = "ssid";
-const char* PARAM_PASS    = "pass";
-const char* PARAM_IP      = "ip";
-const char* PARAM_GATEWAY = "gateway";
+const char PARAM_SSID[]    = "ssid";
+const char PARAM_PASS[]    = "pass";
+const char PARAM_IP[]      = "ip";
+const char PARAM_GATEWAY[] = "gateway";
 
 // Tartalék űrlap arra az esetre, ha a data/ mappa nincs feltöltve a LittleFS-re.
 // Flashben él, RAM-ot nem foglal.
@@ -35,10 +35,11 @@ const char FALLBACK_FORM[] =
   "Password <input name=\"pass\" type=\"password\" maxlength=\"63\"><br>"
   "IP <input name=\"ip\" maxlength=\"15\" placeholder=\"opcionalis\"><br>"
   "Gateway <input name=\"gateway\" maxlength=\"15\" placeholder=\"opcionalis\"><br>"
-  "<input type=\"submit\" value=\"Submit\"></form></body></html>";
+  "<input type=\"submit\" value=\"Submit\"></form>"
+  "<p><a href=\"/log\">Diagnosztikai naplo</a></p></body></html>";
 
 // AP password (WPA2: min. 8 karakter)
-const char* AP_PASSWORD = "bazsi1234";
+const char AP_PASSWORD[] = "bazsi1234";
 
 // A HTML űrlapról érkező értékek. Fix méretű bufferek: nincs heap-töredezettség,
 // és a szabvány szerinti maximumok egyben validációt is jelentenek.
@@ -52,20 +53,13 @@ char ipStr[IPSTR_MAX_LEN + 1]      = { 0 };
 char gatewayStr[IPSTR_MAX_LEN + 1] = { 0 };
 
 // File paths to save input values permanently
-const char* ssidPath = "/ssid.txt";
-const char* passPath = "/pass.txt";
-const char* ipPath = "/ip.txt";
-const char* gatewayPath = "/gateway.txt";
+const char ssidPath[] = "/ssid.txt";
+const char passPath[] = "/pass.txt";
+const char ipPath[] = "/ip.txt";
+const char gatewayPath[] = "/gateway.txt";
 
-IPAddress localIP;
-IPAddress localGateway;
-IPAddress subnet(255, 255, 255, 0);
-// Tartalék DNS statikus IP esetén (a DHCP-től ilyenkor nem kapunk DNS-t)
-IPAddress dnsFallback(1, 1, 1, 1);
-// Ping célok: két különböző szolgáltató, hogy egyikük kiesése ne tűnjön
-// internetkimaradásnak
-IPAddress pingTargetCloudflare(1, 1, 1, 1);
-IPAddress pingTargetGoogle(8, 8, 8, 8);
+// Az IPAddress a core 3.x-ben ~28 bájt (16 bájtos unió + típus + zóna + vptr),
+// ezért egyik sem globális: mind ott jön létre, ahol használjuk.
 
 // strapping pins 2, 8, 9
 // Set LED GPIO, relay state
@@ -94,6 +88,13 @@ constexpr uint32_t wifiInterval = 30 * 1000;
 // Az AP beállító mód ennyi tétlenség után elalszik (mentés nélkül). Minden
 // beérkező kérés újraindítja a visszaszámlálást.
 constexpr uint32_t AP_TIMEOUT_MS = 5 * 60 * 1000;
+
+// Meddig próbálkozzunk, ha a hálózat egyszerűen nincs ott (a router lekapcsolva,
+// szolgáltatói kimaradás)? Egy kör: 10 perc firstStartDelay + 2 perc próbálkozás
+// (3 x 20 mp timeout + 2 x 30 mp szünet) + 60 perc alvás = 72 perc.
+// 2 nap = 2880 perc, tehát 2880 / 72 = 40 kör.
+// Ha két nap alatt sem jön vissza a net, az már nem az eszköz dolga.
+constexpr uint32_t MAX_RETRY_ROUNDS = 40;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 50;
 // Gombok mintavételi köze. 10 ms bőven elég az 50 ms-os debounce-hoz, viszont
 // delay()-jel várunk, nem yield()-del, így a CPU nem pörög üresen.
@@ -122,6 +123,8 @@ constexpr uint8_t PING_ATTEMPTS = 4;
 constexpr uint8_t PING_MIN_SUCCESS = 2;
 constexpr uint32_t PING_GAP_MS = 1000;
 constexpr size_t HTTP_MAX_PAYLOAD = 96;  // a várt válaszok < 32 bájt
+constexpr uint32_t HTTP_CONNECT_TIMEOUT_MS = 5000;
+constexpr uint32_t HTTP_RESPONSE_TIMEOUT_MS = 10000;
 constexpr uint32_t HTTP_READ_TIMEOUT_MS = 1500;
 constexpr uint8_t MAX_CYCLE_INDEX = 10;
 constexpr uint8_t RESET_TRIGGER_FAILURES = 3;
@@ -194,6 +197,41 @@ constexpr uint32_t WDT_COUNTER_MAGIC = 0x42415A53UL;  // "BAZS"
 RTC_NOINIT_ATTR uint32_t rtcWdtMagic;
 RTC_NOINIT_ATTR uint32_t rtcWdtResets;
 
+// Hány újrapróbálkozási kört tudtunk le eddig. RTC_DATA_ATTR (nem NOINIT):
+// a deep sleepet túléli, de bekapcsoláskor és reset gombra nullázódik - a
+// felhasználói beavatkozás tiszta 2 napos ablakkal indít.
+RTC_DATA_ATTR uint32_t rtcRetryRounds = 0;
+
+// --- Diagnosztikai eseménynapló ---------------------------------------------
+// RTC_NOINIT_ATTR: túléli a deep sleepet, a watchdog resetet ÉS a reset gombot
+// is - vagyis pont azokat a hibákat, amiket ki akarunk vizsgálni. Csak az
+// áramtalanítás törli. Az ESP32-C3-on ~8 KB RTC fast memória van, ez 264 bájt.
+enum EventCode : uint8_t {
+  EV_BOOT = 1,          // param: reset ok (esp_reset_reason_t)
+  EV_WIFI_OK = 2,       // param: kör sorszám, amiben sikerült
+  EV_WIFI_LOST = 3,     // param: WiFi.status()
+  EV_TEST_FAIL = 4,     // param: teszt ciklus index
+  EV_ROUTER_RESET = 5,  // param: hányadik reset esemény
+  EV_AP_MODE = 6,       // param: ok (1=nincs SSID 2=auth hiba 3=2 nap letelt)
+  EV_CONFIG_SAVED = 7,  // param: 0
+  EV_SLEEP = 8,         // param: ok (1=retry 2=internet 3=AP timeout 4=fatal)
+  EV_FATAL = 9,         // param: ok (1=FS mount 2=konfig olvasás 3=watchdog)
+  EV_WDT_RESET = 10     // param: hányadik watchdog reset
+};
+
+struct EventEntry {
+  uint32_t uptimeSec;
+  uint16_t param;
+  uint8_t code;
+  uint8_t pad;
+};
+
+constexpr uint8_t EVLOG_SIZE = 32;
+constexpr uint32_t EVLOG_MAGIC = 0x42415A4CUL;  // "BAZL"
+RTC_NOINIT_ATTR uint32_t rtcEvMagic;
+RTC_NOINIT_ATTR uint32_t rtcEvNext;   // következő írási pozíció (monoton nő)
+RTC_NOINIT_ATTR EventEntry rtcEvents[EVLOG_SIZE];
+
 volatile bool restartPending = false;
 volatile uint32_t restartAt = 0;
 
@@ -209,16 +247,49 @@ void resetbutton();
 void wifiresetbutton();
 void blockingDelay(uint32_t duration);
 void waitWithButtons(uint32_t duration);
-void tosleep();
+void internetFailSleep();
 void fatalSleep();
 void apSleep();
 void touchApDeadline();
+void wifiGiveUp();
+void logEvent(EventCode code, uint16_t param);
 void startConfigPortal();
 void enterFatal(const char* reason);
 void enterDeepSleep(uint64_t timerUs);
 bool initWiFi();
 bool reconnectWifi();
 bool writeConfigValue(fs::FS& fs, const char* path, const char* message);
+
+// Esemény rögzítése a körpufferbe. Nem allokál, nem blokkol.
+void logEvent(EventCode code, uint16_t param) {
+  if (rtcEvMagic != EVLOG_MAGIC) {
+    rtcEvMagic = EVLOG_MAGIC;
+    rtcEvNext = 0;
+    memset(rtcEvents, 0, sizeof(rtcEvents));
+  }
+  EventEntry& e = rtcEvents[rtcEvNext % EVLOG_SIZE];
+  e.uptimeSec = (uint32_t)(esp_timer_get_time() / 1000000);
+  e.code = (uint8_t)code;
+  e.param = param;
+  e.pad = 0;
+  rtcEvNext++;
+}
+
+const char* eventName(uint8_t code) {
+  switch (code) {
+    case EV_BOOT: return "BOOT";
+    case EV_WIFI_OK: return "WIFI OK";
+    case EV_WIFI_LOST: return "WIFI LOST";
+    case EV_TEST_FAIL: return "TEST FAIL";
+    case EV_ROUTER_RESET: return "ROUTER RESET";
+    case EV_AP_MODE: return "AP MODE";
+    case EV_CONFIG_SAVED: return "CONFIG SAVED";
+    case EV_SLEEP: return "SLEEP";
+    case EV_FATAL: return "FATAL";
+    case EV_WDT_RESET: return "WDT RESET";
+    default: return "?";
+  }
+}
 
 // Whitespace levágása helyben, allokáció nélkül
 void trimInPlace(char* s) {
@@ -402,12 +473,14 @@ void checkWatchdogResets() {
 
   if (abnormal) {
     rtcWdtResets++;
+    logEvent(EV_WDT_RESET, (uint16_t)rtcWdtResets);
     Serial.print("Watchdog/panic miatti ujrainditas, sorszam: ");
     Serial.print(rtcWdtResets);
     Serial.print(" / ");
     Serial.println(MAX_WDT_RESETS);
     if (rtcWdtResets >= MAX_WDT_RESETS) {
       rtcWdtResets = 0;  // az alvás után tiszta lappal induljon
+      logEvent(EV_FATAL, 3);
       enterFatal("Tul sok watchdog miatti ujrainditas - a program instabil.");
     }
   } else if (reason == ESP_RST_POWERON || reason == ESP_RST_EXT
@@ -479,6 +552,9 @@ void waitWithButtons(uint32_t duration) {
   }
 }
 
+// Szándékosan nem az enterDeepSleep()-et hívja: itt a Wi-Fi és a webszerver
+// még el sem indult, és gombébresztést sem szabad armolni - a beragadt gomb
+// azonnal újraébresztené az eszközt, azaz végtelen boot loop lenne.
 void handleStuckButton(const char* message) {
   Serial.println(message);
   digitalWrite(ledPin, LOW);
@@ -527,6 +603,8 @@ bool initWiFi() {
 
   // Statikus IP csak akkor, ha meg is adták. Üres mező = DHCP, nem hiba.
   bool staticOk = false;
+  IPAddress localIP;
+  IPAddress localGateway;
   if (ipStr[0] != '\0' || gatewayStr[0] != '\0') {
     const bool ipValid = localIP.fromString(ipStr);
     const bool gatewayValid = localGateway.fromString(gatewayStr);
@@ -542,6 +620,8 @@ bool initWiFi() {
   if (staticOk) {
     // DNS-t is meg kell adni: statikus konfignál a DHCP-s DNS elveszik,
     // enélkül a névfeloldás (és így a HTTP teszt) mindig elbukna.
+    const IPAddress subnet(255, 255, 255, 0);
+    const IPAddress dnsFallback(1, 1, 1, 1);  // ha a gateway nem szolgál ki DNS-t
     if (!WiFi.config(localIP, localGateway, subnet, localGateway, dnsFallback)) {
       Serial.println("⚠️ STA Failed to configure");
     } else {
@@ -584,8 +664,9 @@ bool reset_device() {
   if (testState.resetStep == 0) {
     testState.resetEvents++;
     if (testState.resetEvents >= maxfailureEvents) {
-      tosleep();
+      internetFailSleep();
     }
+    logEvent(EV_ROUTER_RESET, (uint16_t)testState.resetEvents);
     Serial.println("Router resetting");
     Serial.print("Powering OFF the router. Instance = ");
     Serial.println(testState.resetEvents);
@@ -650,13 +731,64 @@ void enterDeepSleep(uint64_t timerUs) {
   esp_deep_sleep_start();
 }
 
-void tosleep() {
+// Az internet tartósan nem jön vissza a router újraindításai után sem.
+// A Wi-Fi ilyenkor működik, csak a kapcsolat rossz a szolgáltató felé, ezért
+// van értelme később magától újrapróbálni - ez az EGYETLEN időzített alvás.
+void internetFailSleep() {
   printUptime();
-  Serial.print("Failed ");
-  Serial.print(maxfailureEvents);
-  Serial.println(" NCSI activity test, or WIFI disconnected, go to sleep ESP32-C3 device.");
-  Serial.println("Going to sleep now");
-  enterDeepSleep(SLEEP_DURATION_US);  // 1 óra múlva magától újrapróbálja
+  Serial.print("A router ujrainditasa ");
+  Serial.print(maxfailureEvents - 1);
+  Serial.println(" alkalommal sem hozta vissza az internetet.");
+  Serial.print("Alvas ");
+  Serial.print((unsigned long)(SLEEP_DURATION_US / 60000000ULL));
+  Serial.println(" percre, utana automatikus ujraprobalkozas.");
+  logEvent(EV_SLEEP, 2);
+  enterDeepSleep(SLEEP_DURATION_US);
+}
+
+// A hálózat nincs ott, de valószínűleg visszajön: alvás egy órát, majd új kör.
+void retrySleep() {
+  printUptime();
+  Serial.print("A halozat nem elerheto. Ujraprobalkozasi kor: ");
+  Serial.print(rtcRetryRounds);
+  Serial.print(" / ");
+  Serial.println(MAX_RETRY_ROUNDS);
+  Serial.println("Alvas 1 orara, utana automatikus ujraprobalkozas.");
+  logEvent(EV_SLEEP, 1);
+  enterDeepSleep(SLEEP_DURATION_US);
+}
+
+// Nem sikerult csatlakozni a 3 probaval sem. Itt dol el, hogy tovabb varunk-e
+// vagy beallito modba megyunk.
+//
+// A core meg tudja kulonboztetni a ket esetet (STA.cpp): WIFI_REASON_NO_AP_FOUND
+// -> WL_NO_SSID_AVAIL (a halozat nem is latszik), WIFI_REASON_AUTH_FAIL ->
+// WL_CONNECT_FAILED (rossz jelszo). Konzervativan dontunk: CSAK az explicit
+// hitelesitesi hiba kuld AP modba. Minden mas esetben ujraprobalkozunk, mert
+// egy teves "varjunk tovabb" ara kesleltetett ujrakonfiguralas, a teves
+// "menjunk AP modba" ara viszont egy halott eszkoz.
+void wifiGiveUp() {
+  const wl_status_t st = WiFi.status();
+  printUptime();
+  Serial.print("WiFi status a probalkozasok utan: ");
+  Serial.println((int)st);
+
+  if (st == WL_CONNECT_FAILED) {
+    Serial.println("Hitelesitesi hiba - valoszinuleg rossz a jelszo. AP mod.");
+    logEvent(EV_AP_MODE, 2);
+    startConfigPortal();
+    return;
+  }
+
+  rtcRetryRounds++;
+  if (rtcRetryRounds >= MAX_RETRY_ROUNDS) {
+    Serial.println("Ket napja nincs halozat - AP beallito mod.");
+    rtcRetryRounds = 0;
+    logEvent(EV_AP_MODE, 3);
+    startConfigPortal();
+    return;
+  }
+  retrySleep();
 }
 
 // Az AP beállító mód visszaszámlálásának újraindítása. Minden HTTP kérésnél
@@ -672,6 +804,7 @@ void apSleep() {
   printUptime();
   Serial.println("Az AP beallito modban nem tortent mentes, az ESP elalszik.");
   Serial.println("Idozitett ebresztes NINCS - reset gomb vagy aramtalanitas kell.");
+  logEvent(EV_SLEEP, 3);
   enterDeepSleep(0);
 }
 
@@ -742,7 +875,7 @@ bool reconnectWifi() {
 
     if (initWiFi()) {
       printUptime();
-      Serial.println("WIFI RECONECTED!");
+      Serial.println("WIFI RECONNECTED!");
       digitalWrite(wifiledPin, HIGH);
       return true;
     }
@@ -762,7 +895,7 @@ bool reconnectWifi() {
   printUptime();
   Serial.print("WIFI FAILED TO RECONNECT AFTER ");
   Serial.print(wifi_maxRetries);
-  Serial.println(" wifi_ATTEMPTS!");
+  Serial.println(" attempts!");
   // A folytatásról a hívó dönt (mindenhol: AP beállító mód).
   return false;
 }
@@ -795,8 +928,8 @@ bool testInternetHTTP(const char* url, const char* expectedResponse) {
   WiFiClient client;
   HTTPClient http;
   http.setReuse(false);
-  http.setConnectTimeout(5000);
-  http.setTimeout(10000);
+  http.setConnectTimeout((int32_t)HTTP_CONNECT_TIMEOUT_MS);
+  http.setTimeout((uint16_t)HTTP_RESPONSE_TIMEOUT_MS);
 
   if (!http.begin(client, url)) {
     Serial.println("Error: HTTP begin failed");
@@ -833,7 +966,7 @@ bool testInternetHTTP(const char* url, const char* expectedResponse) {
   return result;
 }
 
-bool testInternetPing(IPAddress& target, const char* targetName) {
+bool testInternetPing(const IPAddress& target, const char* targetName) {
   Serial.print("Ping teszt futtatása (");
   Serial.print(targetName);
   Serial.print(" - ");
@@ -842,7 +975,8 @@ bool testInternetPing(IPAddress& target, const char* targetName) {
   uint8_t successCount = 0;
 
   for (uint8_t j = 0; j < PING_ATTEMPTS; j++) {
-    const bool pingOK = Ping.ping(target, 1);  // 1 próbálkozás pingenként
+    IPAddress dest = target;  // a Ping.ping() érték szerint vár paramétert
+    const bool pingOK = Ping.ping(dest, 1);  // 1 próbálkozás pingenként
     Serial.print("Ping ");
     Serial.print(j + 1);
     if (pingOK) {
@@ -883,7 +1017,7 @@ void handleFirstStart(uint32_t currentMillis) {
       resetbutton();
       wifiresetbutton();
       feedLoopWDT();
-      yield();
+      delay(BUTTON_POLL_MS);  // vTaskDelay: 10 percig ne pörgesse a CPU-t
       return;  // csak itt kilép, visszaadja a vezérlést a loop()-nak
     }
 
@@ -891,10 +1025,9 @@ void handleFirstStart(uint32_t currentMillis) {
     Serial.println("First start wait end.");
 
     if (!reconnectWifi()) {
-      // 3 próba 30 mp szünetekkel sem hozott eredményt: beállító portál.
-      printUptime();
-      Serial.println("Induláskor nem sikerult csatlakozni - AP beallito mod.");
-      startConfigPortal();
+      // 3 próba 30 mp szünetekkel sem hozott eredményt. A folytatásról a
+      // hiba oka dönt: rossz jelszó -> AP mód, egyébként újrapróbálkozás.
+      wifiGiveUp();
       return;
     }
 
@@ -943,6 +1076,48 @@ void startConfigPortal() {
     touchApDeadline();
     request->send(LittleFS, "/favicon.png", "image/png");
   });
+  // Diagnosztikai napló. Ez az egyetlen mód, hogy soros kábel nélkül megtudd,
+  // mi történt az eszközzel - és épp AP módban vagy, amikor baj van.
+  server.on("/log", HTTP_GET, [](AsyncWebServerRequest* request) {
+    touchApDeadline();
+    // A stream puffere igény szerint nő (resizeAdd), de akkor soronként
+    // újraallokálna. Egy bőséges kezdőmérettel ez egyetlen foglalás lesz:
+    // fejléc + állapot + 32 sor x ~70 bájt + lábléc alatta marad.
+    AsyncResponseStream* r = request->beginResponseStream("text/html", 4096);
+    r->print(F("<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+               "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+               "<title>Naplo</title></head><body><h2>Diagnosztikai naplo</h2>"));
+
+    r->printf("<p>Utolso indulas oka: %d<br>", (int)esp_reset_reason());
+    r->printf("Watchdog ujraindulasok: %u / %u<br>",
+              (unsigned)rtcWdtResets, (unsigned)MAX_WDT_RESETS);
+    r->printf("Ujraprobalkozasi korok: %u / %u<br>",
+              (unsigned)rtcRetryRounds, (unsigned)MAX_RETRY_ROUNDS);
+    r->printf("Uptime: %u mp</p>", (unsigned)(esp_timer_get_time() / 1000000));
+
+    if (rtcEvMagic != EVLOG_MAGIC || rtcEvNext == 0) {
+      r->print(F("<p>Nincs rogzitett esemeny.</p>"));
+    } else {
+      r->print(F("<table border=1 cellpadding=4><tr><th>Uptime</th>"
+                 "<th>Esemeny</th><th>Param</th></tr>"));
+      // A legregebbi meg meglevo bejegyzestol indulunk
+      const uint32_t total = rtcEvNext;
+      const uint32_t shown = total < EVLOG_SIZE ? total : EVLOG_SIZE;
+      for (uint32_t i = total - shown; i < total; i++) {
+        const EventEntry& e = rtcEvents[i % EVLOG_SIZE];
+        r->printf("<tr><td>%u:%02u:%02u</td><td>%s</td><td>%u</td></tr>",
+                  (unsigned)(e.uptimeSec / 3600), (unsigned)((e.uptimeSec % 3600) / 60),
+                  (unsigned)(e.uptimeSec % 60), eventName(e.code), (unsigned)e.param);
+      }
+      r->print(F("</table>"));
+    }
+    r->print(F("<p><i>Az uptime minden indulaskor nullarol indul, ezert a "
+               "BOOT sorok jelzik az ujraindulasokat. A naplo az "
+               "aramtalanitast nem eli tul.</i></p>"
+               "<p><a href=\"/\">Vissza a beallitasokhoz</a></p></body></html>"));
+    request->send(r);
+  });
+
   server.onNotFound([](AsyncWebServerRequest* request) {
     request->send(404, "text/plain", "Not found");
   });
@@ -1074,6 +1249,7 @@ void startConfigPortal() {
 
     // Az async callbackben nem blokkolunk és nem indítunk újra:
     // a loop() teszi meg, miután a válasz kiment.
+    logEvent(EV_CONFIG_SAVED, 0);
     restartAt = millis() + RESTART_GRACE_MS;
     restartPending = true;
   });
@@ -1107,6 +1283,7 @@ void setup() {
     handleStuckButton("Wifireset button got stuck.");
   }
 
+  logEvent(EV_BOOT, (uint16_t)esp_reset_reason());
   checkWatchdogResets();
 
   Serial.println("Init LittleFS.");
@@ -1116,6 +1293,7 @@ void setup() {
     // A konfigurációt tároló fájlrendszer nem elérhető. Ez NEM azonos azzal,
     // hogy nincs még konfiguráció - itt tényleg hiba van.
     if (deviceMode != MODE_FATAL) {
+      logEvent(EV_FATAL, 1);
       enterFatal("A LittleFS nem csatolhato, a wifi konfiguracio nem toltheto be.");
     }
   } else {
@@ -1129,6 +1307,7 @@ void setup() {
     if (st == CONFIG_ERROR && deviceMode != MODE_FATAL) {
       // A fájl létezik, de nem olvasható: sérült fájlrendszer. Ilyenkor nem
       // indulunk AP módba sem, mert a mentés is elbukna - inkább jelzünk.
+      logEvent(EV_FATAL, 2);
       enterFatal("A mentett wifi konfiguracio nem olvashato (serult fajlrendszer).");
     }
   }
@@ -1146,6 +1325,8 @@ void setup() {
   if (deviceMode != MODE_FATAL) {
     if (initWiFi()) {
       Serial.println("WIFI OK!");
+      logEvent(EV_WIFI_OK, (uint16_t)rtcRetryRounds);
+      rtcRetryRounds = 0;
       deviceMode = MODE_MONITOR;
       digitalWrite(wifiledPin, HIGH);  //led on
 
@@ -1237,6 +1418,7 @@ void loop() {
     case TESTING_STATE: {
       if (WiFi.status() != WL_CONNECTED) {
         printUptime();
+        logEvent(EV_WIFI_LOST, (uint16_t)WiFi.status());
         Serial.println("WiFi disconnected before test!");
         digitalWrite(wifiledPin, LOW);
 
@@ -1260,6 +1442,9 @@ void loop() {
       // A kapcsolat magától is helyreállhat (auto-reconnect), ilyenkor a LED
       // korábban hazudott volna.
       digitalWrite(wifiledPin, HIGH);
+      if (rtcRetryRounds != 0) {
+        rtcRetryRounds = 0;  // működik a hálózat: új 2 napos ablak
+      }
       printUptime();
       Serial.println("Beginning Test.");
       Serial.print("Teszt ciklus index = ");
@@ -1269,9 +1454,9 @@ void loop() {
 
       bool testResult;
       if (testState.cycleIndex == 1) {
-        testResult = testInternetPing(pingTargetCloudflare, "Cloudflare");
+        testResult = testInternetPing(IPAddress(1, 1, 1, 1), "Cloudflare");
       } else if (testState.cycleIndex == 3) {
-        testResult = testInternetPing(pingTargetGoogle, "Google");
+        testResult = testInternetPing(IPAddress(8, 8, 8, 8), "Google");
       } else if (testState.cycleIndex == 2 || testState.cycleIndex == 4) {
         testResult = testInternetHTTP("http://www.msftncsi.com/ncsi.txt", "Microsoft NCSI");
       } else {
@@ -1285,6 +1470,11 @@ void loop() {
         currentState = SUCCESS_STATE;
       } else {
         testState.failedCount++;
+        // Csak a hibasorozat első tagját naplózzuk: a 12 mp-enként ismétlődő
+        // bejegyzések különben percek alatt kiszorítanák a fontos eseményeket.
+        if (testState.failedCount == 1) {
+          logEvent(EV_TEST_FAIL, (uint16_t)testState.cycleIndex);
+        }
         printUptime();
         Serial.println("Test failed.");
         currentState = FAILURE_STATE;
@@ -1299,7 +1489,7 @@ void loop() {
 
         if (!uiFlags.resetPrinted) {
           printUptime();
-          Serial.println("Begining Reset in FAILURE_STATE.");
+          Serial.println("Beginning Reset in FAILURE_STATE.");
           while (!reset_device()) {
             resetbutton();
             wifiresetbutton();
@@ -1326,9 +1516,9 @@ void loop() {
           // konfigot - a disconnect(true) ugyanis eldobja a netifet.
           if (!reconnectWifi()) {
             printUptime();
-            Serial.println("A router reset utan sem jott vissza a WiFi - AP beallito mod.");
+            Serial.println("A router reset utan sem jott vissza a WiFi.");
             digitalWrite(wifiledPin, LOW);
-            startConfigPortal();
+            wifiGiveUp();
             break;
           }
 
@@ -1371,4 +1561,10 @@ void loop() {
       }
       break;
   }
+
+  // A várakozó állapotok (SUCCESS 1 perc, FAILURE 12 mp) alatt a loop()-nak
+  // nincs dolga. delay() nélkül 1. prioritáson pörögne 100% CPU-val; a
+  // vTaskDelay viszont ténylegesen felfüggeszti a taskot. Minden időzítés
+  // ezredmásodpercekben mér, tehát a 10 ms-os szemcsézettség nem számít.
+  delay(BUTTON_POLL_MS);
 }
