@@ -19,6 +19,21 @@ const char* PARAM_PASS    = "pass";
 const char* PARAM_IP      = "ip";
 const char* PARAM_GATEWAY = "gateway";
 
+// Tartalék űrlap arra az esetre, ha a data/ mappa nincs feltöltve a LittleFS-re.
+// Flashben él, RAM-ot nem foglal.
+const char FALLBACK_FORM[] =
+  "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+  "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+  "<title>ESP Wi-Fi Manager</title></head><body>"
+  "<h2>ESP Wi-Fi Manager</h2>"
+  "<p><b>Figyelem:</b> a data/ mappa nincs feltoltve a LittleFS-re.</p>"
+  "<form action=\"/\" method=\"POST\">"
+  "SSID <input name=\"ssid\" maxlength=\"32\" required><br>"
+  "Password <input name=\"pass\" type=\"password\" maxlength=\"63\"><br>"
+  "IP <input name=\"ip\" maxlength=\"15\" placeholder=\"opcionalis\"><br>"
+  "Gateway <input name=\"gateway\" maxlength=\"15\" placeholder=\"opcionalis\"><br>"
+  "<input type=\"submit\" value=\"Submit\"></form></body></html>";
+
 // AP password (WPA2: min. 8 karakter)
 const char* AP_PASSWORD = "bazsi1234";
 
@@ -499,6 +514,8 @@ size_t readBounded(WiFiClient& stream, char* buf, size_t maxLen, uint32_t timeou
       if (!stream.connected() && stream.available() <= 0) {
         break;
       }
+      resetbutton();
+      wifiresetbutton();
       yield();
       continue;
     }
@@ -629,9 +646,15 @@ void startConfigPortal() {
   Serial.print("AP IP address: ");
   Serial.println(WiFi.softAPIP());
 
-  // Web Server Root URL
+  // Web Server Root URL. Ha a data/ mappa nem került fel a LittleFS-re, a
+  // beginResponse(FS&,...) NULL-t ad és a kliens 501-et kapna - ilyenkor az
+  // eszköz konfigurálhatatlan lenne, ezért beépített tartalék űrlapot adunk.
   server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
-    request->send(LittleFS, "/wifimanager.html", "text/html");
+    if (LittleFS.exists("/wifimanager.html")) {
+      request->send(LittleFS, "/wifimanager.html", "text/html");
+    } else {
+      request->send(200, "text/html", FALLBACK_FORM);
+    }
   });
 
   // Csak a weboldal statikus elemeit szolgáljuk ki. A serveStatic("/") a teljes
@@ -713,10 +736,13 @@ void startConfigPortal() {
       }
     }
 
-    String message = "Done. ESP will restart and connect to your router.";
+    char message[96];
     if (ipStr[0] != '\0') {
-      message += " Then go to IP address: ";
-      message += ipStr;
+      snprintf(message, sizeof(message),
+               "Done. ESP will restart. Then go to IP address: %s", ipStr);
+    } else {
+      snprintf(message, sizeof(message),
+               "Done. ESP will restart and connect to your router (DHCP).");
     }
     request->send(200, "text/plain", message);
 

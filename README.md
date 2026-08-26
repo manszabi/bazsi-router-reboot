@@ -273,3 +273,14 @@ ellenőrizve a core, illetve az ESP-IDF forrásában:
 ## 📄 Licenc
 
 MIT License – lásd a [LICENSE](LICENSE) fájlt.
+
+## 🧪 Tesztek
+
+A firmware vezérlési logikája hardver nélkül is tesztelhető: a `test/` mappa a
+tényleges sketch-et fordítja host gcc-vel, stub ESP32 API-k felett.
+
+```bash
+cd test && make test
+```
+
+Részletek: [test/README.md](test/README.md)
