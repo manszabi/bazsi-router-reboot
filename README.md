@@ -233,6 +233,34 @@ Successful Test
 SUCCESS_DELAY delay start.
 ```
 
+## ✅ Tesztelt konfiguráció
+
+| | |
+|---|---|
+| **Board package** | ESP32 Arduino **3.3.11** |
+| **Beágyazott ESP-IDF** | `release_v5.5` (`esp32-arduino-libs-idf-release_v5.5-b774170f`) |
+| **Board** | XIAO ESP32-C3 (`D0`=GPIO2, `D1`=GPIO3, `D3`=GPIO5, `D4`=GPIO6, `D5`=GPIO7) |
+
+A firmware viselkedését meghatározó feltételezések ezen a konkrét verzión lettek
+ellenőrizve a core, illetve az ESP-IDF forrásában:
+
+- `WiFi.disconnect(true)` → az első paraméter `wifioff`, **nem** `eraseap`
+  (`WiFiSTA.h`), tehát a mentett hálózat nem törlődik.
+- `WiFi.config(ip, gw, subnet, dns1, dns2)` STA ága a DNS-t **szó szerint** az
+  átadott paraméterből veszi (`NetworkInterface.cpp` → `esp_netif_set_dns_info`),
+  gateway-fallback nincs, a DHCP-t pedig leállítja. Ezért kell a DNS-t kézzel
+  megadni.
+- `disconnect(true)` → `STA.end()` → `enableSTA(false)` → `STAClass::onDisable()`,
+  ami `_esp_netif = NULL; destroyNetif()`. A statikus IP/DNS és az
+  `ESP_NETIF_HAS_STATIC_IP_BIT` elvész, a következő `connect()` pedig a bit
+  hiányában `config()`-ot hív → DHCP. Ezért nem elég a nyers `WiFi.begin()`
+  a router reset után.
+- Deep sleepben az ESP32-C3 `GPIO6–21` lábai nagyimpedanciásak, csak a
+  `GPIO0–5` tartható hold funkcióval (ESP-IDF *Sleep Modes*, esp32c3).
+- `esp_deep_sleep_enable_gpio_wakeup()` ezen a néven létezik IDF 5.5-ben
+  (IDF 6.0-ban átnevezték – a kód mindkét nevet kezeli), és csak RTC-képes
+  lábat fogad el; a `D1` = GPIO3 megfelel.
+
 ## 🔒 Biztonság
 
 - A LittleFS-en tárolt Wi-Fi adatok (`/ssid.txt`, `/pass.txt`, `/ip.txt`,
