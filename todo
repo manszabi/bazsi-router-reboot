@@ -1,2 +1,0 @@
-Beragadt gomb ellenőrzés	azonnal	Ha nyomva: 60 mp deep sleep, majd újra -itt ellenőrizze a wifireset gombot, illetve 60 mp deepsleep előtt felváltva villogtassa a ledeket
-A 3 próba után a hiba oka dönt, nem az eltelt idő: WiFi.status()	Jelentés	Következmény,WL_CONNECT_FAILED	hitelesítési hiba → rossz jelszó	Azonnal AP mód, bármi más	a hálózat nem látszik → a router lekapcsolva	1 órás alvás, majd új kör: itt a rotert újraindítja?
