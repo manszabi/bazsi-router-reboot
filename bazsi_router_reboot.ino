@@ -8,6 +8,7 @@
 #include <ctype.h>
 #include "LittleFS.h"
 #include "esp_sleep.h"
+#include "esp_idf_version.h"
 
 // Create AsyncWebServer object on port 80
 AsyncWebServer server(80);
@@ -397,7 +398,13 @@ void tosleep() {
   // XIAO ESP32-C3-on D1 = GPIO3, tehát megfelel.
   // Szándékosan NINCS itt a wifireset gomb, és a handleStuckButton() sem
   // armol gombébresztést: egy beragadt gomb így nem tud boot loopot okozni.
+  // Az IDF 6.0 átnevezte ezt az API-t, az arduino-esp32 pedig idf ">=5.3,<6.2"
+  // tartományt deklarál, tehát mindkét névvel találkozhatunk.
+#if ESP_IDF_VERSION_MAJOR >= 6
+  esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown(1ULL << resetPin, ESP_GPIO_WAKEUP_GPIO_LOW);
+#else
   esp_deep_sleep_enable_gpio_wakeup(1ULL << resetPin, ESP_GPIO_WAKEUP_GPIO_LOW);
+#endif
 #endif
   esp_deep_sleep_start();
 }
