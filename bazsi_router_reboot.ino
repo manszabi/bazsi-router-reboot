@@ -229,11 +229,13 @@ enum EventCode : uint8_t {
   EV_STUCK_BUTTON = 11  // param: 0 = reset gomb, 1 = wifireset gomb
 };
 
+// Pontosan 8 bájt. A kitöltő mező explicit, hogy a RTC memóriában tárolt
+// elrendezés akkor se változzon, ha a fordító igazítási szabályai eltérnek.
 struct EventEntry {
   uint32_t uptimeSec;
   uint16_t param;
   uint8_t code;
-  uint8_t pad;
+  uint8_t reserved;
 };
 
 constexpr uint8_t EVLOG_SIZE = 32;
@@ -284,7 +286,7 @@ void logEvent(EventCode code, uint16_t param) {
   e.uptimeSec = (uint32_t)(esp_timer_get_time() / 1000000);
   e.code = (uint8_t)code;
   e.param = param;
-  e.pad = 0;
+  e.reserved = 0;
   rtcEvNext++;
 }
 
@@ -969,7 +971,9 @@ size_t readBounded(WiFiClient& stream, char* buf, size_t maxLen, uint32_t timeou
       resetbutton();
       wifiresetbutton();
       feedLoopWDT();
-      yield();
+      // delay() és nem yield(): a yield() csak azonos prioritású taskok között
+      // ad át vezérlést, tehát üresen pörgetné a CPU-t a válaszra várva.
+      delay(BUTTON_POLL_MS);
       continue;
     }
     buf[n++] = (char)c;
@@ -1331,7 +1335,7 @@ void setup() {
 
   Serial.begin(115200);
   const uint32_t serialTimeout = millis();
-  while (!Serial && millis() - serialTimeout < 3000) { yield(); }
+  while (!Serial && millis() - serialTimeout < 3000) { delay(BUTTON_POLL_MS); }
   blockingDelay(500);  // USB CDC beállása, hogy az induló logok ne vesszenek el
 
   printUptime();
