@@ -1,0 +1,2 @@
+#pragma once
+#define SOC_GPIO_SUPPORT_DEEPSLEEP_WAKEUP 1
