@@ -35,7 +35,33 @@ Az eszköz mindig pontosan egy üzemmódban van.
 | Van mentett SSID? | Viselkedés |
 |---|---|
 | **Nincs** | Azonnal `MODE_CONFIG` |
-| **Van** | **10 perc** várakozás (`firstStartDelay`), majd **3 próba** (köztük 30 mp), és csak utána `MODE_CONFIG` |
+| **Van** | **10 perc** várakozás (`firstStartDelay`), majd **3 próba** (köztük 30 mp) |
+
+A 3 próba után a **hiba oka** dönt, nem az eltelt idő:
+
+| `WiFi.status()` | Jelentés | Következmény |
+|---|---|---|
+| `WL_CONNECT_FAILED` | hitelesítési hiba → rossz jelszó | **Azonnal AP mód** |
+| bármi más | a hálózat nem látszik → a router lekapcsolva | **1 órás alvás, majd új kör** |
+
+Az ESP32 core megkülönbözteti a kettőt (`STA.cpp`): `WIFI_REASON_NO_AP_FOUND` →
+`WL_NO_SSID_AVAIL`, `WIFI_REASON_AUTH_FAIL` → `WL_CONNECT_FAILED`. Konzervatívan
+döntünk: **csak** az explicit hitelesítési hiba küld AP módba, mert a téves
+„várjunk tovább" ára késleltetett újrakonfigurálás, a téves „AP mód" ára viszont
+egy halott eszköz.
+
+### Meddig próbálkozik? – 2 nap
+
+| | |
+|---|---|
+| Egy kör | 10 perc várakozás + 2 perc próbálkozás + 60 perc alvás = **72 perc** |
+| Körök száma | `MAX_RETRY_ROUNDS = 40` |
+| Összesen | 40 × 72 perc = 2880 perc = **48 óra = 2 nap** |
+
+Két nap után AP beállító mód, majd 5 perc után alvás. A körszámláló
+`RTC_DATA_ATTR`-ben van: a deep sleepet túléli, de **bekapcsolásra és a reset
+gombra nullázódik** – kézi beavatkozás mindig friss 2 napos ablakot ad. Sikeres
+csatlakozás szintén nullázza.
 
 A 10 perces várakozás oka: áramszünet után az ESP másodpercek alatt elindul,
 a router viszont percekig bootol.
@@ -48,13 +74,36 @@ Teszttel kimérve (`PO1`–`PO3`):
 
 | A router ennyi idő múlva áll fel | Eredmény |
 |---|---|
-| 8 perc | Kivárja, csatlakozik, **normálisan működik** |
-| 11 perc | Az újrapróbálkozási ablakban még **elkapja** |
-| 20 perc | **Túl késő** → AP mód, majd 5 perc után alvás |
+| 8 perc | Kivárja az első körben, csatlakozik |
+| 11 perc | Az első kör próbálkozási ablakában még elkapja |
+| 20 perc | Az első kör lejár → alszik 1 órát → **a következő körben elkapja** |
+| **2 napnál tovább** | Feladja: AP mód, majd alvás |
 
-A határ nagyjából **12 perc**. Ennél lassabban induló router (DSL újraszinkron,
-hosszabb szolgáltatói kimaradás) esetén az eszköz AP módba parkol, és onnan
-csak a reset gombbal hozható vissza.
+Az első kör „ablaka" ~12 perc, de ez **nem** a tűréshatár: ami kimarad belőle,
+azt a következő óránkénti kör elkapja. A tényleges határ **2 nap**.
+
+## 12. Diagnosztikai napló
+
+Az eszköz az utolsó **32 eseményt** RTC memóriában tárolja, és a beállító
+portál `/log` oldalán kiírja. Soros kábel nélkül is megtudható, mi történt.
+
+| Túléli? | |
+|---|:---:|
+| Deep sleep | igen |
+| Watchdog / panic reset | igen |
+| Reset gomb | igen |
+| **Áramtalanítás** | **nem** |
+
+`RTC_NOINIT_ATTR`-ben van, ezért éli túl a resetet is – pont azokat a hibákat,
+amiket ki akarunk vizsgálni. Mérete 264 bájt a C3 ~8 KB-os RTC memóriájából.
+
+Rögzített események: `BOOT` (a reset okával), `WIFI OK`, `WIFI LOST`,
+`TEST FAIL`, `ROUTER RESET`, `AP MODE`, `CONFIG SAVED`, `SLEEP`, `FATAL`,
+`WDT RESET` – mindegyik uptime bélyeggel és egy paraméterrel (pl. a hiba oka
+vagy a sorszám).
+
+A `/log` oldal az aktuális állapotot is mutatja: reset ok, watchdog számláló,
+újrapróbálkozási körök, uptime.
 
 ---
 

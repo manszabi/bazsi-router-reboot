@@ -2,6 +2,9 @@
 #include <Arduino.h>
 #define WL_CONNECTED 3
 #define WL_DISCONNECTED 6
+#define WL_NO_SSID_AVAIL 1
+#define WL_CONNECT_FAILED 4
+typedef int wl_status_t;
 #define WIFI_STA 1
 #define WIFI_AP 2
 
@@ -22,6 +25,9 @@ struct WifiSim {
   // A hálózat csak ettől az időponttól elérhető (0 = azonnal). Ezzel
   // modellezhető, hogy a router az ESP után percekkel áll fel.
   uint32_t availableFrom = 0;
+  // Mit adjon vissza a status() amikor nincs kapcsolat (WL_CONNECT_FAILED-del
+  // modellezheto a rossz jelszo).
+  int failStatus = WL_DISCONNECTED;
   uint32_t latencyMs = 500;      // mennyi idő alatt jön létre
   bool begun = false;            // fut-e a begin() óta kapcsolódás
   uint32_t beginAt = 0;
@@ -51,13 +57,13 @@ public:
     wifiSim.beginCount++;
     simLog(std::string("WiFi.begin(") + (s ? s : "") + ")");
   }
-  int status() {
-    if (!wifiSim.begun || !wifiSim.willConnect) return WL_DISCONNECTED;
-    if (g_millis < wifiSim.availableFrom) return WL_DISCONNECTED;
+  wl_status_t status() {
+    if (!wifiSim.begun || !wifiSim.willConnect) return wifiSim.failStatus;
+    if (g_millis < wifiSim.availableFrom) return wifiSim.failStatus;
     // a társítás a begin() vagy a hálózat megjelenése közül a későbbitől indul
     const uint32_t from = wifiSim.beginAt > wifiSim.availableFrom
                           ? wifiSim.beginAt : wifiSim.availableFrom;
-    return (g_millis - from) >= wifiSim.latencyMs ? WL_CONNECTED : WL_DISCONNECTED;
+    return (g_millis - from) >= wifiSim.latencyMs ? WL_CONNECTED : wifiSim.failStatus;
   }
   String SSID() { return String("TestNet"); }
   IPAddress localIP() { return wifiSim.staticApplied ? wifiSim.cfgIp : IPAddress(192,168,1,77); }

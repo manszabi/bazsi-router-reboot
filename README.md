@@ -214,6 +214,9 @@ board_build.filesystem = littlefs
 | `firstStartDelay` | 10 perc | Első indítás utáni várakozás |
 | `maxfailureEvents` | 5 | A reset esemény számláló határa → **4** tényleges router újraindítás után deep sleep |
 | `wifi_maxRetries` | 3 | Wi-Fi újracsatlakozási próbálkozások |
+| `wifiInterval` | 30s | Szünet a próbálkozások között |
+| `MAX_RETRY_ROUNDS` | 40 | 40 × 72 perc = **2 nap** türelem, ha nincs hálózat |
+| `AP_TIMEOUT_MS` | 5 perc | AP mód tétlenség után alvás |
 
 ## 📊 Soros monitor
 
@@ -421,6 +424,13 @@ MIT License – lásd a [LICENSE](LICENSE) fájlt.
 ## 📊 Működési táblázat
 
 Az eszköz teljes viselkedése – mikor mit csinál és meddig, minden esettel:
+[MUKODES.md](MUKODES.md)
+
+## 🔍 Diagnosztikai napló
+
+Az utolsó 32 esemény RTC memóriában, a beállító portál **`/log`** oldalán
+olvasható – soros kábel nélkül is. Túléli a deep sleepet, a watchdog resetet és
+a reset gombot; csak az áramtalanítás törli. Részletek:
 [MUKODES.md](MUKODES.md)
 
 ## 🧪 Tesztek
