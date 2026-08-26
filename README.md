@@ -4,7 +4,7 @@ ESP32-C3 alapú automatikus router újraindító rendszer. Az eszköz folyamatos
 
 ## 📋 Jellemzők
 
-- **Automatikus internetkapcsolat-figyelés** – HTTP és ICMP (ping) tesztek váltakozásával
+- **Automatikus internetkapcsolat-figyelés** – HTTP és ICMP (ping) tesztek váltakozásával, két különböző publikus szerver felé
 - **Automatikus router újraindítás** – relé segítségével áramtalanítja, majd visszakapcsolja a routert
 - **Wi-Fi Manager** – böngészőből konfigurálható SSID, jelszó, IP-cím és gateway
 - **LittleFS** – a beállítások áramszünet után is megmaradnak
@@ -80,7 +80,7 @@ Az eszköz három állapotban működik:
               │ ROUTER RESET │
               │ (relé ki/be) │
               │ 90s szünet   │
-              │ + 6 perc     │
+              │ + 10 perc    │
               │   várakozás  │
               └──────────────┘
 ```
@@ -92,10 +92,12 @@ Az eszköz három állapotban működik:
 | 0 | HTTP – `msftconnecttest.com/connecttest.txt` |
 | 1 | Ping – Cloudflare `1.1.1.1` (4 ping, min. 2 sikeres kell) |
 | 2 | HTTP – `msftncsi.com/ncsi.txt` |
-| 3 | Ping – Cloudflare `1.1.1.1` |
+| 3 | Ping – Google `8.8.8.8` |
 | 4 | HTTP – `msftncsi.com/ncsi.txt` |
 | 5+ | HTTP – `msftconnecttest.com/connecttest.txt` |
 
+> A két ping teszt szándékosan más-más szolgáltatót céloz (Cloudflare, ill.
+> Google), így az egyikük kiesése nem tűnik internetkimaradásnak.
 > A ping teszt akkor áll le, amint az eredmény eldőlt (2 sikeres → sikeres,
 > vagy már a maradék pingekkel sem érhető el a 2 → sikertelen), így általában
 > a 4 pingnél kevesebbet futtat.
@@ -108,7 +110,7 @@ Az eszköz három állapotban működik:
    - Relé **bekapcsol** → router áramtalanítva
    - **90 másodperc** várakozás (RESET_PULSE)
    - Relé **kikapcsol** → router visszakap áramot
-   - **6 perc** várakozás (RESET_DELAY) – idő a router bootolásához
+   - **10 perc** várakozás (RESET_DELAY) – idő a router bootolásához
    - Wi-Fi újracsatlakozás
 2. Ha **5 sikertelen reset ciklus** → ESP deep sleep módba lép (1 óra)
 
@@ -179,8 +181,8 @@ board_build.filesystem = littlefs
 | `SUCCESS_DELAY` | 1 perc | Várakozás sikeres teszt után |
 | `PROBE_DELAY` | 12s | Várakozás sikertelen teszt után (újrapróbálkozás előtt) |
 | `RESET_PULSE` | 90s | Router áramtalanítás időtartama |
-| `RESET_DELAY` | 6 perc | Várakozás a router reset után (bootolási idő) |
-| `firstStartDelay` | 3 perc | Első indítás utáni várakozás |
+| `RESET_DELAY` | 10 perc | Várakozás a router reset után (bootolási idő) |
+| `firstStartDelay` | 10 perc | Első indítás utáni várakozás |
 | `maxfailureEvents` | 5 | Ennyi reset után deep sleep |
 | `wifi_maxRetries` | 3 | Wi-Fi újracsatlakozási próbálkozások |
 

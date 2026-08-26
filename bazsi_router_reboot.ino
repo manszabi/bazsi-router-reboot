@@ -42,8 +42,10 @@ IPAddress localGateway;
 IPAddress subnet(255, 255, 255, 0);
 // Tartalék DNS statikus IP esetén (a DHCP-től ilyenkor nem kapunk DNS-t)
 IPAddress dnsFallback(1, 1, 1, 1);
-// Ping cél: Cloudflare
-IPAddress pingTarget(1, 1, 1, 1);
+// Ping célok: két különböző szolgáltató, hogy egyikük kiesése ne tűnjön
+// internetkimaradásnak
+IPAddress pingTargetCloudflare(1, 1, 1, 1);
+IPAddress pingTargetGoogle(8, 8, 8, 8);
 
 // strapping pins 2, 8, 9
 // Set LED GPIO, relay state
@@ -62,9 +64,9 @@ constexpr uint8_t resetPin = D1;
 constexpr uint32_t interval = 20 * 1000;
 constexpr uint32_t SUCCESS_DELAY = 1 * 60 * 1000;
 constexpr uint32_t PROBE_DELAY = 12 * 1000;
-constexpr uint32_t RESET_DELAY = 6 * 60 * 1000;
+constexpr uint32_t RESET_DELAY = 10 * 60 * 1000;
 constexpr uint32_t RESET_PULSE = 90 * 1000;
-constexpr uint32_t firstStartDelay = 3 * 60 * 1000;
+constexpr uint32_t firstStartDelay = 10 * 60 * 1000;
 constexpr uint8_t maxfailureEvents = 5;  // failure sleep
 constexpr uint8_t wifi_maxRetries = 3;
 constexpr uint32_t wifiInterval = 20 * 1000;
@@ -518,12 +520,16 @@ bool testInternetHTTP(const char* url, const char* expectedResponse) {
   return result;
 }
 
-bool testInternet3() {
-  Serial.println("Ping teszt futtatása (Cloudflare - 1.1.1.1)...");
+bool testInternetPing(IPAddress& target, const char* targetName) {
+  Serial.print("Ping teszt futtatása (");
+  Serial.print(targetName);
+  Serial.print(" - ");
+  Serial.print(target);
+  Serial.println(")...");
   uint8_t successCount = 0;
 
   for (uint8_t j = 0; j < PING_ATTEMPTS; j++) {
-    const bool pingOK = Ping.ping(pingTarget, 1);  // 1 próbálkozás pingenként
+    const bool pingOK = Ping.ping(target, 1);  // 1 próbálkozás pingenként
     Serial.print("Ping ");
     Serial.print(j + 1);
     if (pingOK) {
@@ -793,8 +799,10 @@ void loop() {
       Serial.println(testState.failedCount);
 
       bool testResult;
-      if (testState.cycleIndex == 1 || testState.cycleIndex == 3) {
-        testResult = testInternet3();
+      if (testState.cycleIndex == 1) {
+        testResult = testInternetPing(pingTargetCloudflare, "Cloudflare");
+      } else if (testState.cycleIndex == 3) {
+        testResult = testInternetPing(pingTargetGoogle, "Google");
       } else if (testState.cycleIndex == 2 || testState.cycleIndex == 4) {
         testResult = testInternetHTTP("http://www.msftncsi.com/ncsi.txt", "Microsoft NCSI");
       } else {
