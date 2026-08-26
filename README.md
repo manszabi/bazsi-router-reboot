@@ -28,7 +28,7 @@ ESP32-C3 alapú automatikus router újraindító rendszer. Az eszköz folyamatos
 | Pin | Funkció |
 |-----|---------|
 | `D0` | Wi-Fi reset gomb (INPUT_PULLUP) |
-| `D1` | Reset / ébresztő gomb (INPUT_PULLUP) |
+| `D1` | Reset / ébresztő gomb (INPUT_PULLUP) – RTC GPIO, deep sleepből is ébreszt |
 | `D3` | Wi-Fi állapot LED |
 | `D4` | Állapot LED |
 | `D5` | Relé vezérlés (router tápellátás) |
@@ -52,6 +52,8 @@ Ha nincs mentett Wi-Fi adat (vagy a Wi-Fi reset gombot megnyomtad):
 > Az AP mód addig aktív marad, amíg be nem küldöd az űrlapot – nincs időkorlát.
 > Statikus IP esetén a DNS szervernek a megadott gateway (tartalékként `1.1.1.1`)
 > lesz beállítva, különben a névfeloldás – és így a HTTP-teszt – nem működne.
+> (Az ESP32 `WiFi.config()` STA ágában a DNS-t szó szerint a kapott paraméterből
+> veszi, gateway-fallback **nincs**, és a DHCP-t leállítja.)
 
 ### 2. Normál működés – Állapotgép
 
@@ -118,10 +120,35 @@ Az eszköz három állapotban működik:
 
 | Gomb | Funkció |
 |------|---------|
-| **Reset** (D1) | ESP32-C3 azonnali újraindítása |
+| **Reset** (D1) | ESP32-C3 azonnali újraindítása; deep sleepből felébreszti az eszközt |
 | **Wi-Fi Reset** (D0) | Mentett Wi-Fi adatok törlése + ESP újraindítás → visszaáll AP módba |
 
 > ⚠️ Ha induláskor valamelyik gomb beragadva marad, az ESP 60 másodpercre deep sleep módba lép (védelem).
+> Ilyenkor a gombos ébresztés **nincs** bekapcsolva, különben a beragadt gomb végtelen boot loopot okozna.
+
+### Deep sleep és ébredés
+
+| | |
+|---|---|
+| **Elalvás oka** | 5 sikertelen router reset, vagy sikertelen Wi-Fi újracsatlakozás |
+| **Alvás hossza** | 1 óra (timer), vagy 60 mp beragadt gomb esetén |
+| **Ébresztés** | timer **vagy** a reset gomb (D1) lenyomása |
+| **Ébredés után** | teljes újraindulás – a `setup()` fut le elölről |
+
+Az ESP32-C3 deep sleepből mindig **újraindulással** ébred: a RAM tartalma elvész,
+így a hibaszámlálók (`resetEvents`, `failedCount`) nullázódnak, és az eszköz
+tiszta lappal kezdi az internet tesztelését. A projekt nem használ RTC memóriát,
+tehát alvás előtti állapot nem őrződik meg.
+
+> ⚠️ **Hardver követelmény a relére.** Deep sleep alatt az ESP32-C3 digitális
+> lábai (GPIO6–21) nagyimpedanciás állapotba kerülnek, és csak az RTC lábak
+> (GPIO0–5) tarthatók meg hold funkcióval. A relé a `D5` = **GPIO7**-en van,
+> tehát az alvás teljes ideje alatt **lebeg** – ezt szoftverből nem lehet
+> megakadályozni. A relé vezérlőbemenetére **külső lehúzó ellenállás** kell
+> (aktív-HIGH modulnál 10 kΩ a GND felé), különben az alvás alatt a lebegő láb
+> véletlenül áramtalaníthatja a routert.
+> (Forrás: ESP-IDF *Sleep Modes*, ESP32-C3 – „digital GPIOs (GPIO6 ~ 21) are in
+> a high impedance state".)
 
 ## 📁 Projekt struktúra
 

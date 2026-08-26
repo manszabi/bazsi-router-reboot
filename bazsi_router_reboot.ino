@@ -7,6 +7,7 @@
 #include <string.h>
 #include <ctype.h>
 #include "LittleFS.h"
+#include "esp_sleep.h"
 
 // Create AsyncWebServer object on port 80
 AsyncWebServer server(80);
@@ -272,6 +273,13 @@ bool initWiFi() {
     return false;
   }
 
+  // Ha időközben (pl. az ESP saját auto-reconnectje miatt) már él a kapcsolat,
+  // ne indítsuk újra: a WiFi.begin() feleslegesen lebontaná.
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("Already connected, skipping reconnect.");
+    return true;
+  }
+
   // A módot a config() előtt kell beállítani, különben egyes core verziókban
   // az "STA Failed to configure" hibával elszáll.
   WiFi.mode(WIFI_STA);
@@ -362,6 +370,12 @@ bool reset_device() {
   return false;
 }
 
+// FIGYELEM (hardver): deep sleep alatt az ESP32-C3 digitális lábai (GPIO6-21)
+// nagyimpedanciás állapotba kerülnek, és csak az RTC lábak (GPIO0-5) tarthatók
+// meg hold funkcióval. A relé a D5 = GPIO7-en van, tehát az alvás teljes ideje
+// alatt LEBEG - szoftverből nem tartható. A relé vezérlőbemenetére külső
+// lehúzó ellenállás kell (aktív-HIGH modulnál 10k GND felé), különben az
+// alvás alatt véletlenül áramtalaníthatja a routert.
 void tosleep() {
   digitalWrite(ledPin, LOW);  //led gnd, led off
   digitalWrite(relayPin, LOW);
@@ -375,7 +389,16 @@ void tosleep() {
   server.end();
   Serial.flush();
   Serial.end();
+
   esp_sleep_enable_timer_wakeup(SLEEP_DURATION_US);
+#if SOC_GPIO_SUPPORT_DEEPSLEEP_WAKEUP
+  // A reset gomb ébressze is fel az eszközt, ne csak az 1 órás timer.
+  // Csak RTC-képes láb használható (ESP32-C3: GPIO0-GPIO5); a resetPin a
+  // XIAO ESP32-C3-on D1 = GPIO3, tehát megfelel.
+  // Szándékosan NINCS itt a wifireset gomb, és a handleStuckButton() sem
+  // armol gombébresztést: egy beragadt gomb így nem tud boot loopot okozni.
+  esp_deep_sleep_enable_gpio_wakeup(1ULL << resetPin, ESP_GPIO_WAKEUP_GPIO_LOW);
+#endif
   esp_deep_sleep_start();
 }
 
@@ -580,7 +603,7 @@ void handleFirstStart(uint32_t currentMillis) {
       return;  // a következő loop()-körben újrapróbáljuk
     }
 
-    timing.startMillis = currentMillis;  // újraindítjuk az időzítést
+    timing.startMillis = millis();  // újraindítjuk az időzítést (friss bélyeg)
   }
   uiFlags.firstStart = false;
 }
@@ -726,7 +749,7 @@ void setup() {
   }
 
   Serial.println("Init LittleFS.");
-  initLittleFS();
+  const bool fsReady = initLittleFS();
   // Load values saved in LittleFS
   readConfigValue(LittleFS, ssidPath, ssid, sizeof(ssid));
   readConfigValue(LittleFS, passPath, pass, sizeof(pass));
@@ -748,6 +771,9 @@ void setup() {
     digitalWrite(wifiledPin, HIGH);  //led on
   } else {
     // Nincs használható Wi-Fi: konfigurációs portál AP módban.
+    if (!fsReady) {
+      Serial.println("⚠️ LittleFS mount failed - the config page cannot be served!");
+    }
     startConfigPortal();
   }
 }
@@ -791,6 +817,9 @@ void loop() {
         testState.failedCount++;
         break;
       }
+      // A kapcsolat magától is helyreállhat (auto-reconnect), ilyenkor a LED
+      // korábban hazudott volna.
+      digitalWrite(wifiledPin, HIGH);
       printUptime();
       Serial.println("Beginning Test.");
       Serial.print("Teszt ciklus index = ");
@@ -850,26 +879,21 @@ void loop() {
           Serial.println("Reconnect WIFI in FAILURE_STATE.");
           WiFi.disconnect(true);
           blockingDelay(100);
-          WiFi.begin(ssid, pass);
 
-          const uint32_t reconnectStart = millis();
-          while (WiFi.status() != WL_CONNECTED && millis() - reconnectStart < interval) {
-            resetbutton();
-            wifiresetbutton();
-            yield();  // Wait without blocking other processes
-          }
-
-          if (WiFi.status() != WL_CONNECTED) {
+          // initWiFi()-t hívunk nyers WiFi.begin() helyett: a disconnect(true)
+          // leállítja a WiFi-t, és ilyenkor a netif statikus IP/DNS beállítása
+          // elveszik. Az initWiFi() újra alkalmazza, mielőtt csatlakozna.
+          if (initWiFi()) {
+            printUptime();
+            Serial.println("WIFI OK in FAILURE_STATE.");
+            digitalWrite(wifiledPin, HIGH);
+          } else {
             printUptime();
             Serial.println("WIFI fail, Restart WIFI in FAILURE_STATE.");
             digitalWrite(wifiledPin, LOW);
             if (!reconnectWifi()) {
               break;  // a következő körben újrapróbáljuk
             }
-          } else {
-            printUptime();
-            Serial.println("WIFI OK in FAILURE_STATE.");
-            digitalWrite(wifiledPin, HIGH);
           }
 
           testState.cycleIndex = 0;
