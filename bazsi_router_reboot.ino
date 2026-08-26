@@ -2,10 +2,11 @@
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
 #include <AsyncTCP.h>
-#include "LittleFS.h"
-#include "esp_wifi.h"
 #include <HTTPClient.h>
 #include <ESPping.h>
+#include <string.h>
+#include <ctype.h>
+#include "LittleFS.h"
 
 // Create AsyncWebServer object on port 80
 AsyncWebServer server(80);
@@ -16,14 +17,19 @@ const char* PARAM_PASS    = "pass";
 const char* PARAM_IP      = "ip";
 const char* PARAM_GATEWAY = "gateway";
 
-// AP password
+// AP password (WPA2: min. 8 karakter)
 const char* AP_PASSWORD = "bazsi1234";
 
-//Variables to save values from HTML form
-String ssid;
-String pass;
-String ip;
-String gateway;
+// A HTML űrlapról érkező értékek. Fix méretű bufferek: nincs heap-töredezettség,
+// és a szabvány szerinti maximumok egyben validációt is jelentenek.
+constexpr size_t SSID_MAX_LEN  = 32;  // IEEE 802.11 SSID
+constexpr size_t PASS_MAX_LEN  = 63;  // WPA2-PSK passphrase
+constexpr size_t IPSTR_MAX_LEN = 15;  // "255.255.255.255"
+
+char ssid[SSID_MAX_LEN + 1]        = { 0 };
+char pass[PASS_MAX_LEN + 1]        = { 0 };
+char ipStr[IPSTR_MAX_LEN + 1]      = { 0 };
+char gatewayStr[IPSTR_MAX_LEN + 1] = { 0 };
 
 // File paths to save input values permanently
 const char* ssidPath = "/ssid.txt";
@@ -32,86 +38,77 @@ const char* ipPath = "/ip.txt";
 const char* gatewayPath = "/gateway.txt";
 
 IPAddress localIP;
-//IPAddress localIP(192, 168, 1, 200); // hardcoded
-
-// Set your Gateway IP address
 IPAddress localGateway;
-
-//IPAddress localGateway(192, 168, 1, 1); //hardcoded
 IPAddress subnet(255, 255, 255, 0);
+// Tartalék DNS statikus IP esetén (a DHCP-től ilyenkor nem kapunk DNS-t)
+IPAddress dnsFallback(1, 1, 1, 1);
+// Ping cél: Cloudflare
+IPAddress pingTarget(1, 1, 1, 1);
 
 // strapping pins 2, 8, 9
 // Set LED GPIO, relay state
-const int ledPin = D4;
+constexpr uint8_t ledPin = D4;
 // wifi ok led
-const int wifiledPin = D3;
+constexpr uint8_t wifiledPin = D3;
 // Set RELAY pin, to router
-const int relayPin = D5;
+constexpr uint8_t relayPin = D5;
 // Set reset pin, esp wifireset pin
-const int wifiresetPin = D0;
+constexpr uint8_t wifiresetPin = D0;
 // Set reset pin, esp reset/wakeup pin
-const int resetPin = D1;
-
-// #define BUTTON_PIN_BITMASK 0x200000000  // 2^33 in hex
+constexpr uint8_t resetPin = D1;
 
 // Timer variables
 // interval to wait for Wi-Fi connection (milliseconds)
-const uint32_t interval = 20 * 1000;
-const uint32_t SUCCESS_DELAY = 1 * 60 * 1000;
-const uint32_t PROBE_DELAY = 12 * 1000;
-const uint32_t RESET_DELAY = 6 * 60 * 1000;
-const uint32_t RESET_PULSE = 90 * 1000;
-const uint32_t firstStartDelay = 3 * 60 * 1000;
-const uint8_t maxfailureEvents = 5;  // failure sleep
-const uint8_t wifi_maxRetries = 3;
-const uint32_t wifiInterval = 20 * 1000;
-const unsigned long debounceDelay_resetPin = 50;
-const unsigned long debounceDelay_wifiresetPin = 50;
+constexpr uint32_t interval = 20 * 1000;
+constexpr uint32_t SUCCESS_DELAY = 1 * 60 * 1000;
+constexpr uint32_t PROBE_DELAY = 12 * 1000;
+constexpr uint32_t RESET_DELAY = 6 * 60 * 1000;
+constexpr uint32_t RESET_PULSE = 90 * 1000;
+constexpr uint32_t firstStartDelay = 3 * 60 * 1000;
+constexpr uint8_t maxfailureEvents = 5;  // failure sleep
+constexpr uint8_t wifi_maxRetries = 3;
+constexpr uint32_t wifiInterval = 20 * 1000;
+constexpr uint32_t BUTTON_DEBOUNCE_MS = 50;
+constexpr uint32_t RESTART_GRACE_MS = 2000;  // válasz kiküldése újraindítás előtt
+
+constexpr uint64_t SLEEP_DURATION_US = 3600ULL * 1000000ULL;      // 1 óra
+constexpr uint64_t STUCK_BUTTON_SLEEP_US = 60ULL * 1000000ULL;    // 60 másodperc
+
+// Teszt paraméterek
+constexpr uint8_t PING_ATTEMPTS = 4;
+constexpr uint8_t PING_MIN_SUCCESS = 2;
+constexpr uint32_t PING_GAP_MS = 1000;
+constexpr size_t HTTP_MAX_PAYLOAD = 96;  // a várt válaszok < 32 bájt
+constexpr uint32_t HTTP_READ_TIMEOUT_MS = 1500;
+constexpr uint8_t MAX_CYCLE_INDEX = 10;
+constexpr uint8_t RESET_TRIGGER_FAILURES = 3;
+constexpr uint8_t RESET_TRIGGER_CYCLE = 3;
 
 struct TestState {
-  uint8_t cycleIndex = 0;       // volt: i
-  int failedCount = 0;          // volt: failedTestsCount
-  uint8_t resetEvents = 0;      // volt: Nreset_events
-  bool resetPulseActive = false;
-  uint8_t resetStep = 0;        // volt: step_reset_device
+  uint8_t cycleIndex = 0;   // volt: i
+  uint8_t failedCount = 0;  // volt: failedTestsCount
+  uint8_t resetEvents = 0;  // volt: Nreset_events
+  uint8_t resetStep = 0;    // 0 = tétlen, 1 = fut a reset pulzus
 };
 
 struct TimingState {
-  unsigned long stateStart = 0;           // volt: stateStartMillis_loop
-  unsigned long currentLoop = 0;          // volt: currentMillis_loop
-  unsigned long resetPulseStart = 0;      // volt: previousMillisResetPulse_reset_device
-  unsigned long resetDeviceCurrent = 0;   // volt: currentMillis_reset_device
-  unsigned long wifiInitPrev = 0;         // volt: previousMillis_initWiFi
-  unsigned long wifiInitCurrent = 0;      // volt: currentMillis_initWiFi
-  unsigned long reconnectStart = 0;       // volt: startAttemptTime_reconnectWifi
-  unsigned long reconnectCurrent = 0;     // volt: currentMillis_reconnectWifi
-  unsigned long resetBtnDebounce = 0;     // volt: lastDebounceTime_resetPin
-  unsigned long wifiResetBtnDebounce = 0; // volt: lastDebounceTime_wifiresetPin
-  unsigned long resetBtnCurrent = 0;      // volt: currentMillis_resetbutton
-  unsigned long wifiResetBtnCurrent = 0;  // volt: currentMillis_wifiresetbutton
-  unsigned long startMillis = 0;          // volt: startMillis (set to millis() in setup)
+  uint32_t stateStart = 0;             // állapotgép: aktuális állapot kezdete
+  uint32_t resetPulseStart = 0;        // relé kikapcsolás kezdete
+  uint32_t startMillis = 0;            // setup() időbélyege
+  uint32_t resetBtnDownSince = 0;      // debounce: mióta LOW a reset gomb
+  uint32_t wifiResetBtnDownSince = 0;  // debounce: mióta LOW a wifireset gomb
 };
 
 struct UIFlags {
-  bool successPrinted = false;      // volt: successfulTestPrinted
-  bool resetPrinted = false;        // volt: beginResetPrinted
-  bool firstStartPrinted = false;   // volt: firstStartPrinted
-  bool wifiAttemptPrinted = false;  // volt: printAttempts
-  bool firstStart = true;           // volt: firstStart
-};
-
-struct WifiState {
-  bool connected = false;           // volt: wifiConnected
-  bool connectionSuccess = false;   // volt: connectionSuccess
-  int attempts = 0;                 // volt: wifi_attempts
-  int buttonStateReset = HIGH;      // volt: buttonState_resetPin
-  int buttonStateWifiReset = HIGH;  // volt: buttonState_wifiresetPin
+  bool successPrinted = false;     // volt: successfulTestPrinted
+  bool resetPrinted = false;       // volt: beginResetPrinted
+  bool firstStartPrinted = false;  // volt: firstStartPrinted
+  bool firstStart = true;          // volt: firstStart
 };
 
 TestState testState;
 TimingState timing;
 UIFlags uiFlags;
-WifiState wifiState;
 
 enum State : uint8_t {
   TESTING_STATE = 0,
@@ -119,31 +116,80 @@ enum State : uint8_t {
   SUCCESS_STATE = 2
 };
 
-State currentState = TESTING_STATE;
+// Az eszköz vagy a routert figyeli, vagy a Wi-Fi beállító portált szolgálja ki.
+enum DeviceMode : uint8_t {
+  MODE_MONITOR = 0,
+  MODE_CONFIG = 1
+};
 
-// Initialize LittleFS
-void initLittleFS() {
-  if (!LittleFS.begin(true)) {
-    Serial.println("An error has occurred while mounting LittleFS");
+State currentState = TESTING_STATE;
+DeviceMode deviceMode = MODE_MONITOR;
+
+// Az aszinkron webszerver callbackjéből nem szabad blokkolni/újraindítani,
+// ezért csak jelzünk, az újraindítást a loop() végzi el.
+volatile bool restartPending = false;
+volatile uint32_t restartAt = 0;
+
+// Forward declarations (a .ino auto-prototípusok helyett explicit módon)
+void printUptime();
+void resetbutton();
+void wifiresetbutton();
+void blockingDelay(uint32_t duration);
+void waitWithButtons(uint32_t duration);
+void tosleep();
+bool initWiFi();
+bool reconnectWifi();
+
+// Whitespace levágása helyben, allokáció nélkül
+void trimInPlace(char* s) {
+  size_t len = strlen(s);
+  while (len > 0 && isspace((unsigned char)s[len - 1])) {
+    s[--len] = '\0';
   }
-  Serial.println("LittleFS mounted successfully");
+  size_t start = 0;
+  while (s[start] != '\0' && isspace((unsigned char)s[start])) {
+    start++;
+  }
+  if (start > 0) {
+    memmove(s, s + start, len - start + 1);
+  }
 }
 
-// Read File from LittleFS
-String readFile(fs::FS& fs, const char* path) {
-  Serial.printf("Reading file: %s\r\n", path);
+// Initialize LittleFS
+bool initLittleFS() {
+  if (!LittleFS.begin(true)) {
+    Serial.println("An error has occurred while mounting LittleFS");
+    return false;
+  }
+  Serial.println("LittleFS mounted successfully");
+  return true;
+}
+
+// Egy konfigurációs érték beolvasása fix méretű bufferbe (String allokáció nélkül)
+bool readConfigValue(fs::FS& fs, const char* path, char* out, size_t outSize) {
+  out[0] = '\0';
   File file = fs.open(path);
   if (!file || file.isDirectory()) {
-    Serial.println("- failed to open file for reading");
-    return String();
+    Serial.printf("- failed to open %s for reading\r\n", path);
+    if (file) {
+      file.close();
+    }
+    return false;
   }
-  String fileContent;
-  while (file.available()) {
-    fileContent = file.readStringUntil('\n');
-    break;
-  }
+  // Méret szerint olvasunk: a Stream::readBytesUntil() EOF-nál kivárná a teljes
+  // 1 másodperces stream-timeoutot, fájlonként (indulásnál ez 4 mp veszteség).
+  const size_t fileSize = file.size();
+  const size_t toRead = (fileSize < outSize - 1) ? fileSize : outSize - 1;
+  const size_t n = file.read((uint8_t*)out, toRead);
+  out[n] = '\0';
   file.close();
-  return fileContent;
+
+  char* nl = strchr(out, '\n');  // csak az első sor érdekel
+  if (nl != nullptr) {
+    *nl = '\0';
+  }
+  trimInPlace(out);
+  return out[0] != '\0';
 }
 
 void clearFile(fs::FS& fs, const char* path) {
@@ -173,9 +219,19 @@ void writeFile(fs::FS& fs, const char* path, const char* message) {
   file.close();
 }
 
-void blockingDelay(unsigned long duration) {
-  unsigned long start = millis();
+void blockingDelay(uint32_t duration) {
+  const uint32_t start = millis();
   while (millis() - start < duration) {
+    yield();
+  }
+}
+
+// Várakozás úgy, hogy a fizikai gombok közben is működnek
+void waitWithButtons(uint32_t duration) {
+  const uint32_t start = millis();
+  while (millis() - start < duration) {
+    resetbutton();
+    wifiresetbutton();
     yield();
   }
 }
@@ -183,34 +239,59 @@ void blockingDelay(unsigned long duration) {
 void handleStuckButton(const char* message) {
   Serial.println(message);
   digitalWrite(ledPin, LOW);
-  esp_sleep_enable_timer_wakeup(60ULL * 1000000ULL);  // 60 sec
+  Serial.flush();
+  esp_sleep_enable_timer_wakeup(STUCK_BUTTON_SLEEP_US);
   esp_deep_sleep_start();
+}
+
+void printUptime() {
+  const uint32_t totalSec = (uint32_t)(esp_timer_get_time() / 1000000);
+  const uint32_t d = totalSec / 86400;
+  const uint32_t h = (totalSec % 86400) / 3600;
+  const uint32_t m = (totalSec % 3600) / 60;
+  const uint32_t s = totalSec % 60;
+
+  char buf[48];
+  if (d > 0) {
+    snprintf(buf, sizeof(buf), "Uptime: %lud %luh %lum %lus",
+             (unsigned long)d, (unsigned long)h, (unsigned long)m, (unsigned long)s);
+  } else {
+    snprintf(buf, sizeof(buf), "Uptime: %luh %lum %lus",
+             (unsigned long)h, (unsigned long)m, (unsigned long)s);
+  }
+  Serial.println(buf);
 }
 
 // Initialize WiFi
 bool initWiFi() {
-
   printUptime();
-  bool ssidValid = ssid.length() > 0;
-  if (!ssidValid) {
+  if (ssid[0] == '\0') {
     Serial.println("Undefined SSID!");
-    wifiState.connectionSuccess = false;
-    return wifiState.connectionSuccess;
-  }
-  // Ellenőrizzük az SSID-t, IP-t, gateway-t
-  bool ipValid = localIP.fromString(ip.c_str());
-  bool gatewayValid = localGateway.fromString(gateway.c_str());
-  if (!ipValid) {
-    Serial.println("❌ Invalid IP format!");
+    return false;
   }
 
-  if (!gatewayValid) {
-    Serial.println("❌ Invalid gateway format!");
+  // A módot a config() előtt kell beállítani, különben egyes core verziókban
+  // az "STA Failed to configure" hibával elszáll.
+  WiFi.mode(WIFI_STA);
+
+  // Statikus IP csak akkor, ha meg is adták. Üres mező = DHCP, nem hiba.
+  bool staticOk = false;
+  if (ipStr[0] != '\0' || gatewayStr[0] != '\0') {
+    const bool ipValid = localIP.fromString(ipStr);
+    const bool gatewayValid = localGateway.fromString(gatewayStr);
+    if (!ipValid) {
+      Serial.println("❌ Invalid IP format!");
+    }
+    if (!gatewayValid) {
+      Serial.println("❌ Invalid gateway format!");
+    }
+    staticOk = ipValid && gatewayValid;
   }
 
-  // Csak akkor konfiguráljuk kézzel, ha minden formátum jó
-  if (ssidValid && ipValid && gatewayValid) {
-    if (!WiFi.config(localIP, localGateway, subnet)) {
+  if (staticOk) {
+    // DNS-t is meg kell adni: statikus konfignál a DHCP-s DNS elveszik,
+    // enélkül a névfeloldás (és így a HTTP teszt) mindig elbukna.
+    if (!WiFi.config(localIP, localGateway, subnet, localGateway, dnsFallback)) {
       Serial.println("⚠️ STA Failed to configure");
     } else {
       Serial.println("✅ Manual IP config applied.");
@@ -219,49 +300,35 @@ bool initWiFi() {
     Serial.println("➡️ Skipping manual IP config. Using DHCP...");
   }
 
-  // Mindig próbálunk csatlakozni a WiFi-hez
-  printUptime();
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid.c_str(), pass.c_str());
+  WiFi.begin(ssid, pass);
   Serial.println("Connecting to WiFi...");
   Serial.print("Trying to connect to SSID: ");
   Serial.println(ssid);
-  blockingDelay(100);
-  timing.wifiInitCurrent = millis();
-  timing.wifiInitPrev = timing.wifiInitCurrent;
+
+  const uint32_t startAttempt = millis();
   while (WiFi.status() != WL_CONNECTED) {
     resetbutton();
     wifiresetbutton();
     yield();
-    timing.wifiInitCurrent = millis();
-    if (timing.wifiInitCurrent - timing.wifiInitPrev >= interval) {
+    if (millis() - startAttempt >= interval) {
       printUptime();
       Serial.println("Failed to connect.");
-      wifiState.connectionSuccess = false;
-      return wifiState.connectionSuccess;
+      return false;
     }
   }
 
-  if (WiFi.status() == WL_CONNECTED) {
-    printUptime();
-    Serial.print("Connected to: ");
-    Serial.println(WiFi.SSID());
-    Serial.print("IP Address: ");
-    Serial.println(WiFi.localIP());
-    Serial.print("Signal strength (RSSI): ");
-    Serial.print(WiFi.RSSI());
-    Serial.println(" dBm");
-    wifiState.connectionSuccess = true;
-    return wifiState.connectionSuccess;
-  }
-
-  wifiState.connectionSuccess = false;
-  return wifiState.connectionSuccess;
+  printUptime();
+  Serial.print("Connected to: ");
+  Serial.println(WiFi.SSID());
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+  Serial.print("Signal strength (RSSI): ");
+  Serial.print(WiFi.RSSI());
+  Serial.println(" dBm");
+  return true;
 }
 
 bool reset_device() {
-  // keep track of number of resets
-  timing.resetDeviceCurrent = millis();
   if (testState.resetStep == 0) {
     testState.resetEvents++;
     if (testState.resetEvents >= maxfailureEvents) {
@@ -274,18 +341,19 @@ bool reset_device() {
     Serial.println("Relay on.");
     digitalWrite(ledPin, LOW);
     Serial.println("Reset_pulse delay.");
-    testState.resetPulseActive = true;
-    testState.resetStep++;
+    testState.resetStep = 1;
     timing.resetPulseStart = millis();
+    // A pulzus most indult: ebben a hívásban még biztosan nem járt le.
+    return false;
   }
-  if (testState.resetPulseActive && (timing.resetDeviceCurrent - timing.resetPulseStart >= RESET_PULSE)) {
+
+  if (millis() - timing.resetPulseStart >= RESET_PULSE) {
     Serial.println("Reset_pulse delay end.");
     Serial.print("Powering ON the router. Instance = ");
     Serial.println(testState.resetEvents);
     digitalWrite(relayPin, LOW);
     digitalWrite(ledPin, HIGH);
     printUptime();
-    testState.resetPulseActive = false;
     testState.resetStep = 0;
     return true;
   }
@@ -303,173 +371,189 @@ void tosleep() {
   Serial.println("Going to sleep now");
   WiFi.disconnect(true);
   server.end();
+  Serial.flush();
   Serial.end();
-  blockingDelay(500);
+  esp_sleep_enable_timer_wakeup(SLEEP_DURATION_US);
   esp_deep_sleep_start();
 }
 
-void printUptime() {
-  int64_t totalSec = esp_timer_get_time() / 1000000;
-  int64_t d = totalSec / 86400;
-  int h = (totalSec % 86400) / 3600;
-  int m = (totalSec % 3600) / 60;
-  int s = totalSec % 60;
-
-  char buf[40];
-  if (d > 0) {
-    snprintf(buf, sizeof(buf), "Uptime: %lldd %dh %dm %ds", (long long)d, h, m, s);
-  } else {
-    snprintf(buf, sizeof(buf), "Uptime: %dh %dm %ds", h, m, s);
-  }
-  Serial.println(buf);
-}
-
 void resetbutton() {
-  wifiState.buttonStateReset = digitalRead(resetPin);
-  if (wifiState.buttonStateReset == LOW) {
-    timing.resetBtnCurrent = millis();
-    if ((timing.resetBtnCurrent - timing.resetBtnDebounce) > debounceDelay_resetPin) {
-      timing.resetBtnDebounce = timing.resetBtnCurrent;
-      Serial.println("Reset button pressed.");
-      Serial.println("RESTART ESP32C3 device.");
-      blockingDelay(500);
-      ESP.restart();
-    }
+  if (digitalRead(resetPin) != LOW) {
+    timing.resetBtnDownSince = 0;  // felengedve: debounce újraindul
+    return;
+  }
+  const uint32_t now = millis();
+  if (timing.resetBtnDownSince == 0) {
+    timing.resetBtnDownSince = now;
+    return;
+  }
+  // Csak akkor fogadjuk el, ha végig lenyomva maradt (valódi debounce)
+  if (now - timing.resetBtnDownSince >= BUTTON_DEBOUNCE_MS) {
+    Serial.println("Reset button pressed.");
+    Serial.println("RESTART ESP32C3 device.");
+    Serial.flush();
+    ESP.restart();
   }
 }
 
 void wifiresetbutton() {
-  wifiState.buttonStateWifiReset = digitalRead(wifiresetPin);
-  if (wifiState.buttonStateWifiReset == LOW) {
-    timing.wifiResetBtnCurrent = millis();
-    if ((timing.wifiResetBtnCurrent - timing.wifiResetBtnDebounce) > debounceDelay_wifiresetPin) {
-      timing.wifiResetBtnDebounce = timing.wifiResetBtnCurrent;
-      Serial.println("WIFIRESET button is pulling down!");
-      Serial.println("RESET saved wifi data!");
-      clearFile(LittleFS, gatewayPath);
-      clearFile(LittleFS, ipPath);
-      clearFile(LittleFS, passPath);
-      clearFile(LittleFS, ssidPath);
-      Serial.println("RESTART ESP32C3 device.");
-      blockingDelay(500);
-      ESP.restart();
-    }
+  if (digitalRead(wifiresetPin) != LOW) {
+    timing.wifiResetBtnDownSince = 0;
+    return;
+  }
+  const uint32_t now = millis();
+  if (timing.wifiResetBtnDownSince == 0) {
+    timing.wifiResetBtnDownSince = now;
+    return;
+  }
+  if (now - timing.wifiResetBtnDownSince >= BUTTON_DEBOUNCE_MS) {
+    Serial.println("WIFIRESET button is pulling down!");
+    Serial.println("RESET saved wifi data!");
+    clearFile(LittleFS, gatewayPath);
+    clearFile(LittleFS, ipPath);
+    clearFile(LittleFS, passPath);
+    clearFile(LittleFS, ssidPath);
+    Serial.println("RESTART ESP32C3 device.");
+    Serial.flush();
+    ESP.restart();
   }
 }
 
 bool reconnectWifi() {
-
-  wifiState.connected = false;
-  timing.reconnectStart = millis();
-  wifiState.attempts = 0;
   printUptime();
   Serial.println("Starting reconnectWifi loop");
 
-  while (wifiState.attempts < wifi_maxRetries) {
+  for (uint8_t attempt = 0; attempt < wifi_maxRetries; attempt++) {
+    printUptime();
+    Serial.print("Attempt ");
+    Serial.println(attempt + 1);
 
-    timing.reconnectCurrent = millis();
+    if (initWiFi()) {
+      printUptime();
+      Serial.println("WIFI RECONECTED!");
+      digitalWrite(wifiledPin, HIGH);
+      return true;
+    }
 
-    if (wifiState.attempts == 0 || (timing.reconnectCurrent - timing.reconnectStart >= wifiInterval)) {
-      timing.reconnectStart = timing.reconnectCurrent;
-      if (!uiFlags.wifiAttemptPrinted) {
-        printUptime();
-        Serial.print("Attempt ");
-        Serial.println(wifiState.attempts + 1);
-        uiFlags.wifiAttemptPrinted = true;
-      }
-      Serial.println("Calling initWiFi()");
-      if (initWiFi()) {
-        printUptime();
-        Serial.println("WIFI RECONECTED! In FAILURE_STATE.");
-        digitalWrite(wifiledPin, HIGH);
-        uiFlags.wifiAttemptPrinted = false;
-        Serial.println("Exiting loop with wifiConnected = true");
-        wifiState.connected = true;
-        return wifiState.connected;
+    printUptime();
+    Serial.print("WIFI ERROR! WiFi status: ");
+    Serial.println(WiFi.status());
 
-      } else {
-        wifiState.connected = false;
-        printUptime();
-        Serial.println("WIFI ERROR! In FAILURE_STATE.");
-        if (wifiState.attempts < wifi_maxRetries - 1) {
-          printUptime();
-          Serial.print(wifiInterval / 1000);
-          Serial.println(" seconds delay start.");
-        }
-        Serial.print("WiFi status: ");
-        Serial.println(WiFi.status());
-        timing.reconnectStart = millis();
-        wifiState.attempts++;
-        uiFlags.wifiAttemptPrinted = false;
-      }
+    if (attempt + 1 < wifi_maxRetries) {
+      printUptime();
+      Serial.print(wifiInterval / 1000);
+      Serial.println(" seconds delay start.");
+      waitWithButtons(wifiInterval);  // gombok közben is élnek, nincs busy-loop
     }
   }
 
-  if (!wifiState.connected) {
-    printUptime();
-    Serial.print("WIFI FAILED TO RECONNECT AFTER ");
-    Serial.print(wifi_maxRetries);
-    Serial.println(" wifi_ATTEMPTS!");
-    tosleep();
-    wifiState.connected = false;  //ha gond lenne a tosleep-el
-    return wifiState.connected;
+  printUptime();
+  Serial.print("WIFI FAILED TO RECONNECT AFTER ");
+  Serial.print(wifi_maxRetries);
+  Serial.println(" wifi_ATTEMPTS!");
+  tosleep();
+  return false;  // ha a tosleep() mégis visszatérne
+}
+
+// Korlátozott méretű, időzáras olvasás: nem allokál, és nem tud "elszállni"
+// egy captive portal többszáz kilobájtos válaszán.
+size_t readBounded(WiFiClient& stream, char* buf, size_t maxLen, uint32_t timeoutMs) {
+  size_t n = 0;
+  uint32_t lastByte = millis();
+  while (n < maxLen && (millis() - lastByte) < timeoutMs) {
+    const int c = stream.read();
+    if (c < 0) {
+      // A szerver lezárta és nincs több adat: nincs értelme a timeoutot kivárni
+      if (!stream.connected() && stream.available() <= 0) {
+        break;
+      }
+      yield();
+      continue;
+    }
+    buf[n++] = (char)c;
+    lastByte = millis();
   }
-  return wifiState.connected;
+  return n;
 }
 
 bool testInternetHTTP(const char* url, const char* expectedResponse) {
+  WiFiClient client;
   HTTPClient http;
+  http.setReuse(false);
+  http.setConnectTimeout(5000);
   http.setTimeout(10000);
-  http.begin(url);
-  int httpCode = http.GET();
+
+  if (!http.begin(client, url)) {
+    Serial.println("Error: HTTP begin failed");
+    return false;
+  }
+
+  const int httpCode = http.GET();
   bool result = false;
 
-  if (httpCode > 0) {
-    String payload = http.getString();
-    Serial.println(payload);
-    result = payload.equals(expectedResponse);
-    Serial.println(result ? "Igaz érték!" : "Hamis érték!");
+  if (httpCode == HTTP_CODE_OK) {
+    const int len = http.getSize();
+    if (len > (int)HTTP_MAX_PAYLOAD) {
+      // Ekkora választ nem a várt endpoint küld (pl. captive portal)
+      Serial.print("Unexpected payload size: ");
+      Serial.println(len);
+    } else {
+      const size_t want = (len > 0) ? (size_t)len : HTTP_MAX_PAYLOAD;
+      char payload[HTTP_MAX_PAYLOAD + 1];
+      // Ugyanaz a stream, amit a http.begin() kapott — nem függünk a
+      // getStream() core-verziónként eltérő visszatérési típusától.
+      const size_t n = readBounded(client, payload, want, HTTP_READ_TIMEOUT_MS);
+      payload[n] = '\0';
+      trimInPlace(payload);  // a záró CR/LF ne buktassa el az egyezést
+      Serial.println(payload);
+      result = (strcmp(payload, expectedResponse) == 0);
+      Serial.println(result ? "Igaz érték!" : "Hamis érték!");
+    }
   } else {
     Serial.print("Error on HTTP request, code: ");
     Serial.println(httpCode);
   }
+
   http.end();
   return result;
 }
 
 bool testInternet3() {
   Serial.println("Ping teszt futtatása (Cloudflare - 1.1.1.1)...");
-  IPAddress remote_ip(1, 1, 1, 1);  // Cloudflare DNS IP-je
-  int successCount = 0;
+  uint8_t successCount = 0;
 
-  for (int j = 0; j < 4; j++) {
-    bool pingOK = Ping.ping(remote_ip, 1);  // 1 próbálkozás pingenként
+  for (uint8_t j = 0; j < PING_ATTEMPTS; j++) {
+    const bool pingOK = Ping.ping(pingTarget, 1);  // 1 próbálkozás pingenként
+    Serial.print("Ping ");
+    Serial.print(j + 1);
     if (pingOK) {
-      Serial.print("Ping ");
-      Serial.print(j + 1);
       Serial.println(" sikeres.");
       successCount++;
+      // Az eredmény eldőlt, a maradék pinget felesleges megvárni
+      if (successCount >= PING_MIN_SUCCESS) {
+        Serial.println("✅ Ping teszt sikeres.");
+        return true;
+      }
     } else {
-      Serial.print("Ping ");
-      Serial.print(j + 1);
       Serial.println(" sikertelen.");
       if (j == 0) {
         Serial.println("⚠️ Első ping hiba — lehet, hogy a hálózat ébred.");
       }
+      const uint8_t remaining = PING_ATTEMPTS - (j + 1);
+      if (successCount + remaining < PING_MIN_SUCCESS) {
+        Serial.println("❌ Ping teszt sikertelen — hálózati probléma valószínű.");
+        return false;
+      }
     }
-    blockingDelay(1000);  // Kíméletes tesztelés
+    if (j + 1 < PING_ATTEMPTS) {
+      waitWithButtons(PING_GAP_MS);  // Kíméletes tesztelés
+    }
   }
 
-  if (successCount < 2) {
-    Serial.println("❌ Ping teszt sikertelen — hálózati probléma valószínű.");
-    return false;
-  } else {
-    Serial.println("✅ Ping teszt sikeres.");
-    return true;
-  }
+  return successCount >= PING_MIN_SUCCESS;
 }
 
-void handleFirstStart(unsigned long currentMillis) {
+void handleFirstStart(uint32_t currentMillis) {
   if (WiFi.status() != WL_CONNECTED) {
     if (currentMillis - timing.startMillis < firstStartDelay) {
       if (!uiFlags.firstStartPrinted) {
@@ -486,10 +570,8 @@ void handleFirstStart(unsigned long currentMillis) {
     printUptime();
     Serial.println("First start wait end.");
 
-    while (!reconnectWifi()) {
-      resetbutton();
-      wifiresetbutton();
-      yield();
+    if (!reconnectWifi()) {
+      return;  // a következő loop()-körben újrapróbáljuk
     }
 
     timing.startMillis = currentMillis;  // újraindítjuk az időzítést
@@ -497,23 +579,136 @@ void handleFirstStart(unsigned long currentMillis) {
   uiFlags.firstStart = false;
 }
 
+void startConfigPortal() {
+  deviceMode = MODE_CONFIG;
+  digitalWrite(wifiledPin, LOW);  //led off
+
+  Serial.println("Setting AP (Access Point)");
+  char apName[32];
+  snprintf(apName, sizeof(apName), "ESP-%s", ESP.getChipModel());
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(apName, AP_PASSWORD);
+  Serial.print("AP SSID: ");
+  Serial.println(apName);
+  Serial.print("AP IP address: ");
+  Serial.println(WiFi.softAPIP());
+
+  // Web Server Root URL
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
+    request->send(LittleFS, "/wifimanager.html", "text/html");
+  });
+
+  // Csak a weboldal statikus elemeit szolgáljuk ki. A serveStatic("/") a teljes
+  // LittleFS-t kiadta volna, azaz a /pass.txt-ben tárolt Wi-Fi jelszót is.
+  server.on("/style.css", HTTP_GET, [](AsyncWebServerRequest* request) {
+    request->send(LittleFS, "/style.css", "text/css");
+  });
+  server.on("/favicon.png", HTTP_GET, [](AsyncWebServerRequest* request) {
+    request->send(LittleFS, "/favicon.png", "image/png");
+  });
+  server.onNotFound([](AsyncWebServerRequest* request) {
+    request->send(404, "text/plain", "Not found");
+  });
+
+  server.on("/", HTTP_POST, [](AsyncWebServerRequest* request) {
+    const int params = request->params();
+    for (int i = 0; i < params; i++) {
+      const AsyncWebParameter* p = request->getParam(i);
+      if (!p->isPost()) {
+        continue;
+      }
+      const String& name = p->name();
+      const String& val = p->value();  // referencia: nincs felesleges másolat
+
+      if (name == PARAM_SSID) {
+        if (val.length() > 0 && val.length() <= SSID_MAX_LEN) {
+          strlcpy(ssid, val.c_str(), sizeof(ssid));
+          Serial.print("SSID set to: ");
+          Serial.println(ssid);
+          writeFile(LittleFS, ssidPath, ssid);
+        } else {
+          Serial.println("Invalid SSID length!");
+        }
+      } else if (name == PARAM_PASS) {
+        if (val.length() <= PASS_MAX_LEN) {
+          strlcpy(pass, val.c_str(), sizeof(pass));
+          Serial.print("Password set to: ");
+          Serial.print(val.length());
+          Serial.println(" chars");
+          writeFile(LittleFS, passPath, pass);
+        } else {
+          Serial.println("Password too long!");
+        }
+      } else if (name == PARAM_IP) {
+        IPAddress testIP;
+        if (val.length() == 0) {
+          ipStr[0] = '\0';
+          Serial.println("IP empty, using DHCP.");
+          writeFile(LittleFS, ipPath, "");
+        } else if (val.length() <= IPSTR_MAX_LEN && testIP.fromString(val.c_str())) {
+          strlcpy(ipStr, val.c_str(), sizeof(ipStr));
+          Serial.print("IP Address set to: ");
+          Serial.println(ipStr);
+          writeFile(LittleFS, ipPath, ipStr);
+        } else {
+          Serial.println("Invalid IP format!");
+        }
+      } else if (name == PARAM_GATEWAY) {
+        IPAddress testIP;
+        if (val.length() == 0) {
+          gatewayStr[0] = '\0';
+          Serial.println("Gateway empty, using DHCP.");
+          writeFile(LittleFS, gatewayPath, "");
+        } else if (val.length() <= IPSTR_MAX_LEN && testIP.fromString(val.c_str())) {
+          strlcpy(gatewayStr, val.c_str(), sizeof(gatewayStr));
+          Serial.print("Gateway set to: ");
+          Serial.println(gatewayStr);
+          writeFile(LittleFS, gatewayPath, gatewayStr);
+        } else {
+          Serial.println("Invalid gateway format!");
+        }
+      }
+
+      // A jelszót soha nem írjuk ki nyíltan a soros portra
+      if (name == PARAM_PASS) {
+        Serial.printf("POST[%s]: <%u chars>\n", name.c_str(), (unsigned)val.length());
+      } else {
+        Serial.printf("POST[%s]: %s\n", name.c_str(), val.c_str());
+      }
+    }
+
+    String message = "Done. ESP will restart and connect to your router.";
+    if (ipStr[0] != '\0') {
+      message += " Then go to IP address: ";
+      message += ipStr;
+    }
+    request->send(200, "text/plain", message);
+
+    // Az async callbackben nem blokkolunk és nem indítunk újra:
+    // a loop() teszi meg, miután a válasz kiment.
+    restartAt = millis() + RESTART_GRACE_MS;
+    restartPending = true;
+  });
+
+  server.begin();
+}
+
 void setup() {
   timing.startMillis = millis();
 
   pinMode(wifiresetPin, INPUT_PULLUP);
   pinMode(resetPin, INPUT_PULLUP);
-  esp_sleep_enable_timer_wakeup(3600000000);  // Wake up after 1 hour
-  // esp_deep_sleep_enable_gpio_wakeup(BIT(D1), ESP_GPIO_WAKEUP_GPIO_LOW); // ha gombbal szeretném felébreszteni akkor ezeket a sorokat törölni kell: esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL) esp_sleep_enable_timer_wakeup(60 * 60 * 1000000)
   pinMode(ledPin, OUTPUT);
   pinMode(wifiledPin, OUTPUT);
   pinMode(relayPin, OUTPUT);
   digitalWrite(wifiledPin, LOW);
   digitalWrite(relayPin, LOW);
   digitalWrite(ledPin, HIGH);  //bekapcsolja a ledet, +5volt 150 ohm
+
   Serial.begin(115200);
-  unsigned long serialTimeout = millis();
+  const uint32_t serialTimeout = millis();
   while (!Serial && millis() - serialTimeout < 3000) { yield(); }
-  blockingDelay(500);
+  blockingDelay(500);  // USB CDC beállása, hogy az induló logok ne vesszenek el
 
   printUptime();
 
@@ -527,110 +722,49 @@ void setup() {
   Serial.println("Init LittleFS.");
   initLittleFS();
   // Load values saved in LittleFS
-  ssid = readFile(LittleFS, ssidPath);
-  pass = readFile(LittleFS, passPath);
-  ip = readFile(LittleFS, ipPath);
-  gateway = readFile(LittleFS, gatewayPath);
+  readConfigValue(LittleFS, ssidPath, ssid, sizeof(ssid));
+  readConfigValue(LittleFS, passPath, pass, sizeof(pass));
+  readConfigValue(LittleFS, ipPath, ipStr, sizeof(ipStr));
+  readConfigValue(LittleFS, gatewayPath, gatewayStr, sizeof(gatewayStr));
 
   Serial.println(ssid);
-  Serial.println(String(pass.length()) + " chars password loaded");
-  Serial.println(ip);
-  Serial.println(gateway);
+  Serial.print((unsigned)strlen(pass));
+  Serial.println(" chars password loaded");
+  Serial.println(ipStr);
+  Serial.println(gatewayStr);
+
+  // Ne írjuk a hitelesítő adatokat minden WiFi.begin()-nél az NVS-be (flash kímélés)
+  WiFi.persistent(false);
 
   if (initWiFi()) {
     Serial.println("WIFI OK!");
+    deviceMode = MODE_MONITOR;
     digitalWrite(wifiledPin, HIGH);  //led on
-    blockingDelay(100);
   } else {
-    digitalWrite(wifiledPin, LOW);  //led off
-    blockingDelay(100);
-    // Connect to Wi-Fi network with SSID and password
-    Serial.println("Setting AP (Access Point)");
-    String apName = "ESP-" + String(ESP.getChipModel());
-    WiFi.softAP(apName.c_str(), AP_PASSWORD);
-    Serial.print("AP password: ");
-    Serial.println(AP_PASSWORD);
-    IPAddress IP = WiFi.softAPIP();
-    Serial.print("AP IP address: ");
-    Serial.println(IP);
-
-    // Web Server Root URL
-    server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
-      request->send(LittleFS, "/wifimanager.html", "text/html");
-    });
-
-    server.serveStatic("/", LittleFS, "/");
-
-    server.on("/", HTTP_POST, [](AsyncWebServerRequest* request) {
-      int params = request->params();
-      for (int i = 0; i < params; i++) {
-        const AsyncWebParameter* p = request->getParam(i);
-        if (p->isPost()) {
-          // HTTP POST ssid value
-          if (p->name() == PARAM_SSID) {
-            String val = p->value().c_str();
-            if (val.length() > 0 && val.length() <= 32) {
-              ssid = val;
-              Serial.print("SSID set to: ");
-              Serial.println(ssid);
-              writeFile(LittleFS, ssidPath, ssid.c_str());
-            } else {
-              Serial.println("Invalid SSID length!");
-            }
-          }
-          // HTTP POST pass value
-          if (p->name() == PARAM_PASS) {
-            String val = p->value().c_str();
-            if (val.length() <= 63) {
-              pass = val;
-              Serial.print("Password set to: ");
-              Serial.println(String(pass.length()) + " chars");
-              writeFile(LittleFS, passPath, pass.c_str());
-            } else {
-              Serial.println("Password too long!");
-            }
-          }
-          // HTTP POST ip value
-          if (p->name() == PARAM_IP) {
-            IPAddress testIP;
-            String val = p->value().c_str();
-            if (testIP.fromString(val.c_str())) {
-              ip = val;
-              Serial.print("IP Address set to: ");
-              Serial.println(ip);
-              writeFile(LittleFS, ipPath, ip.c_str());
-            } else {
-              Serial.println("Invalid IP format!");
-            }
-          }
-          // HTTP POST gateway value
-          if (p->name() == PARAM_GATEWAY) {
-            IPAddress testIP;
-            String val = p->value().c_str();
-            if (testIP.fromString(val.c_str())) {
-              gateway = val;
-              Serial.print("Gateway set to: ");
-              Serial.println(gateway);
-              writeFile(LittleFS, gatewayPath, gateway.c_str());
-            } else {
-              Serial.println("Invalid gateway format!");
-            }
-          }
-          Serial.printf("POST[%s]: %s\n", p->name().c_str(), p->value().c_str());
-        }
-      }
-      request->send(200, "text/plain", "Done. ESP will restart, connect to your router and go to IP address: " + ip);
-      Serial.println("RESTART!");
-      blockingDelay(2000);
-      ESP.restart();
-    });
-    server.begin();
+    // Nincs használható Wi-Fi: konfigurációs portál AP módban.
+    startConfigPortal();
   }
 }
 
 void loop() {
+  const uint32_t currentMillis = millis();
 
-  unsigned long currentMillis = millis();
+  // Az AP-módú beállító oldal kérésére halasztott újraindítás
+  if (restartPending && (int32_t)(currentMillis - restartAt) >= 0) {
+    restartPending = false;
+    Serial.println("RESTART!");
+    Serial.flush();
+    ESP.restart();
+  }
+
+  if (deviceMode == MODE_CONFIG) {
+    // Konfig módban nincs internetteszt és nincs elalvás: a portálnak
+    // életben kell maradnia, amíg a felhasználó be nem küldi az adatokat.
+    resetbutton();
+    wifiresetbutton();
+    yield();
+    return;
+  }
 
   if (uiFlags.firstStart) {
     handleFirstStart(currentMillis);
@@ -640,8 +774,6 @@ void loop() {
   resetbutton();
   wifiresetbutton();
 
-  timing.currentLoop = millis();
-
   switch (currentState) {
 
     case TESTING_STATE: {
@@ -649,7 +781,7 @@ void loop() {
         Serial.println("WiFi disconnected before test!");
         digitalWrite(wifiledPin, LOW);
         currentState = FAILURE_STATE;
-        timing.stateStart = timing.currentLoop;
+        timing.stateStart = currentMillis;
         testState.failedCount++;
         break;
       }
@@ -680,12 +812,13 @@ void loop() {
         Serial.println("Test failed.");
         currentState = FAILURE_STATE;
       }
-      timing.stateStart = timing.currentLoop;
+      // A tesztek percekig futhatnak, ezért friss időbélyeg kell.
+      timing.stateStart = millis();
       break;
     }
 
     case FAILURE_STATE:
-      if (testState.cycleIndex > 3 && testState.failedCount >= 3) {
+      if (testState.cycleIndex > RESET_TRIGGER_CYCLE && testState.failedCount >= RESET_TRIGGER_FAILURES) {
 
         if (!uiFlags.resetPrinted) {
           printUptime();
@@ -693,37 +826,38 @@ void loop() {
           while (!reset_device()) {
             resetbutton();
             wifiresetbutton();
+            yield();
           }
           printUptime();
           Serial.println("Reset is done in FAILURE_STATE.");
           Serial.println("RESET_DELAY start in FAILURE_STATE.");
-          timing.currentLoop = millis();
-          timing.stateStart = timing.currentLoop;
+          timing.stateStart = millis();
           uiFlags.resetPrinted = true;  // Set the flag after printing
+          break;                        // a RESET_DELAY a következő körökben telik
         }
 
-        if (timing.currentLoop - timing.stateStart >= RESET_DELAY) {
+        if (millis() - timing.stateStart >= RESET_DELAY) {
           printUptime();
           Serial.println("RESET_DELAY end in FAILURE_STATE.");
           Serial.println("Reconnect WIFI in FAILURE_STATE.");
           WiFi.disconnect(true);
           blockingDelay(100);
-          WiFi.begin(ssid.c_str(), pass.c_str());
-          unsigned long reconnect_countdown = millis();
-          while (millis() - reconnect_countdown < interval) {
+          WiFi.begin(ssid, pass);
+
+          const uint32_t reconnectStart = millis();
+          while (WiFi.status() != WL_CONNECTED && millis() - reconnectStart < interval) {
+            resetbutton();
+            wifiresetbutton();
             yield();  // Wait without blocking other processes
           }
+
           if (WiFi.status() != WL_CONNECTED) {
             printUptime();
             Serial.println("WIFI fail, Restart WIFI in FAILURE_STATE.");
             digitalWrite(wifiledPin, LOW);
-
-            while (!reconnectWifi()) {
-              resetbutton();
-              wifiresetbutton();
-              yield();
+            if (!reconnectWifi()) {
+              break;  // a következő körben újrapróbáljuk
             }
-
           } else {
             printUptime();
             Serial.println("WIFI OK in FAILURE_STATE.");
@@ -737,8 +871,10 @@ void loop() {
         }
 
       } else {
-        if (timing.currentLoop - timing.stateStart >= PROBE_DELAY) {
-          if (testState.cycleIndex < 10) testState.cycleIndex++;
+        if (currentMillis - timing.stateStart >= PROBE_DELAY) {
+          if (testState.cycleIndex < MAX_CYCLE_INDEX) {
+            testState.cycleIndex++;
+          }
           currentState = TESTING_STATE;
         }
       }
@@ -754,11 +890,11 @@ void loop() {
         uiFlags.successPrinted = true;  // Set the flag to true after printing
       }
 
-      if (timing.currentLoop - timing.stateStart >= SUCCESS_DELAY) {
+      if (currentMillis - timing.stateStart >= SUCCESS_DELAY) {
         printUptime();
         Serial.println("SUCCESS_DELAY delay end.");
         uiFlags.successPrinted = false;
-        timing.stateStart = timing.currentLoop;
+        timing.stateStart = currentMillis;
         currentState = TESTING_STATE;
       }
       break;

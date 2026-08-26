@@ -43,11 +43,15 @@ Ha nincs mentett Wi-Fi adat (vagy a Wi-Fi reset gombot megnyomtad):
 2. Az AP neve: `ESP-<chipmodel>`, jelszó: `bazsi1234`
 3. Csatlakozz az AP-hez, majd nyisd meg a böngészőben: `192.168.4.1`
 4. Töltsd ki az űrlapot:
-   - **SSID** – a Wi-Fi hálózat neve
-   - **Password** – a Wi-Fi jelszó
+   - **SSID** – a Wi-Fi hálózat neve (max. 32 karakter)
+   - **Password** – a Wi-Fi jelszó (max. 63 karakter)
    - **IP Address** – az ESP kívánt statikus IP-je (opcionális, ha üres → DHCP)
    - **Gateway** – a router IP-je (opcionális, ha üres → DHCP)
 5. Küldés után az ESP újraindul és csatlakozik a megadott hálózathoz
+
+> Az AP mód addig aktív marad, amíg be nem küldöd az űrlapot – nincs időkorlát.
+> Statikus IP esetén a DNS szervernek a megadott gateway (tartalékként `1.1.1.1`)
+> lesz beállítva, különben a névfeloldás – és így a HTTP-teszt – nem működne.
 
 ### 2. Normál működés – Állapotgép
 
@@ -91,6 +95,12 @@ Az eszköz három állapotban működik:
 | 3 | Ping – Cloudflare `1.1.1.1` |
 | 4 | HTTP – `msftncsi.com/ncsi.txt` |
 | 5+ | HTTP – `msftconnecttest.com/connecttest.txt` |
+
+> A ping teszt akkor áll le, amint az eredmény eldőlt (2 sikeres → sikeres,
+> vagy már a maradék pingekkel sem érhető el a 2 → sikertelen), így általában
+> a 4 pingnél kevesebbet futtat.
+> A HTTP teszt a válaszból legfeljebb 96 bájtot olvas be, és levágja a záró
+> sortörést az összehasonlítás előtt.
 
 #### Router reset folyamat
 
@@ -193,6 +203,15 @@ Beginning Test.
 Successful Test
 SUCCESS_DELAY delay start.
 ```
+
+## 🔒 Biztonság
+
+- A LittleFS-en tárolt Wi-Fi adatok (`/ssid.txt`, `/pass.txt`, `/ip.txt`,
+  `/gateway.txt`) **nem érhetők el a webszerveren keresztül** – a beállító
+  portál csak a `/`, `/style.css` és `/favicon.png` útvonalakat szolgálja ki.
+- A jelszó soha nem kerül ki nyílt szövegként a soros portra, csak a hossza.
+- Az AP jelszava (`bazsi1234`) a forráskódban van; éles használat előtt
+  érdemes lecserélni az `AP_PASSWORD` konstansban.
 
 ## 📄 Licenc
 
