@@ -42,6 +42,20 @@ a router viszont percekig bootol.
 
 **Teljes idő bekapcsolástól az AP módig:** kb. 20 mp + 10 perc + ~2 perc ≈ **12,5 perc**
 
+### Mekkora áramszünetet él túl felügyelet nélkül?
+
+Teszttel kimérve (`PO1`–`PO3`):
+
+| A router ennyi idő múlva áll fel | Eredmény |
+|---|---|
+| 8 perc | Kivárja, csatlakozik, **normálisan működik** |
+| 11 perc | Az újrapróbálkozási ablakban még **elkapja** |
+| 20 perc | **Túl késő** → AP mód, majd 5 perc után alvás |
+
+A határ nagyjából **12 perc**. Ennél lassabban induló router (DSL újraszinkron,
+hosszabb szolgáltatói kimaradás) esetén az eszköz AP módba parkol, és onnan
+csak a reset gombbal hozható vissza.
+
 ---
 
 ## 3. Normál működés – az internet figyelése

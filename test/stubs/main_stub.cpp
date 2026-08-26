@@ -8,6 +8,7 @@
 
 uint32_t g_millis = 0;
 std::vector<std::string> g_log;
+std::vector<std::string> g_serialLog;
 std::map<int,int> g_pinState;
 std::map<int,int> g_pinRead;
 bool g_serialOn = false;
@@ -71,6 +72,7 @@ PingSim pingSim;
 void simLog(const std::string& s) { g_log.push_back(s); }
 void Print::flushLine() {
   if (g_serialEcho) printf("    | %s\n", buf_.c_str());
+  if (g_serialLog.size() < 5000) g_serialLog.push_back(buf_);
   buf_.clear();
 }
 

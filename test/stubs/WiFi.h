@@ -19,6 +19,9 @@ private:
 // Wi-Fi rádió szimuláció.
 struct WifiSim {
   bool willConnect = false;      // sikerül-e a csatlakozás
+  // A hálózat csak ettől az időponttól elérhető (0 = azonnal). Ezzel
+  // modellezhető, hogy a router az ESP után percekkel áll fel.
+  uint32_t availableFrom = 0;
   uint32_t latencyMs = 500;      // mennyi idő alatt jön létre
   bool begun = false;            // fut-e a begin() óta kapcsolódás
   uint32_t beginAt = 0;
@@ -49,10 +52,12 @@ public:
     simLog(std::string("WiFi.begin(") + (s ? s : "") + ")");
   }
   int status() {
-    if (wifiSim.begun && wifiSim.willConnect && (g_millis - wifiSim.beginAt) >= wifiSim.latencyMs) {
-      return WL_CONNECTED;
-    }
-    return WL_DISCONNECTED;
+    if (!wifiSim.begun || !wifiSim.willConnect) return WL_DISCONNECTED;
+    if (g_millis < wifiSim.availableFrom) return WL_DISCONNECTED;
+    // a társítás a begin() vagy a hálózat megjelenése közül a későbbitől indul
+    const uint32_t from = wifiSim.beginAt > wifiSim.availableFrom
+                          ? wifiSim.beginAt : wifiSim.availableFrom;
+    return (g_millis - from) >= wifiSim.latencyMs ? WL_CONNECTED : WL_DISCONNECTED;
   }
   String SSID() { return String("TestNet"); }
   IPAddress localIP() { return wifiSim.staticApplied ? wifiSim.cfgIp : IPAddress(192,168,1,77); }

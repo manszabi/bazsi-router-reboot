@@ -22,6 +22,7 @@
 // --- szimulált idő / naplózás ---
 extern uint32_t g_millis;
 extern std::vector<std::string> g_log;
+extern std::vector<std::string> g_serialLog;  // a soros kimenet sorai
 extern std::map<int,int> g_pinState;
 extern std::map<int,int> g_pinRead;
 extern bool g_serialOn;
