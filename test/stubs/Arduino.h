@@ -35,6 +35,16 @@ void pinMode(uint8_t, uint8_t);
 void digitalWrite(uint8_t, uint8_t);
 int digitalRead(uint8_t);
 void yield();
+void delay(uint32_t ms);
+void feedLoopWDT();
+void enableLoopWDT();
+extern bool     g_wdtEnabled;
+extern uint32_t g_wdtTimeoutMs;
+extern uint32_t g_wdtIdleMask;
+extern bool     g_wdtPanic;
+extern uint32_t g_wdtMaxFeedGap;   // leghosszabb szakasz etetés nélkül
+extern uint32_t g_wdtLastFeed;
+extern bool     g_wdtTrack;
 int64_t esp_timer_get_time();
 void esp_sleep_enable_timer_wakeup(uint64_t);
 void esp_deep_sleep_start();

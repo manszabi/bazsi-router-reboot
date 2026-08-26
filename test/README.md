@@ -44,6 +44,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján:
 | `C1` | Konfig fájlok írása/olvasása, csonkítás, hiányzó fájl |
 | `B1` | Gomb debounce: zajtüske vs. tartós nyomás |
 | `F1` | Tartalék beállító űrlap, ha a `data/` mappa nincs feltöltve |
+| `WDT1`–`WDT4` | Watchdog: konfiguráció, etetés a hosszú blokkolások alatt, `delay()` vs. CPU-pörgetés |
 
 ## Fontos
 

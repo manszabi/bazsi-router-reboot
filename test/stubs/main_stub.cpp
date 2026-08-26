@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <LittleFS.h>
 #include <ESPping.h>
+#include <esp_task_wdt.h>
 
 uint32_t g_millis = 0;
 std::vector<std::string> g_log;
@@ -18,6 +19,36 @@ int g_httpCode = 200;
 std::string g_httpBody = "Microsoft NCSI";
 int g_httpSize = -2;
 bool g_httpBeginOk = true;
+bool     g_wdtEnabled = false;
+uint32_t g_wdtTimeoutMs = 0;
+uint32_t g_wdtIdleMask = 0xFFFFFFFF;
+bool     g_wdtPanic = false;
+uint32_t g_wdtMaxFeedGap = 0;
+uint32_t g_wdtLastFeed = 0;
+bool     g_wdtTrack = false;
+static bool g_wdtInited = true;   // IDF: ESP_TASK_WDT_INIT=y -> boot óta fut
+
+static void wdtApply(const esp_task_wdt_config_t* c) {
+  g_wdtTimeoutMs = c->timeout_ms; g_wdtIdleMask = c->idle_core_mask; g_wdtPanic = c->trigger_panic;
+}
+esp_err_t esp_task_wdt_init(const esp_task_wdt_config_t* c) {
+  if (g_wdtInited) return ESP_ERR_INVALID_STATE;
+  g_wdtInited = true; wdtApply(c); simLog("wdt_init"); return ESP_OK;
+}
+esp_err_t esp_task_wdt_reconfigure(const esp_task_wdt_config_t* c) {
+  if (!g_wdtInited) return ESP_ERR_INVALID_STATE;
+  wdtApply(c); simLog("wdt_reconfigure"); return ESP_OK;
+}
+void enableLoopWDT() { g_wdtEnabled = true; simLog("enableLoopWDT"); }
+void feedLoopWDT() {
+  if (g_wdtTrack) {
+    const uint32_t gap = g_millis - g_wdtLastFeed;
+    if (gap > g_wdtMaxFeedGap) g_wdtMaxFeedGap = gap;
+  }
+  g_wdtLastFeed = g_millis;
+  simLog("wdt_feed");
+}
+void delay(uint32_t ms) { g_millis += ms ? ms : 1; }
 
 HardwareSerial Serial;
 EspClass ESP;

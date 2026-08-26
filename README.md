@@ -261,6 +261,40 @@ ellenőrizve a core, illetve az ESP-IDF forrásában:
   (IDF 6.0-ban átnevezték – a kód mindkét nevet kezeli), és csak RTC-képes
   lábat fogad el; a `D1` = GPIO3 megfelel.
 
+## 🐕 Watchdog – védelem lefagyás ellen
+
+Ha a program megakadna (végtelen ciklus, deadlock), a legrosszabb eset az, hogy
+**a relé bekapcsolt állapotban ragad, és a router tartósan áram nélkül marad**.
+A watchdog ezt oldja meg: újraindítja az ESP-t, a `setup()` pedig azonnal
+`LOW`-ra állítja a relét, tehát a router visszakapja az áramot.
+
+Az ESP-IDF task watchdogja alapból fut, de önmagában **nem véd meg**:
+
+| | Alapértelmezés | Következmény |
+|---|---|---|
+| `loopTaskWDTEnabled` | `false` (Arduino `main.cpp`) | a `loop()` megakadását észre sem veszi |
+| `ESP_TASK_WDT_PANIC` | `n` | timeoutkor csak figyelmeztetést ír ki, nem indít újra |
+| `ESP_TASK_WDT_TIMEOUT_S` | `5` | rövidebb, mint a firmware szándékos blokkolásai |
+
+Ezért az `initWatchdog()` mindhármat kifejezetten beállítja:
+
+- **60 másodperces** timeout – a leghosszabb *nem etethető* blokkolás a
+  `http.GET()` (5 mp connect + 10 mp válasz ≈ 15 mp), erre négyszeres tartalék
+- **`trigger_panic = true`** – timeoutkor valódi újraindulás
+- **`idle_core_mask = 0`** – csak a saját loop taskot figyeli. Az idle task
+  figyelése itt káros lenne, mert a firmware szándékosan blokkol percekig
+- a hosszú várakozások (`waitWithButtons`, `blockingDelay`, a 90 mp-es relé
+  pulzus, az újracsatlakozás) **etetik** a watchdogot ~10 ms-onként
+
+Az **interrupt watchdog** (`ESP_INT_WDT`) alapból aktív, és a panic kezelő
+alapértelmezése `PRINT_REBOOT`, tehát a megszakítás-szintű megakadásokat az
+IDF már eleve kezeli.
+
+> A hosszú várakozások `delay()`-t használnak `yield()` helyett. A `yield()`
+> csak azonos prioritású taskok között ad át vezérlést, tehát a korábbi
+> változat a 90 mp-es relé pulzus alatt 100%-on pörgette a CPU-t; a `delay()`
+> `vTaskDelay()`-re fordul, ami ténylegesen felfüggeszti a taskot.
+
 ## 🔒 Biztonság
 
 - A LittleFS-en tárolt Wi-Fi adatok (`/ssid.txt`, `/pass.txt`, `/ip.txt`,

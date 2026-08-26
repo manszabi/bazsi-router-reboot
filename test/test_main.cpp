@@ -17,10 +17,13 @@ extern State currentState;
 bool initWiFi(); bool reconnectWifi(); bool reset_device();
 void trimInPlace(char*);
 bool testInternetHTTP(const char* url, const char* expected);
+void initWatchdog();
 bool testInternetPing(IPAddress& target, const char* name);
 bool readConfigValue(fs::FS& fs, const char* path, char* out, size_t outSize);
 void writeFile(fs::FS& fs, const char* path, const char* msg);
 void resetbutton();
+void wifiresetbutton();
+void waitWithButtons(uint32_t);
 extern IPAddress pingTargetCloudflare;
 
 static int failures = 0, checks = 0;
@@ -364,6 +367,55 @@ static void sc23() {
 
   }
 
+
+static void scWDT1() {
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  CHECK(g_wdtEnabled, "a loop task fel van iratkozva a watchdogra");
+  CHECK(g_wdtPanic, "trigger_panic = true (alapból csak figyelmeztetne!)");
+  CHECK(g_wdtTimeoutMs == 60000, "timeout 60 mp");
+  CHECK(g_wdtIdleMask == 0, "az idle taskot NEM figyeltetjük (hurok-veszély)");
+  CHECK(logIndex("wdt_reconfigure") >= 0, "a már futó TWDT-t konfiguráltuk újra");
+}
+
+static void scWDT2() {
+  // A legfontosabb: a 90 mp-es relé pulzus alatt sem maradhat a watchdog etetlen
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  g_wdtTrack = true; g_wdtLastFeed = g_millis; g_wdtMaxFeedGap = 0;
+  int guard = 0;
+  while (!reset_device() && ++guard < 200000) {
+    resetbutton(); wifiresetbutton(); feedLoopWDT(); delay(10);
+  }
+  CHECK(guard < 200000, "a reset pulzus lefutott");
+  CHECK(g_wdtMaxFeedGap < 60000, "a 90 mp-es pulzus alatt végig etetve volt");
+  CHECK(g_wdtMaxFeedGap <= 50, "az etetési köz ~10 ms nagyságrendű");
+}
+
+static void scWDT3() {
+  // A leghosszabb saját blokkolás: reconnectWifi() 3x20s timeout + 2x20s várakozás
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  wifiSim.willConnect = false; wifiSim.begun = false;
+  g_wdtTrack = true; g_wdtLastFeed = g_millis; g_wdtMaxFeedGap = 0;
+  try { reconnectWifi(); } catch (DeepSleepSignal&) {}
+  CHECK(g_wdtMaxFeedGap < 60000, "a ~100 mp-es újracsatlakozás alatt is etetve volt");
+  CHECK(g_wdtMaxFeedGap <= 50, "etetési köz ~10 ms");
+}
+
+static void scWDT4() {
+  // A hosszú várakozások delay()-t használnak, nem yield()-pörgetést
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  g_log.clear();
+  const uint32_t t0 = g_millis;
+  waitWithButtons(1000);
+  CHECK(g_millis - t0 >= 1000, "a várakozás ténylegesen eltelt");
+  int feeds = 0;
+  for (auto& l : g_log) if (l == "wdt_feed") feeds++;
+  CHECK(feeds >= 90 && feeds <= 110, "~100 etetés 1 mp alatt (10 ms-os osztás)");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -390,6 +442,10 @@ static const Scenario kScenarios[] = {
   { "C1: konfig írás/olvasás oda-vissza, csonkítással", sc21 },
   { "B1: egyetlen zajtüske nem indítja újra az eszközt", sc22 },
   { "F1: hiányzó wifimanager.html esetén is van beállító űrlap", sc23 },
+  { "WDT1: a watchdog tényleg újraindít, nem csak figyelmeztet", scWDT1 },
+  { "WDT2: a 90 mp-es relé pulzus alatt is etetve van", scWDT2 },
+  { "WDT3: a ~100 mp-es újracsatlakozás alatt is etetve van", scWDT3 },
+  { "WDT4: a hosszú várakozás delay()-jel megy, nem CPU-pörgetéssel", scWDT4 },
 };
 
 

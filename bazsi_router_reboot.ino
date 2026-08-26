@@ -9,6 +9,7 @@
 #include "LittleFS.h"
 #include "esp_sleep.h"
 #include "esp_idf_version.h"
+#include "esp_task_wdt.h"
 
 // Create AsyncWebServer object on port 80
 AsyncWebServer server(80);
@@ -88,6 +89,13 @@ constexpr uint8_t maxfailureEvents = 5;  // failure sleep
 constexpr uint8_t wifi_maxRetries = 3;
 constexpr uint32_t wifiInterval = 20 * 1000;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 50;
+// Gombok mintavételi köze. 10 ms bőven elég az 50 ms-os debounce-hoz, viszont
+// delay()-jel várunk, nem yield()-del, így a CPU nem pörög üresen.
+constexpr uint32_t BUTTON_POLL_MS = 10;
+// Watchdog timeout. Nagyobb kell, mint a leghosszabb olyan blokkolás, amit NEM
+// tudunk etetni: a http.GET() a connect (5 mp) + válasz (10 mp) timeouttal
+// együtt ~15 mp-ig tarthat. 60 mp így négyszeres tartalékot ad.
+constexpr uint32_t WDT_TIMEOUT_MS = 60 * 1000;
 constexpr uint32_t RESTART_GRACE_MS = 2000;  // válasz kiküldése újraindítás előtt
 
 constexpr uint64_t SLEEP_DURATION_US = 3600ULL * 1000000ULL;      // 1 óra
@@ -238,10 +246,48 @@ void writeFile(fs::FS& fs, const char* path, const char* message) {
   file.close();
 }
 
+// Lefagyás elleni védelem.
+//
+// Az ESP-IDF task watchdogja alapból FUT (ESP_TASK_WDT_INIT=y, 5 mp), de két
+// okból nem véd meg minket:
+//   1. az Arduino loop taskja nincs ráiratkozva (main.cpp: loopTaskWDTEnabled
+//      = false), tehát a loop() megakadását észre sem veszi;
+//   2. az ESP_TASK_WDT_PANIC alapértéke 'n', azaz timeoutkor csak kiír egy
+//      figyelmeztetést a soros portra, nem indít újra.
+// Ezért kifejezetten beállítjuk mindkettőt.
+//
+// idle_core_mask = 0: csak a saját loop taskunkat figyeltetjük. Az idle task
+// figyelése itt kifejezetten káros lenne, mert a firmware szándékosan blokkol
+// percekig (90 mp-es relé pulzus), és egy hosszú timeout mellett is kockázatos
+// újraindítási hurkot okozna.
+void initWatchdog() {
+  esp_task_wdt_config_t cfg = {};
+  cfg.timeout_ms = WDT_TIMEOUT_MS;
+  cfg.idle_core_mask = 0;
+  cfg.trigger_panic = true;
+
+  esp_err_t err = esp_task_wdt_reconfigure(&cfg);
+  if (err == ESP_ERR_INVALID_STATE) {
+    err = esp_task_wdt_init(&cfg);  // ha mégsem lenne inicializálva
+  }
+  if (err != ESP_OK) {
+    Serial.print("Watchdog config failed, error ");
+    Serial.println((int)err);
+    return;
+  }
+  enableLoopWDT();
+  Serial.print("Watchdog enabled, timeout ");
+  Serial.print(WDT_TIMEOUT_MS / 1000);
+  Serial.println(" s");
+}
+
 void blockingDelay(uint32_t duration) {
   const uint32_t start = millis();
   while (millis() - start < duration) {
-    yield();
+    const uint32_t elapsed = millis() - start;
+    const uint32_t left = duration - elapsed;
+    delay(left > BUTTON_POLL_MS ? BUTTON_POLL_MS : left);
+    feedLoopWDT();
   }
 }
 
@@ -251,7 +297,8 @@ void waitWithButtons(uint32_t duration) {
   while (millis() - start < duration) {
     resetbutton();
     wifiresetbutton();
-    yield();
+    feedLoopWDT();
+    delay(BUTTON_POLL_MS);
   }
 }
 
@@ -335,7 +382,8 @@ bool initWiFi() {
   while (WiFi.status() != WL_CONNECTED) {
     resetbutton();
     wifiresetbutton();
-    yield();
+    feedLoopWDT();
+    delay(BUTTON_POLL_MS);
     if (millis() - startAttempt >= interval) {
       printUptime();
       Serial.println("Failed to connect.");
@@ -516,6 +564,7 @@ size_t readBounded(WiFiClient& stream, char* buf, size_t maxLen, uint32_t timeou
       }
       resetbutton();
       wifiresetbutton();
+      feedLoopWDT();
       yield();
       continue;
     }
@@ -616,6 +665,7 @@ void handleFirstStart(uint32_t currentMillis) {
       }
       resetbutton();
       wifiresetbutton();
+      feedLoopWDT();
       yield();
       return;  // csak itt kilép, visszaadja a vezérlést a loop()-nak
     }
@@ -809,6 +859,10 @@ void setup() {
     }
     startConfigPortal();
   }
+
+  // Utolsó lépés: innentől figyeli a watchdog a loop()-ot. A setup() saját
+  // blokkolásai (soros port, initWiFi) így nem tudnak téves újraindítást okozni.
+  initWatchdog();
 }
 
 void loop() {
@@ -827,7 +881,7 @@ void loop() {
     // életben kell maradnia, amíg a felhasználó be nem küldi az adatokat.
     resetbutton();
     wifiresetbutton();
-    yield();
+    delay(BUTTON_POLL_MS);
     return;
   }
 
@@ -896,7 +950,8 @@ void loop() {
           while (!reset_device()) {
             resetbutton();
             wifiresetbutton();
-            yield();
+            feedLoopWDT();
+            delay(BUTTON_POLL_MS);
           }
           printUptime();
           Serial.println("Reset is done in FAILURE_STATE.");
