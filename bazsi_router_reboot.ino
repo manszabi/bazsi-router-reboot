@@ -86,12 +86,12 @@ constexpr uint32_t RESET_DELAY = 10 * 60 * 1000;
 constexpr uint32_t RESET_PULSE = 90 * 1000;
 constexpr uint32_t firstStartDelay = 10 * 60 * 1000;
 constexpr uint8_t maxfailureEvents = 5;  // failure sleep
+// Egységes Wi-Fi újrapróbálkozási politika MINDEN ágon: 3 próba, köztük 30 mp.
 constexpr uint8_t wifi_maxRetries = 3;
-// Ennyi sikertelen INDULÁSI csatlakozási kör után lépünk AP beállító módba.
-// Egy kör ~72 perc (10 perc várakozás + ~2 perc próbálkozás + 1 óra alvás),
-// tehát kb. 3,5 óra türelem, mielőtt feltételeznénk, hogy rossz a jelszó.
-constexpr uint32_t MAX_CONNECT_ROUNDS = 3;
-constexpr uint32_t wifiInterval = 20 * 1000;
+constexpr uint32_t wifiInterval = 30 * 1000;
+// Az AP beállító mód ennyi tétlenség után elalszik (mentés nélkül). Minden
+// beérkező kérés újraindítja a visszaszámlálást.
+constexpr uint32_t AP_TIMEOUT_MS = 5 * 60 * 1000;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 50;
 // Gombok mintavételi köze. 10 ms bőven elég az 50 ms-os debounce-hoz, viszont
 // delay()-jel várunk, nem yield()-del, így a CPU nem pörög üresen.
@@ -178,14 +178,14 @@ DeviceMode deviceMode = MODE_MONITOR;
 // Sikerült-e a LittleFS csatolása. Ha nem, a beállítások nem menthetők.
 bool fsReady = false;
 
-// Egymást követő sikertelen indulási csatlakozási körök száma.
-// RTC memóriában: a deep sleep ciklust túléli, viszont bekapcsoláskor és a
-// reset gombra nullázódik - a felhasználói beavatkozás tiszta lappal indít.
-// (ESP32-C3: SOC_RTC_FAST_MEM_SUPPORTED = 1, tehát az attribútum tényleg hat.)
-RTC_DATA_ATTR uint32_t rtcConnectRounds = 0;
-
 volatile bool restartPending = false;
 volatile uint32_t restartAt = 0;
+
+// AP beállító mód: mikor aludjon el, ha nem érkezik mentés. Minden HTTP kérés
+// kitolja. A savingConfig azt jelzi, hogy épp fájlírás folyik - ilyenkor
+// semmiképp nem alszunk el.
+volatile uint32_t apDeadline = 0;
+volatile bool savingConfig = false;
 
 // Forward declarations (a .ino auto-prototípusok helyett explicit módon)
 void printUptime();
@@ -195,6 +195,9 @@ void blockingDelay(uint32_t duration);
 void waitWithButtons(uint32_t duration);
 void tosleep();
 void fatalSleep();
+void apSleep();
+void touchApDeadline();
+void startConfigPortal();
 void enterDeepSleep(uint64_t timerUs);
 bool initWiFi();
 bool reconnectWifi();
@@ -600,6 +603,22 @@ void tosleep() {
   enterDeepSleep(SLEEP_DURATION_US);  // 1 óra múlva magától újrapróbálja
 }
 
+// Az AP beállító mód visszaszámlálásának újraindítása. Minden HTTP kérésnél
+// meghívjuk, így ha a felhasználó az utolsó pillanatban nyitja meg az oldalt,
+// kap még egy teljes időablakot a kitöltésre.
+void touchApDeadline() {
+  apDeadline = millis() + AP_TIMEOUT_MS;
+}
+
+// AP beállító mód lejárt mentés nélkül. Ugyanaz a logika, mint a LittleFS
+// hibánál: időzített ébresztés nincs, csak a reset gomb hozza vissza.
+void apSleep() {
+  printUptime();
+  Serial.println("Az AP beallito modban nem tortent mentes, az ESP elalszik.");
+  Serial.println("Idozitett ebresztes NINCS - reset gomb vagy aramtalanitas kell.");
+  enterDeepSleep(0);
+}
+
 // Végzetes hiba után elalvás. Időzített ébresztés NINCS: a hiba magától nem
 // múlik el, ezért értelmetlen lenne óránként felébredni és újra villogni.
 void fatalSleep() {
@@ -688,8 +707,8 @@ bool reconnectWifi() {
   Serial.print("WIFI FAILED TO RECONNECT AFTER ");
   Serial.print(wifi_maxRetries);
   Serial.println(" wifi_ATTEMPTS!");
-  tosleep();
-  return false;  // ha a tosleep() mégis visszatérne
+  // A folytatásról a hívó dönt (mindenhol: AP beállító mód).
+  return false;
 }
 
 // Korlátozott méretű, időzáras olvasás: nem allokál, és nem tud "elszállni"
@@ -816,7 +835,11 @@ void handleFirstStart(uint32_t currentMillis) {
     Serial.println("First start wait end.");
 
     if (!reconnectWifi()) {
-      return;  // a következő loop()-körben újrapróbáljuk
+      // 3 próba 30 mp szünetekkel sem hozott eredményt: beállító portál.
+      printUptime();
+      Serial.println("Induláskor nem sikerult csatlakozni - AP beallito mod.");
+      startConfigPortal();
+      return;
     }
 
     timing.startMillis = millis();  // újraindítjuk az időzítést (friss bélyeg)
@@ -825,7 +848,11 @@ void handleFirstStart(uint32_t currentMillis) {
 }
 
 void startConfigPortal() {
+  if (deviceMode == MODE_CONFIG) {
+    return;  // már fut
+  }
   deviceMode = MODE_CONFIG;
+  touchApDeadline();
   digitalWrite(wifiledPin, LOW);  //led off
 
   Serial.println("Setting AP (Access Point)");
@@ -842,6 +869,7 @@ void startConfigPortal() {
   // beginResponse(FS&,...) NULL-t ad és a kliens 501-et kapna - ilyenkor az
   // eszköz konfigurálhatatlan lenne, ezért beépített tartalék űrlapot adunk.
   server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
+    touchApDeadline();
     if (LittleFS.exists("/wifimanager.html")) {
       request->send(LittleFS, "/wifimanager.html", "text/html");
     } else {
@@ -852,9 +880,11 @@ void startConfigPortal() {
   // Csak a weboldal statikus elemeit szolgáljuk ki. A serveStatic("/") a teljes
   // LittleFS-t kiadta volna, azaz a /pass.txt-ben tárolt Wi-Fi jelszót is.
   server.on("/style.css", HTTP_GET, [](AsyncWebServerRequest* request) {
+    touchApDeadline();
     request->send(LittleFS, "/style.css", "text/css");
   });
   server.on("/favicon.png", HTTP_GET, [](AsyncWebServerRequest* request) {
+    touchApDeadline();
     request->send(LittleFS, "/favicon.png", "image/png");
   });
   server.onNotFound([](AsyncWebServerRequest* request) {
@@ -862,6 +892,7 @@ void startConfigPortal() {
   });
 
   server.on("/", HTTP_POST, [](AsyncWebServerRequest* request) {
+    touchApDeadline();
     if (!fsReady) {
       // Nincs értelme menteni: a fájlrendszer nem áll rendelkezésre.
       request->send(500, "text/plain",
@@ -870,6 +901,9 @@ void startConfigPortal() {
       return;
     }
 
+    // Amíg ez igaz, a loop() semmiképp nem altatja el az eszközt: fájlírás
+    // közbeni deep sleep félig kiírt konfigurációt hagyna hátra.
+    savingConfig = true;
     bool saveOk = true;
     const int params = request->params();
     for (int i = 0; i < params; i++) {
@@ -936,6 +970,9 @@ void startConfigPortal() {
         Serial.printf("POST[%s]: %s\n", name.c_str(), val.c_str());
       }
     }
+
+    savingConfig = false;
+    touchApDeadline();
 
     if (!saveOk) {
       // Ne hazudjunk sikert és főleg ne indítsunk újra: az újraindítás
@@ -1028,37 +1065,21 @@ void setup() {
     if (initWiFi()) {
       Serial.println("WIFI OK!");
       deviceMode = MODE_MONITOR;
-      rtcConnectRounds = 0;
       digitalWrite(wifiledPin, HIGH);  //led on
 
     } else if (ssid[0] == '\0') {
       // Nincs mentett hálózat: csak a beállító portál segíthet.
-      rtcConnectRounds = 0;
       startConfigPortal();
 
     } else {
       // Van mentett hálózat, csak most nem érhető el. NEM megyünk azonnal AP
-      // módba: áramszünet után a router jóval lassabban indul, mint az ESP,
-      // és AP módban az eszköz emberi beavatkozásig használhatatlan lenne.
-      rtcConnectRounds++;
+      // módba: áramszünet után a router jóval lassabban indul, mint az ESP.
+      // A handleFirstStart() kivárja a firstStartDelay-t (10 perc), majd
+      // egységesen 3 próbát tesz 30 mp szünetekkel.
       printUptime();
-      Serial.print("Sikertelen csatlakozasi kor: ");
-      Serial.print(rtcConnectRounds);
-      Serial.print(" / ");
-      Serial.println(MAX_CONNECT_ROUNDS);
-
-      if (rtcConnectRounds >= MAX_CONNECT_ROUNDS) {
-        // Ennyi idő után valószínűbb a hibás jelszó, mint a lassú router.
-        Serial.println("Tul sok sikertelen kor - beallito portal indul.");
-        rtcConnectRounds = 0;
-        startConfigPortal();
-      } else {
-        // Monitor mód: a handleFirstStart() kivárja a firstStartDelay-t, majd
-        // újrapróbálja; sikertelenség esetén 1 órás alvás, és jön a next kör.
-        Serial.println("Ujraprobalkozas kovetkezik, nem lepunk AP modba.");
-        deviceMode = MODE_MONITOR;
-        digitalWrite(wifiledPin, LOW);
-      }
+      Serial.println("Nem sikerult csatlakozni - first start varakozas kovetkezik.");
+      deviceMode = MODE_MONITOR;
+      digitalWrite(wifiledPin, LOW);
     }
   }
 
@@ -1104,6 +1125,12 @@ void loop() {
     // életben kell maradnia, amíg a felhasználó be nem küldi az adatokat.
     resetbutton();
     wifiresetbutton();
+    // Nem alszunk el, ha épp mentés folyik, vagy ha a sikeres mentés utáni
+    // újraindításra várunk.
+    if (!savingConfig && !restartPending &&
+        (int32_t)(currentMillis - apDeadline) >= 0) {
+      apSleep();
+    }
     delay(BUTTON_POLL_MS);
     return;
   }
@@ -1120,19 +1147,30 @@ void loop() {
 
     case TESTING_STATE: {
       if (WiFi.status() != WL_CONNECTED) {
+        printUptime();
         Serial.println("WiFi disconnected before test!");
         digitalWrite(wifiledPin, LOW);
+
+        // Egységes politika: 3 próba 30 mp szünetekkel.
+        if (reconnectWifi()) {
+          // Visszajött, a teszt a következő körben fut le.
+          timing.stateStart = millis();
+          break;
+        }
+
+        // Nem jött vissza: azonnal router újraindítás, nem várunk további
+        // teszt ciklusokat. A FAILURE_STATE reset ágát így élesítjük.
+        printUptime();
+        Serial.println("WiFi nem jott vissza - router ujrainditas kovetkezik.");
+        testState.cycleIndex = RESET_TRIGGER_CYCLE + 1;
+        testState.failedCount = RESET_TRIGGER_FAILURES;
         currentState = FAILURE_STATE;
-        timing.stateStart = currentMillis;
-        testState.failedCount++;
+        timing.stateStart = millis();
         break;
       }
       // A kapcsolat magától is helyreállhat (auto-reconnect), ilyenkor a LED
       // korábban hazudott volna.
       digitalWrite(wifiledPin, HIGH);
-      if (rtcConnectRounds != 0) {
-        rtcConnectRounds = 0;  // működik a hálózat: a hibaszámláló nullázódik
-      }
       printUptime();
       Serial.println("Beginning Test.");
       Serial.print("Teszt ciklus index = ");
@@ -1194,21 +1232,20 @@ void loop() {
           WiFi.disconnect(true);
           blockingDelay(100);
 
-          // initWiFi()-t hívunk nyers WiFi.begin() helyett: a disconnect(true)
-          // leállítja a WiFi-t, és ilyenkor a netif statikus IP/DNS beállítása
-          // elveszik. Az initWiFi() újra alkalmazza, mielőtt csatlakozna.
-          if (initWiFi()) {
+          // Egységesen 3 próba 30 mp szünetekkel. A reconnectWifi() minden
+          // próbája teljes initWiFi(), ami újra alkalmazza a statikus IP/DNS
+          // konfigot - a disconnect(true) ugyanis eldobja a netifet.
+          if (!reconnectWifi()) {
             printUptime();
-            Serial.println("WIFI OK in FAILURE_STATE.");
-            digitalWrite(wifiledPin, HIGH);
-          } else {
-            printUptime();
-            Serial.println("WIFI fail, Restart WIFI in FAILURE_STATE.");
+            Serial.println("A router reset utan sem jott vissza a WiFi - AP beallito mod.");
             digitalWrite(wifiledPin, LOW);
-            if (!reconnectWifi()) {
-              break;  // a következő körben újrapróbáljuk
-            }
+            startConfigPortal();
+            break;
           }
+
+          printUptime();
+          Serial.println("WIFI OK in FAILURE_STATE.");
+          digitalWrite(wifiledPin, HIGH);
 
           testState.cycleIndex = 0;
           testState.failedCount = 0;

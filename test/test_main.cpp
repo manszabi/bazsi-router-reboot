@@ -26,10 +26,12 @@ bool clearConfigValue(fs::FS& fs, const char* path);
 bool initLittleFS();
 bool fileMatches(fs::FS& fs, const char* path, const char* value, size_t len);
 extern bool fsReady;
-extern uint32_t rtcConnectRounds;
+extern volatile bool savingConfig;
+extern volatile uint32_t apDeadline;
 void resetbutton();
 void wifiresetbutton();
 void waitWithButtons(uint32_t);
+void touchApDeadline();
 extern IPAddress pingTargetCloudflare;
 
 static int failures = 0, checks = 0;
@@ -47,7 +49,6 @@ static int logIndex(const char* frag) {
 static void coldBoot(bool willConnect, const char* s, const char* p,
                      const char* ip, const char* gw, uint32_t latency = 500,
                      bool deepSleepWake = false) {
-  if (!deepSleepWake) rtcConnectRounds = 0;
   g_millis = 1; g_log.clear(); g_pinState.clear(); g_pinRead.clear();
   g_fs.clear(); g_fsMountOk = true; g_wakeupUs = 0;
   g_fsWritable = true; g_fsCapacity = 0; g_fsRemoveOk = true; g_fsReadable = true;
@@ -73,10 +74,12 @@ static void sc0() {
   {
     // 15 percnyi loop konfig módban -> nem szabad elaludnia (a korábbi hiba)
     bool slept = false;
-    try { for (int i = 0; i < 90000 && g_millis < 15u*60*1000; i++) loop(); }
+    const uint32_t t0 = g_millis;
+    try { for (int i = 0; i < 200000 && g_millis - t0 < 4u*60*1000; i++) loop(); }
     catch (DeepSleepSignal&) { slept = true; }
     catch (RestartSignal&) {}
-    CHECK(!slept, "15 perc konfig módban sem alszik el (regresszió)");
+    // A régi hiba: 3 perc után elaludt a portál. Most 5 percig biztosan él.
+    CHECK(!slept, "4 percig biztosan él a portál (regresszió)");
     CHECK(deviceMode == (DeviceMode)1, "konfig módban maradt");
   }
 
@@ -152,13 +155,13 @@ static void sc7() {
   setup();
   { wifiSim.willConnect = false; wifiSim.begun = false;
     g_log.clear(); wifiSim.beginCount = 0;
-    uint32_t t0 = g_millis; bool slept = false; uint64_t us = 0;
-    try { reconnectWifi(); } catch (DeepSleepSignal& d) { slept = true; us = d.us; }
-    CHECK(slept, "elalvás megtörtént");
+    uint32_t t0 = g_millis; bool slept = false; bool ret = true;
+    try { ret = reconnectWifi(); } catch (DeepSleepSignal&) { slept = true; }
+    CHECK(!slept, "NEM alszik el - a folytatásról a hívó dönt");
+    CHECK(!ret, "false-t ad vissza");
     CHECK(wifiSim.beginCount == 3, "pontosan 3 csatlakozási kísérlet");
-    CHECK(us == 3600ULL*1000000ULL, "1 órás timer ébresztés armolva");
     uint32_t dt = g_millis - t0;
-    CHECK(dt >= 100000 && dt < 130000, "3x20s timeout + 2x20s várakozás (~100s)"); }
+    CHECK(dt >= 120000 && dt < 150000, "3x20s timeout + 2x30s szünet (~120s)"); }
 
 }
 
@@ -200,8 +203,13 @@ static void sc9() {
 static void sc10() {
   coldBoot(true, "TestNet", "pw", "", "");
   setup();
-  { wifiSim.willConnect = false; wifiSim.begun = false;
-    try { reconnectWifi(); } catch (DeepSleepSignal&) {}
+  { // 5 sikertelen router reset -> tosleep()
+    try {
+      for (int c = 0; c < 10; c++) {
+        int guard = 0;
+        while (!reset_device() && ++guard < 200000) { yield(); }
+      }
+    } catch (DeepSleepSignal&) {}
     CHECK(g_pinState[7] == LOW,  "relé (GPIO7) LOW - a router kap áramot");
     CHECK(g_pinState[6] == LOW,  "státusz LED (GPIO6) LOW");
     CHECK(g_pinState[5] == LOW,  "wifi LED (GPIO5) LOW");
@@ -219,8 +227,12 @@ static void sc11() {
   // armolna, az API ESP_ERR_INVALID_ARG-gal elszállna a hardveren.
   coldBoot(true, "TestNet", "pw", "", "");
   setup();
-  wifiSim.willConnect = false; wifiSim.begun = false;
-  try { reconnectWifi(); } catch (DeepSleepSignal&) {}
+  try {
+    for (int c = 0; c < 10; c++) {
+      int guard = 0;
+      while (!reset_device() && ++guard < 200000) { yield(); }
+    }
+  } catch (DeepSleepSignal&) {}
   CHECK(g_gpioWakeMask != 0, "armolt gomb-ébresztést");
   {
     bool allRtc = true;
@@ -612,78 +624,108 @@ static void scFT7() {
 }
 
 static void scFT8() {
-  // A normál (nem végzetes) elalvás viszont továbbra is időzítve ébred
+  // Az internet-hiba miatti elalvás (5 sikertelen router reset) TOVÁBBRA IS
+  // időzítve ébred - ott a WiFi működik, csak az internet nem.
   coldBoot(true, "TestNet", "pw", "", "");
   setup();
-  wifiSim.willConnect = false; wifiSim.begun = false;
   uint64_t us = 0;
-  try { reconnectWifi(); } catch (DeepSleepSignal& d) { us = d.us; }
-  CHECK(us == 3600ULL * 1000000ULL, "1 órás ébresztés megmaradt a normál útvonalon");
+  try {
+    for (int c = 0; c < 10; c++) {
+      int guard = 0;
+      while (!reset_device() && ++guard < 200000) { yield(); }
+    }
+  } catch (DeepSleepSignal& d) { us = d.us; }
+  CHECK(us == 3600ULL * 1000000ULL, "1 órás ébresztés megmaradt az internet-hiba útvonalon");
 }
 
 
 static void scWF1() {
-  // Van mentett SSID, de a router nem elérhető (pl. áramszünet után lassan indul)
+  // Van mentett SSID, de a router nem elérhető: NEM megy azonnal AP módba
   coldBoot(false, "MyNetwork", "titok123", "", "");
   setup();
-  CHECK(deviceMode == (DeviceMode)0, "MONITOR mód - NEM esik azonnal AP módba");
+  CHECK(deviceMode == (DeviceMode)0, "MONITOR mód - kivárja a first start delayt");
   CHECK(wifiSim.softApCount == 0, "nem indult AP portál");
-  CHECK(rtcConnectRounds == 1, "első sikertelen kör elkönyvelve");
-  CHECK(g_pinState[5] == LOW, "a wifi LED nem világít");
   CHECK(g_pinState[7] == LOW, "a relé LOW - a router kap áramot");
 }
 
 static void scWF2() {
-  // Ugyanez, de a 10 perces várakozás után újrapróbálkozik, majd elalszik
+  // 10 perc várakozás, majd 3 próba 30 mp szünetekkel, majd AP mód
   coldBoot(false, "MyNetwork", "titok123", "", "");
   setup();
   const int beginBefore = wifiSim.beginCount;
-  bool slept = false; uint64_t us = 0;
   const uint32_t t0 = g_millis;
-  try { while (g_millis - t0 < 20u*60*1000) loop(); }
-  catch (DeepSleepSignal& d) { slept = true; us = d.us; }
-  CHECK(wifiSim.beginCount > beginBefore, "ténylegesen újrapróbálta a csatlakozást");
-  CHECK(slept, "sikertelenség után elaludt");
-  CHECK(us == 3600ULL*1000000ULL, "1 óra múlva magától ébred és újrapróbálja");
+  try { while (g_millis - t0 < 20u*60*1000 && deviceMode == (DeviceMode)0) loop(); }
+  catch (DeepSleepSignal&) { CHECK(false, "itt még nem szabadna aludnia"); }
+  CHECK(deviceMode == (DeviceMode)1, "végül AP beállító mód");
+  CHECK(wifiSim.beginCount - beginBefore == 3, "pontosan 3 újrapróbálkozás");
+  const uint32_t dt = g_millis - t0;
+  CHECK(dt >= 10u*60*1000, "megvárta a 10 perces first start delayt");
+  CHECK(dt < 13u*60*1000, "és nem sokkal többet (10 perc + ~2 perc próbák)");
 }
 
 static void scWF3() {
-  // A MAX_CONNECT_ROUNDS. kör után mégis AP portál (elgépelt jelszó esete)
-  coldBoot(false, "MyNetwork", "rosszjelszo", "", "");
+  // AP mód 5 perc után elalszik, időzített ébresztés nélkül
+  coldBoot(false, "", "", "", "");
   setup();
-  CHECK(rtcConnectRounds == 1 && deviceMode == (DeviceMode)0, "1. kör: retry");
-
-  coldBoot(false, "MyNetwork", "rosszjelszo", "", "", 500, true);  // deep sleep ébredés
-  setup();
-  CHECK(rtcConnectRounds == 2 && deviceMode == (DeviceMode)0, "2. kör: még mindig retry");
-
-  coldBoot(false, "MyNetwork", "rosszjelszo", "", "", 500, true);
-  setup();
-  CHECK(deviceMode == (DeviceMode)1, "3. kör: AP beállító portál indul");
-  CHECK(wifiSim.softApCount == 1, "softAP elindult");
-  CHECK(rtcConnectRounds == 0, "a számláló nullázódott a portálhoz");
+  CHECK(deviceMode == (DeviceMode)1, "AP mód");
+  bool slept = false; uint64_t us = 1;
+  const uint32_t t0 = g_millis;
+  try { while (g_millis - t0 < 8u*60*1000) loop(); }
+  catch (DeepSleepSignal& d) { slept = true; us = d.us; }
+  CHECK(slept, "elaludt");
+  const uint32_t dt = g_millis - t0;
+  CHECK(dt >= 5u*60*1000 && dt < 5u*60*1000 + 2000, "pontosan 5 perc után");
+  CHECK(us == 0, "NINCS időzített ébresztés");
+  CHECK(g_gpioWakeMask == (1ULL << 3), "a reset gomb ébreszti");
 }
 
 static void scWF4() {
-  // Sikeres csatlakozás bármikor nullázza a számlálót
-  coldBoot(false, "MyNetwork", "titok123", "", "");
+  // Fájlírás közben SOHA nem alszik el (utolsó pillanatban beírt adatok)
+  coldBoot(false, "", "", "", "");
   setup();
-  CHECK(rtcConnectRounds == 1, "egy sikertelen kör");
-
-  coldBoot(true, "MyNetwork", "titok123", "", "", 500, true);  // most sikerül
-  setup();
-  CHECK(deviceMode == (DeviceMode)0, "MONITOR mód");
-  CHECK(rtcConnectRounds == 0, "a sikeres csatlakozás nullázta a számlálót");
+  savingConfig = true;
+  bool slept = false;
+  const uint32_t t0 = g_millis;
+  try { while (g_millis - t0 < 8u*60*1000) loop(); }
+  catch (DeepSleepSignal&) { slept = true; }
+  CHECK(!slept, "mentés közben NEM aludt el, pedig letelt az 5 perc");
+  savingConfig = false;
+  try { loop(); } catch (DeepSleepSignal&) { slept = true; }
+  CHECK(slept, "a mentés befejeztével viszont elalszik");
 }
 
 static void scWF5() {
-  // Nincs mentett SSID -> azonnal AP portál, a számláló nem szerepel
+  // Minden HTTP kérés újraindítja az 5 perces visszaszámlálást
   coldBoot(false, "", "", "", "");
   setup();
-  CHECK(deviceMode == (DeviceMode)1, "azonnal AP portál");
-  CHECK(rtcConnectRounds == 0, "nincs sikertelen kör elkönyvelve");
-  CHECK(wifiSim.beginCount == 0, "meg sem próbált csatlakozni");
+  const uint32_t first = apDeadline;
+  const uint32_t t0 = g_millis;
+  while (g_millis - t0 < 4u*60*1000) loop();
+  touchApDeadline();
+  CHECK(apDeadline > first, "a kérés kitolta a határidőt");
+  bool slept = false;
+  const uint32_t t1 = g_millis;
+  try { while (g_millis - t1 < 4u*60*1000) loop(); }
+  catch (DeepSleepSignal&) { slept = true; }
+  CHECK(!slept, "a kérés után újabb teljes időablakot kapott");
 }
+
+static void scWF6() {
+  // Működés közbeni kapcsolatvesztés: 3 próba, majd AZONNAL router reset
+  coldBoot(true, "MyNetwork", "pw", "", "");
+  setup();
+  loop();  // a firstStart fázis lezárása, innentől valódi monitorozás
+  CHECK(deviceMode == (DeviceMode)0, "monitor módban vagyunk");
+  const int beginBefore = wifiSim.beginCount;
+  wifiSim.willConnect = false; wifiSim.begun = false;   // megszakad a kapcsolat
+  g_log.clear();
+  int guard = 0;
+  try { while (logIndex("pin7=HIGH") < 0 && ++guard < 200000) loop(); }
+  catch (DeepSleepSignal&) {}
+  CHECK(wifiSim.beginCount - beginBefore == 3, "3 újrapróbálkozás a reset előtt");
+  CHECK(logIndex("pin7=HIGH") >= 0, "elindult a router újraindítás (relé be)");
+}
+
 
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
@@ -694,7 +736,7 @@ static const Scenario kScenarios[] = {
   { "W5: nem sikerül csatlakozni -> ~20s timeout, majd újrapróbálkozás", sc4 },
   { "W6: initWiFi() nem bontja le a már élő kapcsolatot", sc5 },
   { "W7: router reset utáni újracsatlakozás megőrzi a statikus IP+DNS-t", sc6 },
-  { "W8: reconnectWifi() 3 próba után deep sleepbe megy", sc7 },
+  { "W8: reconnectWifi() 3 próba, 30 mp szünetekkel, alvás NÉLKÜL", sc7 },
   { "W9: reconnectWifi() a 2. próbálkozásra sikerül", sc8 },
   { "S1: beragadt gomb induláskor -> 60s alvás, NEM 1 óra", sc9 },
   { "S2: alvás előtt minden kimenet biztonságos állapotba kerül", sc10 },
@@ -729,11 +771,12 @@ static const Scenario kScenarios[] = {
   { "FT6: hibajelzés közben nem fut az állapotgép, a gombok élnek", scFT6 },
   { "FT7: 5 perc hibajelzés után alvás, időzített ébresztés NÉLKÜL", scFT7 },
   { "FT8: a normál elalvás továbbra is 1 óra múlva ébred", scFT8 },
-  { "WF1: mentett SSID + elérhetetlen router -> retry, nem AP mód", scWF1 },
-  { "WF2: a retry kör lefut, majd 1 órás alvás következik", scWF2 },
-  { "WF3: 3 sikertelen kör után mégis AP portál", scWF3 },
-  { "WF4: sikeres csatlakozás nullázza a hibaszámlálót", scWF4 },
-  { "WF5: nincs mentett SSID -> azonnal AP portál", scWF5 },
+  { "WF1: mentett SSID + elérhetetlen router -> nem megy azonnal AP módba", scWF1 },
+  { "WF2: 10 perc várakozás + 3 próba, majd AP mód", scWF2 },
+  { "WF3: AP mód 5 perc után alszik, időzített ébresztés nélkül", scWF3 },
+  { "WF4: fájlírás közben SOHA nem alszik el", scWF4 },
+  { "WF5: minden HTTP kérés kitolja az 5 perces határidőt", scWF5 },
+  { "WF6: kapcsolatvesztés -> 3 próba, majd azonnal router reset", scWF6 },
 };
 
 

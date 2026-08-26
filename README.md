@@ -302,37 +302,41 @@ IDF már eleve kezeli.
 
 ## 📶 Ha nem sikerül csatlakozni a Wi-Fihez
 
-Külön kezeljük a „nincs mentett hálózat" és a „van, de most nem érhető el"
-esetet. Ez utóbbi tipikusan **áramszünet után** fordul elő: az ESP másodpercek
-alatt elindul, a router viszont percekig bootol.
+Egységes politika **minden** ágon: **3 próba, köztük 30 másodperc szünet**
+(próbánként 20 mp csatlakozási timeout).
+
+### Induláskor
 
 | Helyzet | Viselkedés |
 |---|---|
-| Nincs mentett SSID | Azonnal **AP beállító portál** – más nem is segítene |
-| Van SSID, de most nem érhető el | **Nem** megy AP módba. Vár, újrapróbál, majd 1 órás alvás után az egész kör újraindul |
-| 3 sikertelen kör után (~3,5 óra) | Mégis **AP portál** – ennyi idő után valószínűbb a hibás jelszó, mint a lassú router |
+| Nincs mentett SSID | Azonnal **AP beállító portál** |
+| Van SSID, de nem érhető el | **10 perc várakozás** (`firstStartDelay`), majd 3 próba → ha így sem megy: **AP portál** |
 
-### Egy újrapróbálkozási kör
+A 10 perces várakozás a lényeg: áramszünet után az ESP másodpercek alatt
+elindul, a router viszont percekig bootol.
+
+### Működés közben megszakad a kapcsolat
 
 ```
-indulás → initWiFi (20 mp timeout)
-        → firstStartDelay várakozás (10 perc, közben a router felállhat)
-        → reconnectWifi: 3 próba, köztük 20 mp (~2 perc)
-        → sikertelen → deep sleep 1 óra → újraindulás, következő kör
+kapcsolatvesztés → 3 próba (30 mp szünetekkel)
+                 → sikertelen → ROUTER ÚJRAINDÍTÁS (relé ki 90 mp, be)
+                 → 10 perc várakozás (RESET_DELAY)
+                 → 3 próba (30 mp szünetekkel)
+                 → sikertelen → AP beállító portál
 ```
 
-A körök számlálója **RTC memóriában** van (`RTC_DATA_ATTR`), ezért túléli a deep
-sleepet, viszont **bekapcsoláskor és a reset gombra nullázódik** – a felhasználói
-beavatkozás mindig tiszta lappal indít. Sikeres csatlakozás szintén nullázza.
+### Az AP beállító mód
 
-> Az ESP32-C3 támogatja az RTC memóriát (`SOC_RTC_FAST_MEM_SUPPORTED = 1`),
-> enélkül az attribútum némán hatástalan lenne.
+Az AP mód **5 perc** tétlenség után deep sleepbe megy, **időzített ébresztés
+nélkül** – ugyanúgy, mint a végzetes LittleFS hibánál. Visszahozni a reset
+gombbal vagy áramtalanítással lehet.
 
-### Csatlakozásvesztés futás közben
+Két védelem gondoskodik arról, hogy a mentés ne vesszen el:
 
-Ha a kapcsolat **működés közben** szakad meg, az a normál állapotgépre tartozik:
-a teszt sikertelen lesz, a hibaszámláló nő, és 3 hiba után a rendszer
-újraindítja a routert – pontosan ez az eszköz feladata.
+- **Minden HTTP kérés újraindítja az 5 perces visszaszámlálást.** Ha az utolsó
+  pillanatban nyitod meg az oldalt, kapsz még egy teljes időablakot.
+- **Fájlírás közben az eszköz soha nem alszik el** (`savingConfig` jelző), így
+  nem maradhat félig kiírt konfiguráció.
 
 ## 🚨 Végzetes hiba – a konfiguráció nem tölthető be
 
