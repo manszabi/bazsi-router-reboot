@@ -674,8 +674,8 @@ static void scWF1() {
 }
 
 static void scWF2() {
-  // 10 perc várakozás + 3 próba, majd - ha a hálózat csak nem látszik -
-  // NEM AP mód, hanem 1 órás alvás és új kör
+  // Egy teljes kör: 10 perc várakozás + 3 próba + router reset + 10 perc
+  // bootolási várakozás + 3 próba, és csak ezután 1 órás alvás
   coldBoot(false, "MyNetwork", "titok123", "", "");
   setup();
   const int beginBefore = wifiSim.beginCount;
@@ -686,10 +686,12 @@ static void scWF2() {
   CHECK(slept, "elaludt (nem AP módba ment)");
   CHECK(us == 3600ULL*1000000ULL, "1 óra múlva magától ébred és újrapróbálja");
   CHECK(rtcRetryRounds == 1, "egy kör elkönyvelve");
-  CHECK(wifiSim.beginCount - beginBefore == 3, "pontosan 3 újrapróbálkozás");
+  CHECK(wifiSim.beginCount - beginBefore == 6, "3 próba, router reset, majd újabb 3");
+  CHECK(logIndex("pin7=HIGH") >= 0, "a körben lefutott egy router újraindítás");
   const uint32_t dt = g_millis - t0;
   CHECK(dt >= 10u*60*1000, "megvárta a 10 perces first start delayt");
-  CHECK(dt < 13u*60*1000, "és nem sokkal többet (10 perc + ~2 perc próbák)");
+  CHECK(dt >= 25u*60*1000, "és a reset + bootolási várakozást is (~25,5 perc)");
+  CHECK(dt < 27u*60*1000, "de nem sokkal többet");
 }
 
 static void scWF3() {
@@ -1190,9 +1192,10 @@ static void scPO3() {
   bool ok = false;
   try { ok = routerAppearsAt(20u * 60 * 1000, &at); } catch (DeepSleepSignal&) {}
   printf("     [info] dontes %u perckor, mode=%d\n", at / 60000, (int)deviceMode);
-  CHECK(!ok, "20 perc alatt nem csatlakozott");
-  CHECK(deviceMode == (DeviceMode)0, "de NEM AP módba ment - alszik és újrapróbálja");
-  CHECK(rtcRetryRounds >= 1, "kör elkönyvelve");
+  // A router reset utani bootolasi varakozas (10 perc) atnyulik a 20 percen,
+  // igy az ezt koveto probalkozas mar elkapja - meg az ELSO korben.
+  CHECK(ok, "a router reset utani próbálkozás elkapja, még az első körben");
+  CHECK(deviceMode == (DeviceMode)0, "monitor módban működik tovább");
 }
 
 
@@ -1201,6 +1204,7 @@ static void scR1() {
   coldBoot(false, "MyNetwork", "rosszjelszo", "", "");
   wifiSim.failStatus = WL_CONNECT_FAILED;
   setup();
+  g_log.clear();
   bool slept = false;
   const uint32_t t0 = g_millis;
   try { while (g_millis - t0 < 20u*60*1000 && deviceMode == (DeviceMode)0) loop(); }
@@ -1208,28 +1212,35 @@ static void scR1() {
   CHECK(!slept, "nem aludt el");
   CHECK(deviceMode == (DeviceMode)1, "AP beállító módba ment");
   CHECK(rtcRetryRounds == 0, "nem számolt újrapróbálkozási kört");
+  CHECK(logIndex("pin7=HIGH") < 0, "rossz jelszónál NEM indítja újra a routert");
 }
 
 static void scR2() {
   // A 40. kör után feladja és AP módba megy (2 nap)
   coldBoot(false, "MyNetwork", "titok123", "", "");
-  rtcRetryRounds = 39;                      // az utolsó kör előtt vagyunk
+  rtcRetryRounds = 32;                      // az utolsó kör előtt vagyunk
   setup();
   bool slept = false;
   const uint32_t t0 = g_millis;
   try { while (g_millis - t0 < 20u*60*1000 && deviceMode == (DeviceMode)0) loop(); }
   catch (DeepSleepSignal&) { slept = true; }
-  CHECK(!slept, "a 40. körnél már nem alszik el");
+  CHECK(!slept, "a 33. körnél már nem alszik el");
   CHECK(deviceMode == (DeviceMode)1, "AP beállító mód");
   CHECK(rtcRetryRounds == 0, "a számláló nullázva a következő ciklushoz");
 }
 
 static void scR3() {
-  // 40 kör x 72 perc = pontosan 2 nap
-  const uint32_t roundMin = 10 + 2 + 60;    // first start + próbák + alvás
-  CHECK(roundMin == 72, "egy kör 72 perc");
-  CHECK(40u * roundMin == 2880u, "40 kör = 2880 perc");
-  CHECK(2880u == 48u * 60u, "2880 perc = 48 óra = 2 nap");
+  // A kör hossza tizedpercben, hogy a 90 mp-es pulzus is beleférjen
+  const uint32_t roundTenths = 100   // 10,0 perc firstStartDelay
+                             + 20    //  2,0 perc 3 próba
+                             + 15    //  1,5 perc RESET_PULSE
+                             + 100   // 10,0 perc RESET_DELAY
+                             + 20    //  2,0 perc újabb 3 próba
+                             + 600;  // 60,0 perc alvás
+  CHECK(roundTenths == 855, "egy kör 85,5 perc");
+  CHECK(33u * roundTenths == 28215u, "33 kör = 2821,5 perc");
+  CHECK(28215u < 48u * 60u * 10u, "és ez kevesebb, mint 2 nap (28800 tizedperc)");
+  CHECK(34u * roundTenths > 48u * 60u * 10u, "34 kör viszont már túllépné");
 }
 
 static void scR4() {
@@ -1339,7 +1350,7 @@ static const Scenario kScenarios[] = {
   { "FT7: 5 perc hibajelzés után alvás, időzített ébresztés NÉLKÜL", scFT7 },
   { "FT8: a normál elalvás továbbra is 1 óra múlva ébred", scFT8 },
   { "WF1: mentett SSID + elérhetetlen router -> nem megy azonnal AP módba", scWF1 },
-  { "WF2: 10 perc várakozás + 3 próba, majd AP mód", scWF2 },
+  { "WF2: 10 perc + 3 próba + router reset + 3 próba, majd alvás", scWF2 },
   { "WF3: AP mód 5 perc után alszik, időzített ébresztés nélkül", scWF3 },
   { "WF4: fájlírás közben SOHA nem alszik el", scWF4 },
   { "WF5: minden HTTP kérés kitolja az 5 perces határidőt", scWF5 },
@@ -1372,10 +1383,10 @@ static const Scenario kScenarios[] = {
   { "X6: sikertelen mentés is kitolja az AP határidőt", scX6 },
   { "PO1: áramszünet, router 8 perc múlva -> kivárja", scPO1 },
   { "PO2: router 11 perc múlva -> még elkapja", scPO2 },
-  { "PO3: router 20 perc múlva -> alvás, majd új kör", scPO3 },
+  { "PO3: router 20 perc múlva -> a reset utáni próbálkozás elkapja", scPO3 },
   { "R1: rossz jelszó -> azonnal AP mód", scR1 },
-  { "R2: 40 kör (2 nap) után AP mód", scR2 },
-  { "R3: a 2 napos számítás ellenőrzése", scR3 },
+  { "R2: 33 kör (~2 nap) után AP mód", scR2 },
+  { "R3: a 2 napos számítás ellenőrzése (33 x 85,5 perc)", scR3 },
   { "R4: sikeres csatlakozás nullázza a 2 napos ablakot", scR4 },
   { "L1: eseménynapló és a /log oldal", scL1 },
   { "L2: körpuffer túlcsordulás", scL2 },

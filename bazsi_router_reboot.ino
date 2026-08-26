@@ -89,12 +89,18 @@ constexpr uint32_t wifiInterval = 30 * 1000;
 // beérkező kérés újraindítja a visszaszámlálást.
 constexpr uint32_t AP_TIMEOUT_MS = 5 * 60 * 1000;
 
-// Meddig próbálkozzunk, ha a hálózat egyszerűen nincs ott (a router lekapcsolva,
-// szolgáltatói kimaradás)? Egy kör: 10 perc firstStartDelay + 2 perc próbálkozás
-// (3 x 20 mp timeout + 2 x 30 mp szünet) + 60 perc alvás = 72 perc.
-// 2 nap = 2880 perc, tehát 2880 / 72 = 40 kör.
-// Ha két nap alatt sem jön vissza a net, az már nem az eszköz dolga.
-constexpr uint32_t MAX_RETRY_ROUNDS = 40;
+// Meddig próbálkozzunk, ha a hálózat egyszerűen nincs ott? Egy kör:
+//    10,0 perc  firstStartDelay várakozás
+//   + 2,0 perc  3 csatlakozási próba (3 x 20 mp timeout + 2 x 30 mp szünet)
+//   + 1,5 perc  router áramtalanítás (RESET_PULSE)
+//  + 10,0 perc  várakozás a router bootolására (RESET_DELAY)
+//   + 2,0 perc  újabb 3 csatlakozási próba
+//  + 60,0 perc  deep sleep
+//  = 85,5 perc
+// 2 nap = 2880 perc; 2880 / 85,5 = 33,7 -> 33 kör = 2821,5 perc = 47,0 óra,
+// tehát még két napon belül. Ha ennyi idő alatt sem jön vissza a net, az már
+// nem az eszköz dolga.
+constexpr uint32_t MAX_RETRY_ROUNDS = 33;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 50;
 // Gombok mintavételi köze. 10 ms bőven elég az 50 ms-os debounce-hoz, viszont
 // delay()-jel várunk, nem yield()-del, így a CPU nem pörög üresen.
@@ -252,6 +258,9 @@ void fatalSleep();
 void apSleep();
 void touchApDeadline();
 void wifiGiveUp();
+bool routerResetAndRetry();
+bool wifiAuthFailed();
+bool reset_device();
 void logEvent(EventCode code, uint16_t param);
 void startConfigPortal();
 void enterFatal(const char* reason);
@@ -746,6 +755,29 @@ void internetFailSleep() {
   enterDeepSleep(SLEEP_DURATION_US);
 }
 
+// A hálózat nem látszik. Lehet, hogy a router fagyott le - pontosan erre való
+// ez az eszköz. Áramtalanítjuk, kivárjuk a bootolást, majd újra próbálkozunk.
+// Ugyanaz a menet, mint a működés közbeni kapcsolatvesztésnél.
+bool routerResetAndRetry() {
+  printUptime();
+  Serial.println("A halozat nem latszik - router ujrainditas kovetkezik.");
+  while (!reset_device()) {
+    resetbutton();
+    wifiresetbutton();
+    feedLoopWDT();
+    delay(BUTTON_POLL_MS);
+  }
+  printUptime();
+  Serial.println("Router reset kesz, varakozas a bootolasra.");
+  waitWithButtons(RESET_DELAY);
+  return reconnectWifi();
+}
+
+// Hitelesítési hiba? Ilyenkor a router újraindítása értelmetlen.
+bool wifiAuthFailed() {
+  return WiFi.status() == WL_CONNECT_FAILED;
+}
+
 // A hálózat nincs ott, de valószínűleg visszajön: alvás egy órát, majd új kör.
 void retrySleep() {
   printUptime();
@@ -1025,10 +1057,16 @@ void handleFirstStart(uint32_t currentMillis) {
     Serial.println("First start wait end.");
 
     if (!reconnectWifi()) {
-      // 3 próba 30 mp szünetekkel sem hozott eredményt. A folytatásról a
-      // hiba oka dönt: rossz jelszó -> AP mód, egyébként újrapróbálkozás.
-      wifiGiveUp();
-      return;
+      // Rossz jelszónál a router újraindítása értelmetlen - egyből AP mód.
+      if (wifiAuthFailed()) {
+        wifiGiveUp();
+        return;
+      }
+      // Egyébként: hátha a router fagyott le. Áramtalanítás, majd újra.
+      if (!routerResetAndRetry()) {
+        wifiGiveUp();
+        return;
+      }
     }
 
     timing.startMillis = millis();  // újraindítjuk az időzítést (friss bélyeg)

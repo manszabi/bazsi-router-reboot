@@ -50,13 +50,33 @@ döntünk: **csak** az explicit hitelesítési hiba küld AP módba, mert a tév
 „várjunk tovább" ára késleltetett újrakonfigurálás, a téves „AP mód" ára viszont
 egy halott eszköz.
 
-### Meddig próbálkozik? – 2 nap
+### Meddig próbálkozik? – közel 2 nap
+
+Egy kör **tartalmaz egy router újraindítást** is: ha a Wi-Fi nem látszik, a
+router is lehet lefagyva – pontosan ez az eszköz dolga.
+
+```
+indulás → 10,0 perc  firstStartDelay várakozás
+        →  2,0 perc  3 csatlakozási próba (20 mp timeout, 30 mp szünet)
+        →  1,5 perc  ROUTER ÚJRAINDÍTÁS (relé ki, RESET_PULSE)
+        → 10,0 perc  várakozás a router bootolására (RESET_DELAY)
+        →  2,0 perc  újabb 3 csatlakozási próba
+        → 60,0 perc  deep sleep
+        = 85,5 perc / kör
+```
 
 | | |
 |---|---|
-| Egy kör | 10 perc várakozás + 2 perc próbálkozás + 60 perc alvás = **72 perc** |
-| Körök száma | `MAX_RETRY_ROUNDS = 40` |
-| Összesen | 40 × 72 perc = 2880 perc = **48 óra = 2 nap** |
+| Egy kör | **85,5 perc** (ebből 25,5 perc ébren) |
+| Körök száma | `MAX_RETRY_ROUNDS = 33` |
+| Összesen | 33 × 85,5 = 2821,5 perc = **47,0 óra** |
+
+34 kör már 48,5 óra lenne, tehát 33 az utolsó, ami két napon belül marad.
+Két nap alatt így legfeljebb **33 router-újraindítás** történik.
+
+> **Rossz jelszó esetén nincs router reset.** Ha a `WiFi.status()`
+> `WL_CONNECT_FAILED`-et ad, az eszköz azonnal AP módba megy – a router
+> áramtalanítása ilyenkor értelmetlen lenne.
 
 Két nap után AP beállító mód, majd 5 perc után alvás. A körszámláló
 `RTC_DATA_ATTR`-ben van: a deep sleepet túléli, de **bekapcsolásra és a reset
@@ -75,12 +95,14 @@ Teszttel kimérve (`PO1`–`PO3`):
 | A router ennyi idő múlva áll fel | Eredmény |
 |---|---|
 | 8 perc | Kivárja az első körben, csatlakozik |
-| 11 perc | Az első kör próbálkozási ablakában még elkapja |
-| 20 perc | Az első kör lejár → alszik 1 órát → **a következő körben elkapja** |
-| **2 napnál tovább** | Feladja: AP mód, majd alvás |
+| 11 perc | Az első kör első próbálkozási ablakában elkapja |
+| 20 perc | A router reset utáni második ablak elkapja – **még az első körben** |
+| ennél tovább | Óránként új kör, mindegyikben egy router újraindítással |
+| **~47 óránál tovább** | Feladja: AP mód, majd 5 perc után alvás |
 
-Az első kör „ablaka" ~12 perc, de ez **nem** a tűréshatár: ami kimarad belőle,
-azt a következő óránkénti kör elkapja. A tényleges határ **2 nap**.
+Egy kör két próbálkozási ablakot ad (a router reset előtt és után), így az első
+kör önmagában ~25 percet fed le. Ami ebből kimarad, azt a következő körök
+kapják el. A tényleges határ **~47 óra**.
 
 ## 12. Diagnosztikai napló
 
