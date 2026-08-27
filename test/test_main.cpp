@@ -39,6 +39,7 @@ extern uint32_t rtcWdtResets;
 extern volatile bool savingConfig;
 extern volatile uint32_t apDeadline;
 extern volatile bool restartPending;
+extern volatile uint32_t restartAt;
 extern uint32_t rtcRetryRounds;
 extern uint32_t rtcEvMagic;
 extern uint32_t rtcEvNext;
@@ -102,6 +103,10 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   g_fsWritable = true; g_fsCapacity = 0; g_fsRemoveOk = true; g_fsReadable = true;
   g_resetReason = ESP_RST_POWERON;
   rtcRetryRounds = 0;
+  // Egy valodi hidegindulas ezeket is nullazza (sima globalisok). Enelkul egy
+  // korabbi mentes utan beallitott halasztott ujrainditas atszivarogna a
+  // "reboot" utanra, es kesobb, a scenario kozepen inditana ujra az eszkozt.
+  restartPending = false; restartAt = 0; savingConfig = false;
   g_gpioWakeResult = 0;
   g_gpioWakeMask = 0; g_gpioWakeMode = -1;
   g_httpCode = 200; g_httpSize = -2; g_httpBeginOk = true; g_httpBody = "Microsoft NCSI";
@@ -2415,6 +2420,79 @@ static void scSE7() {
   CHECK(deviceMode == (DeviceMode)0, "monitor mod - csatlakozott");
 }
 
+
+static void scSE8() {
+  // A dontő kerdes: a RADIOIG a nyilt jelszo jut-e el, es nem a fajlban
+  // tarolt kodolt forma. Eddig a stub eldobta a jelszot, tehat ezt semmi
+  // nem ellenorizte.
+  const char* PW = "SzuperTitkosJelszo42";
+  coldBoot(false, "", "", "", "");
+  setup();
+  CHECK(postConfig("OtthoniWifi", PW, "", "") == 200, "mentes OK");
+  auto mentett = g_fs;
+
+  coldBoot(true, "", "", "", "");
+  g_fs = mentett;
+  setup();
+  CHECK(wifiSim.lastSsid == "OtthoniWifi", "a WiFi.begin() a helyes SSID-t kapja");
+  CHECK(wifiSim.lastPass == PW, "a WiFi.begin() a NYILT jelszot kapja");
+  CHECK(wifiSim.lastPass.rfind("v1:", 0) != 0, "nem a kodolt format kapja");
+  CHECK(deviceMode == (DeviceMode)0, "csatlakozott, monitor mod");
+}
+
+static void scSE9() {
+  // Nem csak az induláskori csatlakozas: a kapcsolat kieses utani
+  // ujracsatlakozas is a helyes jelszoval megy.
+  const char* PW = "MasikTitok99";
+  coldBoot(false, "", "", "", "");
+  setup();
+  postConfig("OtthoniWifi", PW, "", "");
+  auto mentett = g_fs;
+
+  coldBoot(true, "", "", "", "");
+  g_fs = mentett;
+  setup();
+  g_httpBody = "Microsoft Connect Test";
+  loop();                                   // firstStart lezarasa
+  const int elozo = wifiSim.beginCount;
+  wifiSim.begun = false;                    // a kapcsolat kiesik
+  wifiSim.lastPass.clear();
+  int guard = 0;
+  try { while (++guard < 100000 && !serialHas("WIFI RECONNECTED!")) loop(); }
+  catch (...) {}
+  CHECK(wifiSim.beginCount > elozo, "ujra probalt csatlakozni");
+  CHECK(wifiSim.lastPass == PW, "az ujracsatlakozas is a nyilt jelszoval megy");
+  CHECK(serialHas("WIFI RECONNECTED!"), "es sikerult");
+}
+
+static void scSE10() {
+  // Router reset utani ujracsatlakozas: itt a WiFi.disconnect(true) eldobja a
+  // netifet, tehat teljes initWiFi() fut ujra - a jelszonak ott is jonek kell
+  // lennie.
+  const char* PW = "HarmadikTitok7";
+  coldBoot(false, "", "", "", "");
+  setup();
+  postConfig("OtthoniWifi", PW, "", "");
+  auto mentett = g_fs;
+
+  coldBoot(true, "", "", "", "");
+  g_fs = mentett;
+  setup();
+  g_httpBody = "Rossz"; pingSim.ok = false;   // az internet nem megy
+  loop();
+  // A rele pulzus EGYETLEN loop() hivason belul zajlik (a reset_device()-t
+  // blokkolo ciklus hajtja), tehat a loop() utan mar ujra LOW. A naplobol
+  // kell nezni, hogy volt-e HIGH.
+  int guard = 0;
+  try { while (++guard < 400000 && logIndex("pin7=HIGH") < 0) loop(); }
+  catch (...) {}
+  CHECK(logIndex("pin7=HIGH") >= 0, "router reset elindult");
+  wifiSim.lastPass.clear();
+  try { while (++guard < 900000 && !serialHas("WIFI OK in FAILURE_STATE.")) loop(); }
+  catch (...) {}
+  CHECK(wifiSim.lastPass == PW, "a router reset utani csatlakozas is a nyilt jelszoval megy");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -2540,6 +2618,9 @@ static const Scenario kScenarios[] = {
   { "SE5: a régi, nyílt szöveges mentés továbbra is működik", scSE5 },
   { "SE6: hibás tartalom nem végzetes hiba", scSE6 },
   { "SE7: mentés -> újraindulás -> csatlakozás végponttól végpontig", scSE7 },
+  { "SE8: a WiFi.begin() a NYÍLT jelszót kapja, nem a kódoltat", scSE8 },
+  { "SE9: kapcsolatvesztés utáni újracsatlakozás is jó jelszóval", scSE9 },
+  { "SE10: router reset utáni újracsatlakozás is jó jelszóval", scSE10 },
   { "P14: a halasztott újraindítás a türelmi idő UTÁN fut le", scP14 },
   { "L6: minden eseménykód olvasható címkét kap a /log oldalon", scL6 },
   { "L7: üres napló esetén nincs üres táblázat", scL7 },

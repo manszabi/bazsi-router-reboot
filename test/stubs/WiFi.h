@@ -48,6 +48,7 @@ struct WifiSim {
   bool configFails = false;      // a WiFi.config() hibat adjon vissza
   int softApCount = 0;
   std::string apPass;            // amivel a softAP()-ot hivtuk
+  std::string lastPass, lastSsid;  // amivel a WiFi.begin()-t hivtuk
   void reset() { *this = WifiSim(); }
 };
 extern WifiSim wifiSim;
@@ -60,7 +61,10 @@ public:
     if (m == WIFI_AP) { wifiSim.begun = false; }
   }
   void begin(const char* s, const char* p) {
-    (void)p;
+    // A jelszot ROGZITJUK: enelkul semmi nem ellenorizne, hogy a radioig a
+    // NYILT jelszo jut-e el, es nem a fajlban tarolt kodolt forma.
+    wifiSim.lastPass = p ? p : "";
+    wifiSim.lastSsid = s ? s : "";
     wifiSim.begun = true; wifiSim.beginAt = g_millis; wifiSim.radioOff = false;
     wifiSim.beginCount++;
     simLog(std::string("WiFi.begin(") + (s ? s : "") + ")");
