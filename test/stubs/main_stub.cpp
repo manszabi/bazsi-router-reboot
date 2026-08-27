@@ -35,6 +35,7 @@ uint32_t g_wdtIdleMask = 0xFFFFFFFF;
 bool     g_wdtPanic = false;
 uint32_t g_wdtMaxFeedGap = 0;
 uint32_t g_wdtLastFeed = 0;
+uint32_t g_wdtFeedBeforeEnable = 0;
 bool     g_wdtTrack = false;
 static bool g_wdtInited = true;   // IDF: ESP_TASK_WDT_INIT=y -> boot óta fut
 
@@ -51,6 +52,7 @@ esp_err_t esp_task_wdt_reconfigure(const esp_task_wdt_config_t* c) {
 }
 void enableLoopWDT() { g_wdtEnabled = true; simLog("enableLoopWDT"); }
 void feedLoopWDT() {
+  if (!g_wdtEnabled) g_wdtFeedBeforeEnable++;
   if (g_wdtTrack) {
     const uint32_t gap = g_millis - g_wdtLastFeed;
     if (gap > g_wdtMaxFeedGap) g_wdtMaxFeedGap = gap;
@@ -86,10 +88,15 @@ int digitalRead(uint8_t p) { auto it = g_pinRead.find(p); return it == g_pinRead
 void yield() { g_millis += 10; }   // szimulált idő telik minden yield()-nél
 int64_t esp_timer_get_time() { return (int64_t)g_millis * 1000; }
 void esp_sleep_enable_timer_wakeup(uint64_t us) { g_wakeupUs = us; simLog("timer_wakeup(" + std::to_string(us) + ")"); }
-void esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown(uint64_t mask, int mode) {
+int g_gpioWakeResult = 0;
+static int armGpioWake(uint64_t mask, int mode) {
+  if (g_gpioWakeResult != 0) return g_gpioWakeResult;   // armolas elbukott
   g_gpioWakeMask = mask; g_gpioWakeMode = mode;
   simLog("gpio_wakeup(mask=" + std::to_string(mask) + ",mode=" + std::to_string(mode) + ")");
+  return 0;
 }
+int esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown(uint64_t m, int mo) { return armGpioWake(m, mo); }
+int esp_deep_sleep_enable_gpio_wakeup(uint64_t m, int mo) { return armGpioWake(m, mo); }
 void esp_sleep_disable_wakeup_source(int) {
   g_wakeupUs = 0; g_gpioWakeMask = 0; g_gpioWakeMode = -1;
   simLog("wakeup_disable_all");

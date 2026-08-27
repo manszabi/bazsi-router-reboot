@@ -9,6 +9,10 @@ cd test
 make test
 ```
 
+A suite **kétszer** fut: az ESP32 Arduino 3.3.11 által használt **IDF 5**-ös
+ágon, és az **IDF 6**-os ágon is – a deep sleep gomb-ébresztés API-ját ugyanis
+az IDF 6 átnevezte, és a sketch mindkét nevet kezeli.
+
 Egyetlen forgatókönyv futtatása név-előtag alapján:
 
 ```bash
@@ -44,6 +48,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján:
 | `C1` | Konfig fájlok írása/olvasása, csonkítás, hiányzó fájl |
 | `B1` | Gomb debounce: zajtüske vs. tartós nyomás |
 | `F1` | Tartalék beállító űrlap, ha a `data/` mappa nincs feltöltve |
+| `SB1`–`SB4` | Beragadt gomb: mindkét gomb, váltakozó LED-villogás, naplózás |
 | `R1`–`R4` | Újrapróbálkozási politika: rossz jelszó vs. hiányzó hálózat, 2 napos határ |
 | `L1`–`L4` | Diagnosztikai napló: rögzítés, /log oldal, körpuffer, spam-védelem |
 | `PO1`–`PO3` | Áramszünet: mekkora router-indulási késést tolerál |
@@ -54,6 +59,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján:
 | `WF1`–`WF5` | Csatlakozási hiba: újrapróbálkozás vs. AP portál, RTC-számláló |
 | `FS1`–`FS6` | LittleFS hibák: csatolás, írásvédettség, megtelt tár, sérült tartalom, törlés tartalék útvonala |
 | `FT1`–`FT6` | Végzetes hiba: betölthetetlen konfig vs. „nincs még konfig", LED-villogás, gombok |
+| `SN1`–`SN2` | Biztonsági háló: ha a gomb-ébresztés armolása hibázik, időzítő |
 | `WD1`–`WD6` | Ismétlődő watchdog újraindulás: számlálás, végzetes leállás, nullázási feltételek |
 | `WDT1`–`WDT4` | Watchdog: konfiguráció, etetés a hosszú blokkolások alatt, `delay()` vs. CPU-pörgetés |
 

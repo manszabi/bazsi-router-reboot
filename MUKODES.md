@@ -23,7 +23,7 @@ Az eszköz mindig pontosan egy üzemmódban van.
 |---|---|---|
 | Kimenetek alapállapotba (relé `LOW`, státusz LED be) | azonnal | |
 | Soros port indítása | max. **3 mp** + 0,5 mp | |
-| Beragadt gomb ellenőrzés | azonnal | Ha nyomva: **60 mp** deep sleep, majd újra |
+| Beragadt gomb ellenőrzés (**mindkettő**: `D0` és `D1`) | azonnal | Ha bármelyik nyomva: LED-ek **felváltva** villognak 3 mp-ig, majd **60 mp** deep sleep |
 | Watchdog reset számláló ellenőrzés | azonnal | 3. rendellenes reset → `MODE_FATAL` |
 | LittleFS csatolás | azonnal | Hiba → `MODE_FATAL` |
 | Konfiguráció beolvasása | azonnal | Olvasási hiba → `MODE_FATAL` |
@@ -50,13 +50,33 @@ döntünk: **csak** az explicit hitelesítési hiba küld AP módba, mert a tév
 „várjunk tovább" ára késleltetett újrakonfigurálás, a téves „AP mód" ára viszont
 egy halott eszköz.
 
-### Meddig próbálkozik? – 2 nap
+### Meddig próbálkozik? – közel 2 nap
+
+Egy kör **tartalmaz egy router újraindítást** is: ha a Wi-Fi nem látszik, a
+router is lehet lefagyva – pontosan ez az eszköz dolga.
+
+```
+indulás → 10,0 perc  firstStartDelay várakozás
+        →  2,0 perc  3 csatlakozási próba (20 mp timeout, 30 mp szünet)
+        →  1,5 perc  ROUTER ÚJRAINDÍTÁS (relé ki, RESET_PULSE)
+        → 10,0 perc  várakozás a router bootolására (RESET_DELAY)
+        →  2,0 perc  újabb 3 csatlakozási próba
+        → 60,0 perc  deep sleep
+        = 85,5 perc / kör
+```
 
 | | |
 |---|---|
-| Egy kör | 10 perc várakozás + 2 perc próbálkozás + 60 perc alvás = **72 perc** |
-| Körök száma | `MAX_RETRY_ROUNDS = 40` |
-| Összesen | 40 × 72 perc = 2880 perc = **48 óra = 2 nap** |
+| Egy kör | **85,5 perc** (ebből 25,5 perc ébren) |
+| Körök száma | `MAX_RETRY_ROUNDS = 33` |
+| Összesen | 33 × 85,5 = 2821,5 perc = **47,0 óra** |
+
+34 kör már 48,5 óra lenne, tehát 33 az utolsó, ami két napon belül marad.
+Két nap alatt így legfeljebb **33 router-újraindítás** történik.
+
+> **Rossz jelszó esetén nincs router reset.** Ha a `WiFi.status()`
+> `WL_CONNECT_FAILED`-et ad, az eszköz azonnal AP módba megy – a router
+> áramtalanítása ilyenkor értelmetlen lenne.
 
 Két nap után AP beállító mód, majd 5 perc után alvás. A körszámláló
 `RTC_DATA_ATTR`-ben van: a deep sleepet túléli, de **bekapcsolásra és a reset
@@ -75,12 +95,14 @@ Teszttel kimérve (`PO1`–`PO3`):
 | A router ennyi idő múlva áll fel | Eredmény |
 |---|---|
 | 8 perc | Kivárja az első körben, csatlakozik |
-| 11 perc | Az első kör próbálkozási ablakában még elkapja |
-| 20 perc | Az első kör lejár → alszik 1 órát → **a következő körben elkapja** |
-| **2 napnál tovább** | Feladja: AP mód, majd alvás |
+| 11 perc | Az első kör első próbálkozási ablakában elkapja |
+| 20 perc | A router reset utáni második ablak elkapja – **még az első körben** |
+| ennél tovább | Óránként új kör, mindegyikben egy router újraindítással |
+| **~47 óránál tovább** | Feladja: AP mód, majd 5 perc után alvás |
 
-Az első kör „ablaka" ~12 perc, de ez **nem** a tűréshatár: ami kimarad belőle,
-azt a következő óránkénti kör elkapja. A tényleges határ **2 nap**.
+Egy kör két próbálkozási ablakot ad (a router reset előtt és után), így az első
+kör önmagában ~25 percet fed le. Ami ebből kimarad, azt a következő körök
+kapják el. A tényleges határ **~47 óra**.
 
 ## 12. Diagnosztikai napló
 
@@ -244,8 +266,19 @@ Rendellenesnek számít: `ESP_RST_TASK_WDT`, `ESP_RST_INT_WDT`, `ESP_RST_WDT`,
 | Reset | `D1` = GPIO3 | Azonnali újraindítás; deep sleepből ébreszt | **50 mp** folyamatos nyomás |
 | Wi-Fi reset | `D0` = GPIO2 | Mentett adatok törlése + újraindítás | **50 mp** folyamatos nyomás |
 
-Induláskor beragadt gomb → **60 mp** deep sleep (gombos ébresztés nélkül, hogy
-ne legyen újraindítási hurok).
+### Beragadt gomb induláskor
+
+Induláskor **mindkét** gombot ellenőrizzük. Ha bármelyik nyomva van:
+
+1. A két LED **felváltva** villog **3 másodpercig** (ellentétes fázisban)
+2. Az eszköz **60 mp** deep sleepbe megy
+3. **Gombos ébresztés nélkül** – különben a beragadt gomb azonnal
+   újraébresztené, és végtelen boot loop lenne
+4. Az esemény bekerül a diagnosztikai naplóba (`STUCK BUTTON`, a paraméter
+   megmondja melyik gomb)
+
+> A **felváltva** villogás szándékosan más, mint a végzetes hiba jelzése, ahol a
+> két LED **együtt** villog. Ránézésre megkülönböztethető.
 
 ---
 
@@ -260,6 +293,10 @@ ne legyen újraindítási hurok).
 
 Minden alvás előtt a **relé `LOW`**, tehát a router kap áramot.
 
+> Biztonsági háló: ha a gombos ébresztés élesítése bármiért hibázna (pl. valaki
+> nem RTC-képes lábra teszi a reset gombot), az eszköz a „csak gombbal" alvások
+> esetén is armol egy 1 órás időzítőt – így nem válhat elérhetetlenné.
+
 > ⚠️ Deep sleep alatt az ESP32-C3 `GPIO6–21` lábai nagyimpedanciásak, így a relé
 > (`D5` = GPIO7) **lebeg**. Ez szoftverből nem javítható – aktív-HIGH
 > relémodulnál külső 10 kΩ lehúzó ellenállás kell a GND felé.
@@ -273,4 +310,5 @@ Minden alvás előtt a **relé `LOW`**, tehát a router kap áramot.
 | be | be | Minden rendben, van Wi-Fi |
 | be | ki | Nincs Wi-Fi kapcsolat |
 | ki | ki | Router áramtalanítva (reset pulzus alatt), vagy alvás |
-| **együtt villog 5 Hz** | **együtt villog 5 Hz** | **Végzetes hiba** |
+| **együtt villog 5 Hz** | **együtt villog 5 Hz** | **Végzetes hiba** (LittleFS / konfig / watchdog) |
+| **felváltva villog 5 Hz** | **felváltva villog 5 Hz** | **Beragadt gomb** induláskor |
