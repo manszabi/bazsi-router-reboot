@@ -54,6 +54,18 @@ Ha nincs mentett Wi-Fi adat (vagy a Wi-Fi reset gombot megnyomtad):
 > visszautasítja, ahelyett hogy sikert jelentene egy olyan fix címre, amit az
 > eszköz végül nem használ. DHCP-hez hagyd mindkettőt üresen.
 >
+> **Csak IPv4 cím adható meg** (és nem `0.0.0.0`). Az `IPAddress::fromString()`
+> az IPv4 után IPv6-ot is megpróbál, ezért a `::1` vagy a `fe80::1` is
+> érvényesnek *látszana* – a `WiFi.config()` viszont az `IPAddress` `uint32_t`
+> konverzióját használja, ami IPv6-ra `0`-t ad. Egy IPv6 cím így csendben
+> DHCP-t, IPv4-cím + IPv6-gateway párosnál pedig **gateway és elsődleges DNS
+> nélküli** statikus konfigurációt eredményezne – vagyis nem lenne internet.
+>
+> **Az SSID és a jelszó elejéről/végéről a szóközök levágódnak**, már mentéskor.
+> Így az elmentett érték pontosan az, amivel az eszköz csatlakozni fog, és a
+> portál visszajelzése is ezt mutatja. (Következmény: olyan SSID vagy jelszó
+> nem használható, aminek szándékosan szóköz van a szélén.)
+>
 > Az AP mód **5 perc tétlenség** után elalszik (minden HTTP kérés újraindítja a
 > visszaszámlálást), és utána már csak a reset gomb vagy az áramtalanítás
 > ébreszti fel. Fájlírás közben soha nem alszik el.

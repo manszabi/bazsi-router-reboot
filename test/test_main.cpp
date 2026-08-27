@@ -1642,6 +1642,124 @@ static void scH5() {
   CHECK(elapsed < 90000, "biztosan a watchdog timeout alatt marad");
 }
 
+
+// --- Csak IPv4 hasznalhato --------------------------------------------------
+// Az IPAddress::fromString() az IPv4 utan IPv6-ot is megprobal, ezert a "::1"
+// is ervenyesnek latszik - de a WiFi.config() az uint32_t konverziot hasznalja,
+// ami IPv6-ra 0-t ad. Igy egy IPv6 cim csendben DHCP-t, vegyes paros eseten
+// pedig gateway es DNS nelkuli statikus IP-t eredmenyezne.
+static void scIP1() {
+  // Eloszor: a stub tenyleg ugy viselkedik, mint a core.
+  IPAddress a;
+  CHECK(a.fromString("::1"), "a core-hoz huen a '::1' ervenyes cimnek szamit");
+  CHECK((uint32_t)a == 0, "de az uint32_t konverzio 0-t ad (IPAddress.h:83)");
+  IPAddress b;
+  CHECK(b.fromString("192.168.1.5") && (uint32_t)b != 0, "IPv4 viszont nem nulla");
+}
+
+static void scIP2() {
+  coldBoot(false, "", "", "", "");
+  setup();
+  std::string body;
+  int code = postConfig("Halozat", "jelszo123", "::1", "fe80::1", &body);
+  CHECK(code == 500, "IPv6 cimparos -> 500, nem csendes DHCP");
+  CHECK(!restartPending, "nem indul ujra ervenytelen cimmel");
+
+  // A vegyes paros a rosszabb eset: IPv4 IP + IPv6 gateway eseten a config()
+  // 0.0.0.0-s gateway-t ES 0.0.0.0-s elsodleges DNS-t allitana be.
+  code = postConfig("Halozat", "jelszo123", "192.168.1.200", "fe80::1", &body);
+  CHECK(code == 500, "IPv4 IP + IPv6 gateway -> 500");
+
+  code = postConfig("Halozat", "jelszo123", "0.0.0.0", "192.168.1.1", &body);
+  CHECK(code == 500, "0.0.0.0 sem fogadhato el (a config() DHCP-nek venne)");
+
+  code = postConfig("Halozat", "jelszo123", "192.168.1.200", "192.168.1.1", &body);
+  CHECK(code == 200, "ervenyes IPv4 paros -> 200");
+}
+
+static void scIP3() {
+  // Regebbi firmware IPv6 cimet is elmenthetett: az initWiFi()-nek akkor is
+  // DHCP-re kell esnie, nem gateway nelkuli statikus IP-t beallitania.
+  coldBoot(true, "TestNet", "pw", "192.168.1.200", "fe80::1");
+  setup();
+  CHECK(wifiSim.configCount == 0, "nem hivott config()-ot a hibas parossal");
+  CHECK(!wifiSim.staticApplied, "DHCP-re esett vissza");
+  CHECK(serialHas("Invalid gateway format"), "es meg is mondja, miert");
+  CHECK(wifiSim.beginCount == 1, "de csatlakozni azert megprobalt");
+}
+
+// --- Fajliras kozben nincs ujrainditas --------------------------------------
+static void scP11() {
+  // A felhasznalo eppen menteskor nyomja meg a reset gombot. A mentes kozbeni
+  // ujrainditas felig kiirt konfiguraciot hagyna - ugyanaz a szabaly, mint az
+  // elalvasnal.
+  coldBoot(false, "", "", "", "");
+  setup();
+  savingConfig = true;
+  g_pinRead[3] = LOW;                      // D1 = GPIO3, reset gomb
+  bool restarted = false;
+  try {
+    for (int i = 0; i < 50; i++) { resetbutton(); delay(10); }
+  } catch (RestartSignal&) { restarted = true; }
+  CHECK(!restarted, "mentes kozben NEM indul ujra");
+
+  savingConfig = false;
+  try {
+    // A mentes alatt a debounce sem indult el, tehat itt egy teljes 50 ms-os
+    // lenyomas kell - nehany tized masodperc bosegesen eleg ra.
+    for (int i = 0; i < 20; i++) { resetbutton(); delay(10); }
+  } catch (RestartSignal&) { restarted = true; }
+  CHECK(restarted, "a mentes utan viszont lefut (uj 50 ms debounce utan)");
+}
+
+static void scP12() {
+  // Ugyanez a wifireset gombra: az mentes kozben a fajlokat is torolne, mikozben
+  // az aszinkron task eppen irja oket.
+  coldBoot(false, "", "", "", "");
+  setup();
+  g_fs["/ssid.txt"] = "RegiHalozat";
+  savingConfig = true;
+  g_pinRead[2] = LOW;                      // D0 = GPIO2, wifireset gomb
+  bool restarted = false;
+  try {
+    for (int i = 0; i < 50; i++) { wifiresetbutton(); delay(10); }
+  } catch (RestartSignal&) { restarted = true; }
+  CHECK(!restarted, "mentes kozben NEM indul ujra");
+  CHECK(g_fs["/ssid.txt"] == "RegiHalozat", "es nem is torolte a fajlokat");
+
+  savingConfig = false;
+  try {
+    for (int i = 0; i < 20; i++) { wifiresetbutton(); delay(10); }
+  } catch (RestartSignal&) { restarted = true; }
+  CHECK(restarted, "a mentes utan viszont torol es ujraindit");
+}
+
+
+// --- Amit beirsz, azt is hasznalja -----------------------------------------
+static void scP13() {
+  // A readConfigValue() beolvasaskor levagja a whitespace-t. Ha mentéskor nem
+  // vagnank, a fajlban mas lenne, mint amivel az eszkoz csatlakozik - es a
+  // portal is a nyers erteket visszhangozna.
+  coldBoot(false, "", "", "", "");
+  setup();
+  const int code = postConfig("  MyNetwork  ", "  titok123  ", "", "");
+  CHECK(code == 200, "elfogadja");
+  CHECK(g_fs["/ssid.txt"] == "MyNetwork", "az elmentett SSID mar vagott");
+  CHECK(g_fs["/pass.txt"] == "titok123", "a jelszo is");
+  CHECK(serialHas("SSID set to: MyNetwork"), "es a visszajelzes is a vagott ertek");
+}
+
+static void scP14() {
+  // Csupa szokozbol allo SSID: a vagas utan ures marad. Ilyet nem szabad
+  // sikerkent elfogadni - ujraindulas utan ugyanitt, AP modban kotnenk ki.
+  coldBoot(false, "", "", "", "");
+  setup();
+  std::string body;
+  const int code = postConfig("     ", "jelszo123", "", "", &body);
+  CHECK(code == 500, "csupa szokoz SSID -> 500");
+  CHECK(!restartPending, "nem indul ujra hasznalhatatlan SSID-vel");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -1747,6 +1865,13 @@ static const Scenario kScenarios[] = {
   { "P9: statikus IP gateway nélkül nem fogadható el sikerként", scP9 },
   { "P10: a hosszú hibaindoklás nem csonkolódik", scP10 },
   { "H5: beragadt szervernél a saját olvasási határidő tart", scH5 },
+  { "IP1: a stub ugyanúgy viselkedik, mint a core IPAddress-e", scIP1 },
+  { "IP2: IPv6 és 0.0.0.0 cím nem fogadható el a portálon", scIP2 },
+  { "IP3: mentett IPv6 gateway esetén DHCP, nem csonka statikus konfig", scIP3 },
+  { "P11: mentés közben a reset gomb nem indít újra", scP11 },
+  { "P12: mentés közben a wifireset gomb nem töröl és nem indít újra", scP12 },
+  { "P13: a mentett érték megegyezik azzal, amit az eszköz használni fog", scP13 },
+  { "P14: csupa szóközből álló SSID nem fogadható el", scP14 },
 };
 
 

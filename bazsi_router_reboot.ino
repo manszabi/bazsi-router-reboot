@@ -284,6 +284,7 @@ void enterDeepSleep(uint64_t timerUs);
 bool initWiFi();
 bool reconnectWifi();
 bool writeConfigValue(fs::FS& fs, const char* path, const char* message);
+bool isUsableIPv4(const IPAddress& addr);
 
 // Esemény rögzítése a körpufferbe. Nem allokál, nem blokkol.
 void logEvent(EventCode code, uint16_t param) {
@@ -315,6 +316,20 @@ const char* eventName(uint8_t code) {
     case EV_STUCK_BUTTON: return "STUCK BUTTON";
     default: return "?";
   }
+}
+
+// Használható-e ez a cím statikus IPv4 konfigurációnak?
+//
+// Az IPAddress::fromString() az IPv4 után IPv6-ot is megpróbál (IPAddress.cpp),
+// ezért a "::1" vagy a "fe80::1" is érvényesnek látszik - és mindkettő befér a
+// 15 karakteres mezőbe. Az eszköz viszont végig IPv4-en dolgozik (ping 1.1.1.1
+// és 8.8.8.8, HTTP, /24-es maszk), a WiFi.config() pedig az IPAddress uint32_t
+// konverzióját használja (NetworkInterface.cpp:390), ami IPv6-ra 0-t ad
+// (IPAddress.h:83). Vagyis egy IPv6 cím csendben DHCP-t vagy - ami rosszabb -
+// egy 0.0.0.0-s gateway-t és DNS-t eredményezne. A 0.0.0.0 ugyanezt jelenti,
+// ezért az sem fogadható el.
+bool isUsableIPv4(const IPAddress& addr) {
+  return (uint32_t)addr != 0;
 }
 
 // Whitespace levágása helyben, allokáció nélkül
@@ -679,13 +694,15 @@ bool initWiFi() {
   IPAddress localIP;
   IPAddress localGateway;
   if (ipStr[0] != '\0' || gatewayStr[0] != '\0') {
-    const bool ipValid = localIP.fromString(ipStr);
-    const bool gatewayValid = localGateway.fromString(gatewayStr);
+    // Régebbi firmware IPv6 címet is elmenthetett: az ilyet itt is ki kell
+    // szűrni, különben a config() gateway és DNS nélküli statikus IP-t állítana.
+    const bool ipValid = localIP.fromString(ipStr) && isUsableIPv4(localIP);
+    const bool gatewayValid = localGateway.fromString(gatewayStr) && isUsableIPv4(localGateway);
     if (!ipValid) {
-      Serial.println("❌ Invalid IP format!");
+      Serial.println("❌ Invalid IP format (csak IPv4 hasznalhato)!");
     }
     if (!gatewayValid) {
-      Serial.println("❌ Invalid gateway format!");
+      Serial.println("❌ Invalid gateway format (csak IPv4 hasznalhato)!");
     }
     staticOk = ipValid && gatewayValid;
   }
@@ -925,6 +942,13 @@ void fatalSleep() {
 }
 
 void resetbutton() {
+  // Fájlírás közben SEMMIKÉPP nem indítunk újra: a félbeszakadt mentés sérült
+  // konfigurációt hagyna hátra. Ugyanaz a szabály, mint az elalvásnál.
+  // A mentés alatt a debounce sem indul el, tehát utána egy teljes 50 ms-os
+  // lenyomás kell - egy mentés néhány tíz ezredmásodperc, ez nem érzékelhető.
+  if (savingConfig) {
+    return;
+  }
   if (digitalRead(resetPin) != LOW) {
     timing.resetBtnDownSince = 0;  // felengedve: debounce újraindul
     return;
@@ -944,6 +968,11 @@ void resetbutton() {
 }
 
 void wifiresetbutton() {
+  // Mentés közben a törlés és az újraindítás is végzetes lenne: két task írná
+  // egyszerre ugyanazokat a fájlokat. Lásd resetbutton().
+  if (savingConfig) {
+    return;
+  }
   if (digitalRead(wifiresetPin) != LOW) {
     timing.wifiResetBtnDownSince = 0;
     return;
@@ -1091,8 +1120,9 @@ bool testInternetPing(const IPAddress& target, const char* targetName) {
   uint8_t successCount = 0;
 
   for (uint8_t j = 0; j < PING_ATTEMPTS; j++) {
-    IPAddress dest = target;  // a Ping.ping() érték szerint vár paramétert
-    const bool pingOK = Ping.ping(dest, 1);  // 1 próbálkozás pingenként
+    // A Ping.ping() érték szerint veszi a címet (ESPping: bool ping(IPAddress,
+    // int16_t)), tehát a másolatot ő maga készíti - nem kell külön helyi példány.
+    const bool pingOK = Ping.ping(target, 1);  // 1 próbálkozás pingenként
     Serial.print("Ping ");
     Serial.print(j + 1);
     if (pingOK) {
@@ -1271,22 +1301,34 @@ void startConfigPortal() {
       const String& val = p->value();  // referencia: nincs felesleges másolat
 
       if (name == PARAM_SSID) {
-        if (val.length() > 0 && val.length() <= SSID_MAX_LEN) {
+        // A readConfigValue() beolvasáskor levágja a whitespace-t, ezért már
+        // itt is levágjuk: így az elmentett és a visszajelzett érték pontosan
+        // az, amivel az eszköz később csatlakozni fog. A csupa szóközből álló
+        // SSID így üresre fogy - azt pedig nem szabad sikerként elfogadni,
+        // mert az újraindulás után AP módban kötnénk ki.
+        // Előbb helyi pufferbe: hibás bemenet ne írja felül a globálist.
+        char candidate[SSID_MAX_LEN + 1];
+        strlcpy(candidate, val.c_str(), sizeof(candidate));
+        trimInPlace(candidate);
+        if (val.length() <= SSID_MAX_LEN && candidate[0] != '\0') {
           ssidProvided = true;
-          strlcpy(ssid, val.c_str(), sizeof(ssid));
+          strlcpy(ssid, candidate, sizeof(ssid));
           Serial.print("SSID set to: ");
           Serial.println(ssid);
           saveOk &= writeConfigValue(LittleFS, ssidPath, ssid);
         } else {
           Serial.println("Invalid SSID length!");
           saveOk = false;
-          failReason = "Ervenytelen SSID hossz (1-32 karakter).";
+          failReason = "Ervenytelen SSID (1-32 karakter, nem csak szokoz).";
         }
       } else if (name == PARAM_PASS) {
         if (val.length() <= PASS_MAX_LEN) {
           strlcpy(pass, val.c_str(), sizeof(pass));
+          trimInPlace(pass);  // ugyanaz a szabály, mint az SSID-nél
+          // (itt a hossz már ellenőrzött, tehát a globálist csak érvényes
+          // bemenettel írjuk felül)
           Serial.print("Password set to: ");
-          Serial.print(val.length());
+          Serial.print((unsigned)strlen(pass));
           Serial.println(" chars");
           saveOk &= writeConfigValue(LittleFS, passPath, pass);
         } else {
@@ -1300,7 +1342,8 @@ void startConfigPortal() {
           ipStr[0] = '\0';
           Serial.println("IP empty, using DHCP.");
           saveOk &= writeConfigValue(LittleFS, ipPath, "");
-        } else if (val.length() <= IPSTR_MAX_LEN && testIP.fromString(val.c_str())) {
+        } else if (val.length() <= IPSTR_MAX_LEN && testIP.fromString(val.c_str())
+                   && isUsableIPv4(testIP)) {
           strlcpy(ipStr, val.c_str(), sizeof(ipStr));
           Serial.print("IP Address set to: ");
           Serial.println(ipStr);
@@ -1308,7 +1351,7 @@ void startConfigPortal() {
         } else {
           Serial.println("Invalid IP format!");
           saveOk = false;
-          if (failReason == nullptr) failReason = "Ervenytelen IP cim formatum.";
+          if (failReason == nullptr) failReason = "Ervenytelen IP cim (csak IPv4, nem 0.0.0.0).";
         }
       } else if (name == PARAM_GATEWAY) {
         IPAddress testIP;
@@ -1316,7 +1359,8 @@ void startConfigPortal() {
           gatewayStr[0] = '\0';
           Serial.println("Gateway empty, using DHCP.");
           saveOk &= writeConfigValue(LittleFS, gatewayPath, "");
-        } else if (val.length() <= IPSTR_MAX_LEN && testIP.fromString(val.c_str())) {
+        } else if (val.length() <= IPSTR_MAX_LEN && testIP.fromString(val.c_str())
+                   && isUsableIPv4(testIP)) {
           strlcpy(gatewayStr, val.c_str(), sizeof(gatewayStr));
           Serial.print("Gateway set to: ");
           Serial.println(gatewayStr);
@@ -1324,7 +1368,7 @@ void startConfigPortal() {
         } else {
           Serial.println("Invalid gateway format!");
           saveOk = false;
-          if (failReason == nullptr) failReason = "Ervenytelen gateway formatum.";
+          if (failReason == nullptr) failReason = "Ervenytelen gateway (csak IPv4, nem 0.0.0.0).";
         }
       }
 

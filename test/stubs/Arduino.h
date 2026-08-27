@@ -133,22 +133,58 @@ public:
 };
 extern HardwareSerial Serial;
 
+// A core IPAddress-e IPv6-ot is kezel, es ez itt szamit:
+//  - fromString() eloszor IPv4-kent, majd IPv6-kent probal (IPAddress.cpp),
+//    tehat a "::1" is ervenyes cimnek szamit;
+//  - az uint32_t konverzio viszont IPv6-ra 0-t ad (IPAddress.h:83), es a
+//    WiFi.config() pont ezt hasznalja (NetworkInterface.cpp:390).
+// A stub ezt a ketto egyuttest modellezi.
+enum IPType { IPv4, IPv6 };
+
 class IPAddress : public Print {
 public:
   IPAddress() { o[0]=o[1]=o[2]=o[3]=0; }
   IPAddress(uint32_t) { o[0]=o[1]=o[2]=o[3]=0; }
   IPAddress(uint8_t a, uint8_t b, uint8_t c, uint8_t d) { o[0]=a;o[1]=b;o[2]=c;o[3]=d; }
   bool fromString(const char* s) {
+    if (!s) return false;
     unsigned a,b,c,d; char extra;
-    if (!s || sscanf(s, "%u.%u.%u.%u%c", &a,&b,&c,&d,&extra) != 4) return false;
-    if (a>255||b>255||c>255||d>255) return false;
-    o[0]=(uint8_t)a;o[1]=(uint8_t)b;o[2]=(uint8_t)c;o[3]=(uint8_t)d; return true;
+    if (sscanf(s, "%u.%u.%u.%u%c", &a,&b,&c,&d,&extra) == 4
+        && a<=255 && b<=255 && c<=255 && d<=255) {
+      o[0]=(uint8_t)a;o[1]=(uint8_t)b;o[2]=(uint8_t)c;o[3]=(uint8_t)d;
+      t_ = IPv4; return true;
+    }
+    return fromString6(s);
+  }
+  // Csak annyira reszletes, amennyire a viselkedes szamit: hexa csoportok
+  // kettosponttal, legfeljebb egy "::" tomoritessel.
+  bool fromString6(const char* s) {
+    bool sawColon = false, sawDouble = false;
+    for (const char* p = s; *p; p++) {
+      if (*p == ':') {
+        if (p[1] == ':') { if (sawDouble) return false; sawDouble = true; p++; }
+        sawColon = true;
+      } else if (!isxdigit((unsigned char)*p)) {
+        return false;
+      }
+    }
+    if (!sawColon) return false;
+    o[0]=o[1]=o[2]=o[3]=0;
+    t_ = IPv6; return true;
+  }
+  IPType type() const { return t_; }
+  // IPAddress.h:83 - IPv6-ra szandekosan 0
+  operator uint32_t() const {
+    return t_ == IPv4 ? ((uint32_t)o[0]<<24 | (uint32_t)o[1]<<16 | (uint32_t)o[2]<<8 | o[3]) : 0u;
   }
   std::string str() const {
+    if (t_ == IPv6) return "<ipv6>";
     char t[20]; snprintf(t,sizeof(t),"%u.%u.%u.%u",o[0],o[1],o[2],o[3]); return t;
   }
   bool isZero() const { return !o[0] && !o[1] && !o[2] && !o[3]; }
   uint8_t o[4];
+private:
+  IPType t_ = IPv4;
 };
 
 inline size_t Print::print(const IPAddress& a) { buf_ += a.str(); return 0; }

@@ -222,14 +222,20 @@ Nem várunk további teszt ciklusokat: ha nincs Wi-Fi, a tesztnek nincs értelme
 |---|---|
 | Portál elérhető: `192.168.4.1` | |
 | Tétlenség után deep sleep | **5 perc** (`AP_TIMEOUT_MS`) |
+| Elfogadott IP / gateway | **csak IPv4**, nem `0.0.0.0`, és csak együtt |
+| SSID / jelszó | mentéskor a szélső szóközök levágódnak |
 | Az alvásból ébredés | **csak a reset gombbal** – időzített ébresztés nincs |
 
-Két védelem óvja a mentést:
+Három védelem óvja a mentést:
 
 - **Minden HTTP kérés újraindítja az 5 perces visszaszámlálást.** Ha az utolsó
   pillanatban nyitod meg az oldalt, kapsz még egy teljes időablakot.
 - **Fájlírás közben az eszköz soha nem alszik el**, tehát nem maradhat félig
   kiírt konfiguráció.
+- **Fájlírás közben a gombok sem indítanak újra.** A mentést az aszinkron
+  webszerver taskja végzi, a gombokat viszont a `loop()` figyeli – egy éppen
+  odaeső gombnyomás félbeszakított írást (a wifireset esetén ráadásul egyidejű
+  törlést) okozna. A gombok a mentés befejeztével működnek tovább.
 
 Sikeres mentés után: válasz elküldése, **2 mp** türelmi idő, majd újraindulás.
 Sikertelen mentésnél HTTP 500 és **nincs** újraindulás – a beírt adatok maradnak.
