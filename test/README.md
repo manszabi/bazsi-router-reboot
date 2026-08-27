@@ -53,7 +53,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 
 ## Lefedett esetek
 
-**131 forgatókönyv, 411 ellenőrzés. Sorlefedettség: 98,47%.**
+**131 forgatókönyv, 418 ellenőrzés. Sorlefedettség: 98,47%.**
 
 | | |
 |---|---|
@@ -64,7 +64,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 | `PG1`–`PG2` | Ping teszt: 2-a-4-ből szabály és korai kilépés |
 | `C1` | Konfig fájlok írása/olvasása, csonkítás, hiányzó fájl |
 | `B1` | Gomb debounce: zajtüske vs. tartós nyomás |
-| `F1`–`F4` | Webszerver: tartalék űrlap, feltöltött `data/`, 404, AP-határidő kitolása |
+| `F1`–`F4` | Webszerver: tartalék űrlap **feltöltetlen `data/` mellett**, feltöltött `data/`, hiányzó fájlok, 404, AP-határidő kitolása |
 | `WDT1`–`WDT8` | Watchdog: konfiguráció, etetés a hosszú blokkolások alatt, `delay()` vs. CPU-pörgetés, a feliratkozás tényleges ellenőrzése |
 | `SN1`–`SN2` | Biztonsági háló: ha a gomb-ébresztés armolása hibázik, időzítő |
 | `FS1`–`FS10` | LittleFS hibák: csatolás, írásvédettség, megtelt tár, **néma írási hiba**, csonka olvasás, törlés tartalék útvonala |

@@ -422,13 +422,38 @@ static void sc22() {
 }
 
 static void sc23() {
+  // Flashelés után elfelejtett data/ feltöltés: a LittleFS csatolható (a
+  // begin(true) formáz), csak üres. Az eszköznek így is konfigurálhatónak
+  // kell maradnia.
   coldBoot(false, "", "", "", "");
   g_fs.clear();                       // a data/ mappa nincs feltöltve
   try { setup(); } catch (DeepSleepSignal&) {}
   CHECK(deviceMode == (DeviceMode)1, "konfig portál elindult LittleFS tartalom nélkül is");
   CHECK(!g_fs.count("/wifimanager.html"), "tényleg nincs feltöltve a HTML");
 
-  }
+  AsyncWebServerRequest root; g_handlers["/#1"](&root);
+  CHECK(root._code == 200, "a / mégis 200-at ad");
+  CHECK(root._body.find("data/ mappa nincs feltoltve") != std::string::npos,
+        "a beépített tartalék űrlapot kapjuk");
+  CHECK(root._body.find("name=\"ssid\"") != std::string::npos
+        && root._body.find("method=\"POST\"") != std::string::npos,
+        "és tényleg kitölthető űrlap, nem csak egy hibaüzenet");
+
+  // A hiányzó statikus fájlokra hibastátusz jár. A pontos kód a
+  // ESPAsyncWebServer verziójától függ (404 vagy 501), de 200 SEMMIKÉPP.
+  AsyncWebServerRequest css; g_handlers["/style.css#1"](&css);
+  CHECK(css._code != 200, "hiányzó /style.css -> hibastátusz, nem hamis 200");
+  AsyncWebServerRequest ico; g_handlers["/favicon.png#1"](&ico);
+  CHECK(ico._code != 200, "hiányzó /favicon.png -> hibastátusz");
+
+  // A tartalék űrlap nem hivatkozik rájuk, tehát a hiányuk nem is látszik.
+  CHECK(root._body.find("style.css") == std::string::npos,
+        "a tartalék űrlap nem is kéri a stíluslapot");
+
+  // A /log viszont működik - épp ilyenkor kell a legjobban.
+  AsyncWebServerRequest lg; g_handlers["/log#1"](&lg);
+  CHECK(lg._code == 200, "a diagnosztikai napló elérhető");
+}
 
 
 static void scWDT1() {
