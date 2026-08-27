@@ -2586,6 +2586,79 @@ static void scP16() {
   }
 }
 
+
+// --- Fajliras kozben SEM alvas, SEM ujrainditas ----------------------------
+static uint32_t g_saveEndsAt = 0;
+static void saveFinisher() {
+  if (g_saveEndsAt && g_millis >= g_saveEndsAt) { savingConfig = false; g_saveEndsAt = 0; }
+}
+
+static void scWR1() {
+  // A turelmi ido (2 mp) alatt UJABB mentes erkezhet - mobilon a dupla
+  // koppintas gyakori. Ilyenkor eppen fajliras folyik, es a halasztott
+  // ujrainditas felbe vagna.
+  coldBoot(false, "", "", "", "");
+  setup();
+  CHECK(postConfig("Halozat", "jelszo123", "", "") == 200, "elso mentes OK");
+  CHECK(restartPending, "ujrainditas beutemezve");
+
+  // Masodik mentes indul. FONTOS: a turelmi idon (2 mp) TUL fejezodjon be,
+  // kulonben a varakozo ag el sem indulna - a restart check addig nem fut.
+  savingConfig = true;
+  g_saveEndsAt = g_millis + 2500;
+  g_onDelay = saveFinisher;
+
+  bool restarted = false;
+  const uint32_t t0 = g_millis;
+  try { for (int i = 0; i < 500; i++) loop(); }
+  catch (RestartSignal&) { restarted = true; }
+  g_onDelay = nullptr;
+
+  CHECK(restarted, "vegul ujraindul");
+  CHECK(!savingConfig, "de csak azutan, hogy az iras befejezodott");
+  CHECK(g_millis - t0 >= 2500, "megvarta a teljes irast");
+  CHECK(serialHas("Fajliras folyik"), "jelzi is, hogy var");
+  CHECK(serialHas("A fajliras befejezodott"), "es hogy kesz");
+}
+
+static void scWR2() {
+  // Ugyanez az alvasra: az AP hatarido lejar, de eppen mentes folyik.
+  coldBoot(false, "", "", "", "");
+  setup();
+  apDeadline = g_millis;          // a hatarido MOST jart le
+  savingConfig = true;
+  g_saveEndsAt = g_millis + 800;
+  g_onDelay = saveFinisher;
+
+  bool slept = false;
+  const uint32_t t0 = g_millis;
+  try { for (int i = 0; i < 500; i++) loop(); }
+  catch (DeepSleepSignal&) { slept = true; }
+  g_onDelay = nullptr;
+
+  CHECK(slept, "vegul elalszik");
+  CHECK(!savingConfig, "de csak a fajliras utan");
+  CHECK(g_millis - t0 >= 800, "megvarta a teljes irast");
+}
+
+static void scWR3() {
+  // A varakozas KORLATOS: ha a jelzo barmiert beragadna, az eszkoz nem
+  // fagyhat le miatta - 5 mp utan tovabblep, es szol rola.
+  coldBoot(false, "", "", "", "");
+  setup();
+  postConfig("Halozat", "jelszo123", "", "");
+  savingConfig = true;            // szandekosan sosem tisztul
+  bool restarted = false;
+  const uint32_t t0 = g_millis;
+  try { for (int i = 0; i < 5000; i++) loop(); }
+  catch (RestartSignal&) { restarted = true; }
+  CHECK(restarted, "beragadt jelzo eseten is ujraindul");
+  CHECK(g_millis - t0 >= 5000, "de csak az 5 mp-es hatarido utan");
+  CHECK(g_millis - t0 < 8000, "es nem var a vegtelensegig");
+  CHECK(serialHas("sem fejezodott be"), "figyelmeztet a beragadt jelzore");
+  savingConfig = false;
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -2718,6 +2791,9 @@ static const Scenario kScenarios[] = {
   { "GW2: elérhetetlen gateway -> egy reset, majd AP mód + napló", scGW2 },
   { "GW3: DHCP-nél nincs gateway-ellenőrzés", scGW3 },
   { "P16: a validáció mindkét űrlapon azonos", scP16 },
+  { "WR1: fájlírás közben nem indul újra (halasztott újraindítás)", scWR1 },
+  { "WR2: fájlírás közben nem alszik el", scWR2 },
+  { "WR3: a várakozás korlátos, beragadt jelző nem fagyaszt le", scWR3 },
   { "P14: a halasztott újraindítás a türelmi idő UTÁN fut le", scP14 },
   { "L6: minden eseménykód olvasható címkét kap a /log oldalon", scL6 },
   { "L7: üres napló esetén nincs üres táblázat", scL7 },

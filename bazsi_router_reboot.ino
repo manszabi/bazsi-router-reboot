@@ -300,6 +300,7 @@ void resetbutton();
 void wifiresetbutton();
 void blockingDelay(uint32_t duration);
 void waitWithButtons(uint32_t duration);
+void waitForConfigWrite();
 void internetFailSleep();
 void fatalSleep();
 void apSleep();
@@ -756,6 +757,34 @@ void waitWithButtons(uint32_t duration) {
   }
 }
 
+// Fájlírás közben SEM aludni, SEM újraindulni nem szabad: a félbeszakadt
+// mentés sérült konfigurációt hagyna hátra. A mentést az aszinkron webszerver
+// taskja végzi, az alvásról és az újraindításról viszont a loop() dönt -
+// ezért itt megvárjuk, amíg az írás befejeződik.
+//
+// Korlátos: ha a jelző bármiért beragadna, az eszköz nem fagyhat le miatta.
+// Egy konfigmentés 4 fájl írása visszaolvasásos ellenőrzéssel, ami tipikusan
+// néhány tíz ezredmásodperc - az 5 másodperc bőven elég tartalék.
+constexpr uint32_t SAVE_WAIT_MAX_MS = 5000;
+
+void waitForConfigWrite() {
+  if (!savingConfig) {
+    return;
+  }
+  printUptime();
+  Serial.println("Fajliras folyik - megvarjuk, mielott alszunk vagy ujraindulunk.");
+  const uint32_t start = millis();
+  while (savingConfig && millis() - start < SAVE_WAIT_MAX_MS) {
+    feedWatchdog();
+    delay(BUTTON_POLL_MS);
+  }
+  if (savingConfig) {
+    Serial.println("FIGYELEM: a mentes 5 mp alatt sem fejezodott be, tovabblepunk.");
+  } else {
+    Serial.println("A fajliras befejezodott.");
+  }
+}
+
 // Szándékosan nem az enterDeepSleep()-et hívja: itt a Wi-Fi és a webszerver
 // még el sem indult, és gombébresztést sem szabad armolni - a beragadt gomb
 // azonnal újraébresztené az eszközt, azaz végtelen boot loop lenne.
@@ -932,6 +961,9 @@ bool reset_device() {
 // Közös elalvás. timerUs = 0 esetén NINCS időzített ébresztés: az eszköz
 // magától nem tér vissza, csak a reset gombra vagy áramtalanításra.
 void enterDeepSleep(uint64_t timerUs) {
+  // Egyetlen torlópont MINDEN alvásra (apSleep, internetFailSleep,
+  // retrySleep, fatalSleep): fájlírás közben nem alszunk el.
+  waitForConfigWrite();
   digitalWrite(ledPin, LOW);  //led gnd, led off
   digitalWrite(relayPin, LOW);
   digitalWrite(wifiledPin, LOW);
@@ -1781,8 +1813,13 @@ void setup() {
 void loop() {
   const uint32_t currentMillis = millis();
 
-  // Az AP-módú beállító oldal kérésére halasztott újraindítás
+  // Az AP-módú beállító oldal kérésére halasztott újraindítás.
+  //
+  // A türelmi idő alatt (2 mp) ÚJABB mentés is érkezhet - mobilon a dupla
+  // koppintás gyakori. Ilyenkor épp fájlírás folyik, és az újraindítás félbe
+  // vágná: előbb megvárjuk, hogy az írás befejeződjön.
   if (restartPending && (int32_t)(currentMillis - restartAt) >= 0) {
+    waitForConfigWrite();
     restartPending = false;
     Serial.println("RESTART!");
     Serial.flush();

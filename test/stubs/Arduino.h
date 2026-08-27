@@ -37,6 +37,9 @@ void digitalWrite(uint8_t, uint8_t);
 int digitalRead(uint8_t);
 void yield();
 void delay(uint32_t ms);
+// Minden delay()-nel meghivodik, ha be van allitva: ezzel modellezik a tesztek,
+// hogy egy masik task kozben befejez valamit (lasd main_stub.cpp).
+extern void (*g_onDelay)();
 void feedLoopWDT();
 void enableLoopWDT();
 extern bool     g_wdtEnabled;

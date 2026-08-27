@@ -267,6 +267,13 @@ Négy védelem óvja a mentést:
   webszerver taskja végzi, a gombokat viszont a `loop()` figyeli – egy éppen
   odaeső gombnyomás félbeszakított írást (a wifireset esetén ráadásul egyidejű
   törlést) okozna. A gombok a mentés befejeztével működnek tovább.
+- **A sikeres mentés utáni újraindítás is megvárja az írást.** A 2 mp-es
+  türelmi idő alatt újabb mentés érkezhet – mobilon a dupla koppintás gyakori –,
+  és az újraindítás félbe vágná. Ugyanez igaz **minden alvásra**: az
+  `enterDeepSleep()` egyetlen torlópont, amin minden alvás áthalad.
+
+A várakozás **korlátos** (5 mp): ha a jelző bármiért beragadna, az eszköz nem
+fagyhat le miatta – továbblép, és a soros porton szól róla.
 
 Sikeres mentés után: válasz elküldése, **2 mp** türelmi idő, majd újraindulás.
 Sikertelen mentésnél HTTP 500 és **nincs** újraindulás – a beírt adatok maradnak.
