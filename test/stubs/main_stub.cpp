@@ -28,6 +28,7 @@ uint64_t g_wakeupUs = 0;
 uint64_t g_gpioWakeMask = 0;
 int g_gpioWakeMode = -1;
 bool g_serialEcho = false;
+uint64_t g_efuseMac = 0x0000A1B2C3D4E5F6ULL;   // 6 bajtos MAC
 int g_httpCode = 200;
 std::string g_httpBody = "Microsoft NCSI";
 int g_httpSize = -2;

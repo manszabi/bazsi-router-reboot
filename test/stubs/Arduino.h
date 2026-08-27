@@ -194,9 +194,15 @@ private:
 inline size_t Print::print(const IPAddress& a) { buf_ += a.str(); return 0; }
 inline size_t Print::println(const IPAddress& a) { buf_ += a.str(); flushLine(); return 0; }
 
+// A valodi getEfuseMac() az esp_efuse_mac_get_default()-tel 6 bajtot ir egy
+// uint64_t-be (Esp.cpp), a felso 2 bajt nulla marad. A tesztekben allithato,
+// hogy a "masik lapkan nem mukodik" viselkedes ellenorizheto legyen.
+extern uint64_t g_efuseMac;
+
 class EspClass {
 public:
   void restart() { simLog("ESP.restart"); throw RestartSignal{}; }
   const char* getChipModel() { return "ESP32-C3"; }
+  uint64_t getEfuseMac() { return g_efuseMac; }
 };
 extern EspClass ESP;

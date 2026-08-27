@@ -99,6 +99,7 @@ elérhetetlen – ezeket **nem** kell tesztelni:
 | `readBounded()` két `break`-je | védekező ág arra, ha az `available()` hazudik |
 | `testInternetPing()` záró `return`-je | a ciklus minden ága korábban visszatér (az utolsó körben `remaining == 0`) |
 | POST `!fsReady` ága | ha a LittleFS nem csatolható, a `setup()` `MODE_FATAL`-ba megy, és a portál el sem indul |
+| A jelszókódolás puffer-hiba ága | a POST már ellenőrzi a hosszt, a puffer pedig pontosan 63 karakterre méretezett – nem tud elbukni |
 | `FAILURE_STATE` záró `break`-je | előtte `wifiGiveUp()` vagy módváltás történik |
 
 ## Fontos

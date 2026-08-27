@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <set>
 #include <WiFi.h>
 #include <LittleFS.h>
 #include <ESPping.h>
@@ -52,6 +53,8 @@ void wifiresetbutton();
 void waitWithButtons(uint32_t);
 void touchApDeadline();
 void printUptime();
+void decodeSecretInPlace(char* buf);
+bool encodeSecret(const char* plain, char* out, size_t outSize);
 void startConfigPortal();
 
 static int failures = 0, checks = 0;
@@ -71,6 +74,16 @@ static int serialIndex(const char* frag) {
   for (size_t i = 0; i < g_serialLog.size(); i++)
     if (g_serialLog[i].find(frag) != std::string::npos) return (int)i;
   return -1;
+}
+
+// A jelszo kodolva kerul a fajlba. A szerzodes nem az, hogy MI van a fajlban,
+// hanem hogy amit mentettunk, azt kapjuk vissza - es hogy a nyilt szoveg NINCS
+// benne. Ez a segedfuggveny a fajl dekodolt tartalmat adja.
+static std::string storedPass() {
+  char buf[256];
+  strlcpy(buf, g_fs["/pass.txt"].c_str(), sizeof(buf));
+  decodeSecretInPlace(buf);
+  return std::string(buf);
 }
 
 static int logIndex(const char* frag) {
@@ -990,7 +1003,9 @@ static void scP1() {
   const int code = postConfig("MyNetwork", "titkosjelszo", "", "");
   CHECK(code == 200, "HTTP 200");
   CHECK(g_fs["/ssid.txt"] == "MyNetwork", "SSID kiírva");
-  CHECK(g_fs["/pass.txt"] == "titkosjelszo", "jelszó kiírva");
+  CHECK(storedPass() == "titkosjelszo", "a jelszó visszaolvasva egyezik");
+  CHECK(g_fs["/pass.txt"].find("titkosjelszo") == std::string::npos,
+        "de a fájlban NEM szerepel nyílt szöveggel");
   CHECK(g_fs["/ip.txt"].empty(), "üres IP -> DHCP");
   CHECK(restartPending, "újraindítás beütemezve");
   CHECK(!savingConfig, "a mentés jelző visszaállt");
@@ -1129,7 +1144,7 @@ static void scX2() {
   g_handlers["/#2"](&req);
   CHECK(req._code == 200, "üres jelszó elfogadva (nyílt hálózat)");
   CHECK(g_fs["/ssid.txt"] == "NyiltHalozat", "SSID mentve");
-  CHECK(g_fs.count("/pass.txt") && g_fs["/pass.txt"].empty(), "üres jelszó kiírva");
+  CHECK(g_fs.count("/pass.txt") && storedPass().empty(), "üres jelszó mentve");
 }
 
 static void scX3() {
@@ -1140,7 +1155,7 @@ static void scX3() {
   const int code = postConfig(s32.c_str(), s63.c_str(), "", "");
   CHECK(code == 200, "a pontos maximum még elfogadott");
   CHECK(g_fs["/ssid.txt"].size() == 32, "32 karakteres SSID hiánytalanul mentve");
-  CHECK(g_fs["/pass.txt"].size() == 63, "63 karakteres jelszó hiánytalanul mentve");
+  CHECK(storedPass().size() == 63, "63 karakteres jelszó hiánytalanul mentve");
 
   // egy karakterrel több már nem
   coldBoot(false, "", "", "", "");
@@ -1781,7 +1796,7 @@ static void scP12() {
   const int code = postConfig("  MyNetwork  ", "  titok123  ", "", "");
   CHECK(code == 200, "elfogadja");
   CHECK(g_fs["/ssid.txt"] == "MyNetwork", "az elmentett SSID mar vagott");
-  CHECK(g_fs["/pass.txt"] == "titok123", "a jelszo is");
+  CHECK(storedPass() == "titok123", "a jelszo is");
   CHECK(serialHas("SSID set to: MyNetwork"), "es a visszajelzes is a vagott ertek");
 }
 
@@ -2275,6 +2290,131 @@ static void scKA5() {
         "az AP jelszo a WPA2 tartomanyban van (8-63 karakter)");
 }
 
+
+// --- A mentett jelszo osszekeverese ----------------------------------------
+static void scSE1() {
+  // Oda-vissza: barmilyen hosszra, minden hasznalhato karakterrel.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  const char* minta[] = { "", "a", "nyolckar", "SzuperTitkosJelszo42",
+                          "  szelso  szokozok  ", "!@#$%^&*()_+-=[]{};:,.<>?" };
+  bool ok = true;
+  for (const char* m : minta) {
+    char enc[200]; char dec[200];
+    if (!encodeSecret(m, enc, sizeof(enc))) { ok = false; break; }
+    strlcpy(dec, enc, sizeof(dec));
+    decodeSecretInPlace(dec);
+    if (strcmp(dec, m) != 0) { ok = false; printf("     [info] elteres: '%s'\n", m); }
+  }
+  CHECK(ok, "minden minta hibatlanul jon vissza");
+
+  // A leghosszabb WPA2 jelszo is belefer a pufferbe.
+  std::string maxPw(63, 'Z');
+  char enc[3 + 2*63 + 1];
+  CHECK(encodeSecret(maxPw.c_str(), enc, sizeof(enc)), "63 karakter is belefer");
+  char dec[200]; strlcpy(dec, enc, sizeof(dec)); decodeSecretInPlace(dec);
+  CHECK(std::string(dec) == maxPw, "es hibatlanul jon vissza");
+
+  // Szuk puffer: ne irjon tul, adjon false-t.
+  char kicsi[8];
+  CHECK(!encodeSecret("hosszabb jelszo", kicsi, sizeof(kicsi)),
+        "szuk puffernel false, nem tulcsordulas");
+}
+
+static void scSE2() {
+  // A `strings` ne adjon hasznalhato jelszot: se a nyilt szoveg, se annak
+  // barmely 4 karakteres darabja ne legyen megtalalhato a fajlban.
+  coldBoot(false, "", "", "", "");
+  setup();
+  const char* PW = "SzuperTitkosJelszo42";
+  postConfig("Halozat", PW, "", "");
+  const std::string& f = g_fs["/pass.txt"];
+  CHECK(f.find(PW) == std::string::npos, "a teljes jelszo nincs a fajlban");
+  bool darab = false;
+  for (size_t i = 0; i + 4 <= strlen(PW); i++)
+    if (f.find(std::string(PW).substr(i, 4)) != std::string::npos) darab = true;
+  CHECK(!darab, "meg 4 karakteres darabja sincs");
+  CHECK(f.rfind("v1:", 0) == 0, "a formatum verziozott (v1:)");
+  bool csakHexa = true;
+  for (size_t i = 3; i < f.size(); i++)
+    if (!isxdigit((unsigned char)f[i]) || isupper((unsigned char)f[i])) csakHexa = false;
+  CHECK(csakHexa, "a tobbi resz kisbetus hexa (a szoveges olvasast nem zavarja)");
+}
+
+static void scSE3() {
+  // Ismetlodo karakterek ne adjanak ismetlodo bajtokat - kulonben a mintazat
+  // latszana a hexdumpban.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  char enc[200];
+  encodeSecret("aaaaaaaaaaaaaaaa", enc, sizeof(enc));
+  std::set<std::string> parok;
+  for (size_t i = 3; i + 2 <= strlen(enc); i += 2) parok.insert(std::string(enc + i, 2));
+  CHECK(parok.size() >= 12, "16 azonos karakterbol legalabb 12 kulonbozo bajt lesz");
+}
+
+static void scSE4() {
+  // Masik lapkan (masik eFuse MAC) a kimasolt fajl NE mukodjon.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_efuseMac = 0x0000A1B2C3D4E5F6ULL;
+  setup();
+  char enc[200];
+  encodeSecret("SzuperTitkosJelszo42", enc, sizeof(enc));
+
+  char dec[200]; strlcpy(dec, enc, sizeof(dec));
+  g_efuseMac = 0x0000FFEEDDCCBBAAULL;      // MASIK lapka
+  decodeSecretInPlace(dec);
+  CHECK(std::string(dec) != "SzuperTitkosJelszo42",
+        "masik lapkan nem adja vissza a jelszot");
+
+  strlcpy(dec, enc, sizeof(dec));
+  g_efuseMac = 0x0000A1B2C3D4E5F6ULL;      // vissza az eredetire
+  decodeSecretInPlace(dec);
+  CHECK(std::string(dec) == "SzuperTitkosJelszo42", "a sajat lapkajan viszont igen");
+}
+
+static void scSE5() {
+  // Visszafele kompatibilitas: a regi, sima szoveges mentes tovabbra is
+  // mukodjon - kulonben egy frissites hasznalhatatlanna tenne a mar
+  // beallitott eszkozoket.
+  coldBoot(true, "TestNet", "RegiNyiltJelszo", "", "");
+  setup();
+  CHECK(std::string(pass) == "RegiNyiltJelszo", "a regi nyilt mentes betoltodik");
+  CHECK(wifiSim.beginCount == 1, "es csatlakozik vele");
+  CHECK(deviceMode == (DeviceMode)0, "monitor mod");
+}
+
+static void scSE6() {
+  // Hibas tartalom NE legyen vegzetes: a rossz jelszoval a WiFi nem jon ossze,
+  // es az eszkoz a szokasos uton AP modba kerul - ez ongyogyul.
+  coldBoot(true, "TestNet", "", "", "");
+  g_fs["/pass.txt"] = "v1:zzzz";           // ervenytelen hexa
+  setup();
+  CHECK(deviceMode != (DeviceMode)2, "NEM vegzetes hiba");
+  CHECK(std::string(pass) == "v1:zzzz", "sima szovegkent kezeli");
+
+  // Paratlan hosszusagu hexa is: nem a mi formatumunk.
+  coldBoot(true, "TestNet", "", "", "");
+  g_fs["/pass.txt"] = "v1:abc";
+  setup();
+  CHECK(deviceMode != (DeviceMode)2, "paratlan hosszu hexa sem vegzetes");
+}
+
+static void scSE7() {
+  // Vegponttol vegpontig: mentes -> ujraindulas -> csatlakozas a helyes
+  // jelszoval. Ez a lenyeg: a felhasznalonak semmit nem szabad eszrevennie.
+  coldBoot(false, "", "", "", "");
+  setup();
+  CHECK(postConfig("OtthoniWifi", "SzuperTitkosJelszo42", "", "") == 200, "mentes OK");
+  auto mentett = g_fs;
+  coldBoot(true, "", "", "", "");
+  g_fs = mentett;                          // ugyanaz a fajlrendszer
+  setup();
+  CHECK(std::string(ssid) == "OtthoniWifi", "SSID betoltve");
+  CHECK(std::string(pass) == "SzuperTitkosJelszo42", "jelszo helyesen visszafejtve");
+  CHECK(deviceMode == (DeviceMode)0, "monitor mod - csatlakozott");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -2393,6 +2533,13 @@ static const Scenario kScenarios[] = {
   { "KA3: a lap bezárása után az utolsó pingtől számít 5 percet", scKA3 },
   { "KA4: keep-alive mindkét űrlapon és a naplóoldalon", scKA4 },
   { "KA5: az AP jelszó a WPA2 hossztartományban van", scKA5 },
+  { "SE1: a jelszó kódolása oda-vissza hibátlan", scSE1 },
+  { "SE2: a fájlban nem található a jelszó (strings-ellenálló)", scSE2 },
+  { "SE3: ismétlődő karakterek nem adnak ismétlődő bájtokat", scSE3 },
+  { "SE4: másik lapkán a kimásolt fájl nem működik", scSE4 },
+  { "SE5: a régi, nyílt szöveges mentés továbbra is működik", scSE5 },
+  { "SE6: hibás tartalom nem végzetes hiba", scSE6 },
+  { "SE7: mentés -> újraindulás -> csatlakozás végponttól végpontig", scSE7 },
   { "P14: a halasztott újraindítás a türelmi idő UTÁN fut le", scP14 },
   { "L6: minden eseménykód olvasható címkét kap a /log oldalon", scL6 },
   { "L7: üres napló esetén nincs üres táblázat", scL7 },
