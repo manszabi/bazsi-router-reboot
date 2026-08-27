@@ -46,7 +46,15 @@ public:
   const AsyncWebParameter* getParam(int i) const { return &_params[(size_t)i]; }
   void send(int c, const char*, const String& b) { _code = c; _body = b.c_str(); }
   void send(int c, const char*, const char* b) { _code = c; _body = b ? b : ""; }
-  void send(fs::FS&, const char*, const char*) { _code = 200; _body = "<file>"; }
+  // Hianyzo fajlnal a valodi konyvtar NEM 200-at ad:
+  //  - ahol a beginResponse(FS&,...) exists()-et ellenoriz, NULL-t ad vissza,
+  //    es a _send() kuld 501-et ("Handler did not handle the request");
+  //  - ahol nem, ott az AsyncFileResponse konstruktora allit _code = 404-et.
+  // Konyvtarverzio-fuggo, de mindenkeppen HIBA - a stub 404-kent modellezi.
+  void send(fs::FS&, const char* path, const char*) {
+    if (path && g_fs.count(path)) { _code = 200; _body = "<file>"; }
+    else { _code = 404; _body = ""; }
+  }
   AsyncResponseStream* beginResponseStream(const char*, size_t = 1460) {
     _stream = new AsyncResponseStream(); return _stream;
   }

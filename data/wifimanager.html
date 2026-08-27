@@ -32,5 +32,9 @@
       </div>
     </div>
   </div>
+  <!-- Keep-alive: amig ez a lap nyitva van, 60 mp-enkent jelez, igy az AP mod
+       5 perces visszaszamlalasa nem jar le lassu gepeles kozben. Applikacio-
+       valtas utan visszaterve azonnal is jelez. -->
+  <script>f=()=>fetch('/ping?'+Date.now());setInterval(f,6e4);document.onvisibilitychange=()=>document.hidden||f()</script>
 </body>
 </html>

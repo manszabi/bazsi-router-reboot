@@ -422,13 +422,38 @@ static void sc22() {
 }
 
 static void sc23() {
+  // Flashelés után elfelejtett data/ feltöltés: a LittleFS csatolható (a
+  // begin(true) formáz), csak üres. Az eszköznek így is konfigurálhatónak
+  // kell maradnia.
   coldBoot(false, "", "", "", "");
   g_fs.clear();                       // a data/ mappa nincs feltöltve
   try { setup(); } catch (DeepSleepSignal&) {}
   CHECK(deviceMode == (DeviceMode)1, "konfig portál elindult LittleFS tartalom nélkül is");
   CHECK(!g_fs.count("/wifimanager.html"), "tényleg nincs feltöltve a HTML");
 
-  }
+  AsyncWebServerRequest root; g_handlers["/#1"](&root);
+  CHECK(root._code == 200, "a / mégis 200-at ad");
+  CHECK(root._body.find("data/ mappa nincs feltoltve") != std::string::npos,
+        "a beépített tartalék űrlapot kapjuk");
+  CHECK(root._body.find("name=\"ssid\"") != std::string::npos
+        && root._body.find("method=\"POST\"") != std::string::npos,
+        "és tényleg kitölthető űrlap, nem csak egy hibaüzenet");
+
+  // A hiányzó statikus fájlokra hibastátusz jár. A pontos kód a
+  // ESPAsyncWebServer verziójától függ (404 vagy 501), de 200 SEMMIKÉPP.
+  AsyncWebServerRequest css; g_handlers["/style.css#1"](&css);
+  CHECK(css._code != 200, "hiányzó /style.css -> hibastátusz, nem hamis 200");
+  AsyncWebServerRequest ico; g_handlers["/favicon.png#1"](&ico);
+  CHECK(ico._code != 200, "hiányzó /favicon.png -> hibastátusz");
+
+  // A tartalék űrlap nem hivatkozik rájuk, tehát a hiányuk nem is látszik.
+  CHECK(root._body.find("style.css") == std::string::npos,
+        "a tartalék űrlap nem is kéri a stíluslapot");
+
+  // A /log viszont működik - épp ilyenkor kell a legjobban.
+  AsyncWebServerRequest lg; g_handlers["/log#1"](&lg);
+  CHECK(lg._code == 200, "a diagnosztikai napló elérhető");
+}
 
 
 static void scWDT1() {
@@ -1914,6 +1939,19 @@ static void scF4() {
   g_millis += 60u * 1000;
   AsyncWebServerRequest b; g_handlers["/log#1"](&b);
   CHECK(apDeadline > second, "a /log is kitolja");
+
+  // A doksi "minden HTTP kerest" iger. A 404 is interakcio: a bongeszo
+  // magatol keri a /favicon.ico-t, es egy elgepelt cim sem jelenti azt,
+  // hogy a felhasznalo elment.
+  const uint32_t third = apDeadline;
+  g_millis += 60u * 1000;
+  AsyncWebServerRequest c; g_handlers["404"](&c);
+  CHECK(c._code == 404, "ismeretlen utvonal tovabbra is 404");
+  CHECK(apDeadline > third, "es a 404 is kitolja a hataridot");
+
+  // A kitolas ABSZOLUT: mindig uj 5 perc, nem kumulativ.
+  CHECK(apDeadline == g_millis + 5u * 60 * 1000,
+        "a hatarido pontosan 5 perccel a keres utanra kerul");
 }
 
 // --- Tovabbi validacio ------------------------------------------------------
@@ -2159,6 +2197,84 @@ static void scFS10() {
   g_fsReadable = true;
 }
 
+
+// --- Keep-alive: a nyitva levo lap tartsa ebren az eszkozt ------------------
+static void scKA1() {
+  // Merve: keep-alive nelkul 6 perc gepeles kozben elaludt, es a Submit mar
+  // nem erte el az eszkozt. A lap most 60 mp-enkent jelez.
+  coldBoot(false, "", "", "", "");
+  setup();
+  CHECK(g_handlers.count("/ping#1") == 1, "van /ping vegpont");
+  AsyncWebServerRequest r; g_handlers["/ping#1"](&r);
+  CHECK(r._code == 200, "/ping -> 200");
+  CHECK(r._body.size() <= 4, "a valasz aprocska (percenkent fut)");
+}
+
+static void scKA2() {
+  // 20 percig nyitva a lap, 60 mp-enkent pingel: NEM alhat el.
+  coldBoot(false, "", "", "", "");
+  setup();
+  bool slept = false;
+  const uint32_t t0 = g_millis;
+  try {
+    while (g_millis - t0 < 20u * 60 * 1000) {
+      { AsyncWebServerRequest r; g_handlers["/ping#1"](&r); }
+      const uint32_t p0 = g_millis;
+      while (g_millis - p0 < 60u * 1000) loop();     // 60 mp a kovetkezo pingig
+    }
+  } catch (DeepSleepSignal&) { slept = true; }
+  CHECK(!slept, "20 percig nyitva tartott lap mellett NEM alszik el");
+  CHECK(deviceMode == (DeviceMode)1, "vegig AP konfig modban marad");
+}
+
+static void scKA3() {
+  // Ha bezarom a lapot, a pingek elmaradnak - onnan szamitva 5 perc mulva
+  // alszik el. A funkcio nem "orokke ebren" kapcsolo.
+  coldBoot(false, "", "", "", "");
+  setup();
+  { AsyncWebServerRequest r; g_handlers["/ping#1"](&r); }   // utolso ping
+  const uint32_t last = g_millis;
+  bool slept = false;
+  try { while (g_millis - last < 10u * 60 * 1000) loop(); }
+  catch (DeepSleepSignal&) { slept = true; }
+  CHECK(slept, "a lap bezarasa utan azert elalszik");
+  const uint32_t el = g_millis - last;
+  CHECK(el >= 5u*60*1000 && el < 5u*60*1000 + 2000,
+        "pontosan az utolso ping utan 5 perccel");
+}
+
+static void scKA4() {
+  // A keep-alive script mindket urlapon es a naplooldalon is ott van,
+  // kulonben az egyik lapon eszrevetlenul elaludna az eszkoz.
+  coldBoot(false, "", "", "", "");
+  setup();
+  { AsyncWebServerRequest r; g_handlers["/#1"](&r);
+    CHECK(r._body.find("/ping") != std::string::npos,
+          "a tartalek urlapon van keep-alive"); }
+  { AsyncWebServerRequest r; g_handlers["/log#1"](&r);
+    CHECK(r._body.find("/ping") != std::string::npos,
+          "a naplooldalon is van keep-alive");
+    CHECK(r._body.find("</body></html>") != std::string::npos,
+          "es a lap rendesen le van zarva"); }
+  { AsyncWebServerRequest r; g_handlers["/#1"](&r);
+    CHECK(r._body.find("href=\"/log\"") != std::string::npos,
+          "a tartalek urlapon ott a naplo link is"); }
+}
+
+
+static void scKA5() {
+  // Az AP jelszo hossza WPA2-kotott. A core rovid jelszonal csak annyit tesz,
+  // hogy "passphrase too short!" es return false (AP.cpp) - a softAP()
+  // visszateresi erteket viszont nem nezzuk, tehat az AP NEM jonne letre, az
+  // eszkoz elerhetetlen lenne, es 5 perc mulva elaludna. A sketch ezt
+  // static_assert-tel fogja meg, ez a teszt a futasidoben latszo reszt orzi.
+  coldBoot(false, "", "", "", "");
+  setup();
+  CHECK(wifiSim.softApCount == 1, "az AP elindult");
+  CHECK(wifiSim.apPass.size() >= 8 && wifiSim.apPass.size() <= 63,
+        "az AP jelszo a WPA2 tartomanyban van (8-63 karakter)");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -2272,6 +2388,11 @@ static const Scenario kScenarios[] = {
   { "P12: a mentett érték megegyezik azzal, amit az eszköz használni fog", scP12 },
   { "P13: csupa szóközből álló SSID nem fogadható el", scP13 },
   { "LED1: a router áramtalanításakor mindkét LED sötét", scLED1 },
+  { "KA1: van /ping végpont, apró válasszal", scKA1 },
+  { "KA2: nyitva tartott lap mellett nem alszik el", scKA2 },
+  { "KA3: a lap bezárása után az utolsó pingtől számít 5 percet", scKA3 },
+  { "KA4: keep-alive mindkét űrlapon és a naplóoldalon", scKA4 },
+  { "KA5: az AP jelszó a WPA2 hossztartományban van", scKA5 },
   { "P14: a halasztott újraindítás a türelmi idő UTÁN fut le", scP14 },
   { "L6: minden eseménykód olvasható címkét kap a /log oldalon", scL6 },
   { "L7: üres napló esetén nincs üres táblázat", scL7 },

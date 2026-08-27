@@ -40,7 +40,7 @@ ESP32-C3 alapú automatikus router újraindító rendszer. Az eszköz folyamatos
 Ha nincs mentett Wi-Fi adat (vagy a Wi-Fi reset gombot megnyomtad):
 
 1. Az ESP **Access Point módba** lép
-2. Az AP neve: `ESP-<chipmodel>`, jelszó: `bazsi1234`
+2. Az AP neve: `ESP-<chipmodel>`, jelszó: `12345678`
 3. Csatlakozz az AP-hez, majd nyisd meg a böngészőben: `192.168.4.1`
 4. Töltsd ki az űrlapot:
    - **SSID** – a Wi-Fi hálózat neve (max. 32 karakter)
@@ -69,6 +69,13 @@ Ha nincs mentett Wi-Fi adat (vagy a Wi-Fi reset gombot megnyomtad):
 > Az AP mód **5 perc tétlenség** után elalszik (minden HTTP kérés újraindítja a
 > visszaszámlálást), és utána már csak a reset gomb vagy az áramtalanítás
 > ébreszti fel. Fájlírás közben soha nem alszik el.
+>
+> **Amíg a lap nyitva van, nem alszik el:** a beállító oldal és a naplóoldal
+> 60 mp-enként meghív egy `/ping` végpontot (1 bájt válasz), ami újraindítja a
+> visszaszámlálást. Enélkül az óra a lapbetöltéstől ketyegne, nem az utolsó
+> interakciótól – mérve: 6 percnyi lassú gépelés után a Submit már nem érte el
+> az eszközt, és a portál visszahozásához fizikailag meg kellett nyomni a reset
+> gombot. A lapot bezárva az utolsó pingtől számít újra az 5 perc.
 > Statikus IP esetén a DNS szervernek a megadott gateway (tartalékként `1.1.1.1`)
 > lesz beállítva, különben a névfeloldás – és így a HTTP-teszt – nem működne.
 > (Az ESP32 `WiFi.config()` STA ágában a DNS-t szó szerint a kapott paraméterből
@@ -396,8 +403,9 @@ gombbal vagy áramtalanítással lehet.
 
 Két védelem gondoskodik arról, hogy a mentés ne vesszen el:
 
-- **Minden HTTP kérés újraindítja az 5 perces visszaszámlálást.** Ha az utolsó
-  pillanatban nyitod meg az oldalt, kapsz még egy teljes időablakot.
+- **Minden HTTP kérés újraindítja az 5 perces visszaszámlálást** – a 404-es
+  válasszal végződő is. A határidő abszolút: mindig pontosan 5 perccel a
+  *legutolsó* kérés utánra kerül, nem halmozódik, és felső korlát nincs.
 - **Fájlírás közben az eszköz soha nem alszik el** (`savingConfig` jelző), így
   nem maradhat félig kiírt konfiguráció.
 
@@ -467,7 +475,7 @@ beírt adatok sem vesznek el.
   `/gateway.txt`) **nem érhetők el a webszerveren keresztül** – a beállító
   portál csak a `/`, `/style.css` és `/favicon.png` útvonalakat szolgálja ki.
 - A jelszó soha nem kerül ki nyílt szövegként a soros portra, csak a hossza.
-- Az AP jelszava (`bazsi1234`) a forráskódban van; éles használat előtt
+- Az AP jelszava (`12345678`) a forráskódban van; éles használat előtt
   érdemes lecserélni az `AP_PASSWORD` konstansban.
 
 ## 📄 Licenc

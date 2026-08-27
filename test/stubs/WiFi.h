@@ -47,6 +47,7 @@ struct WifiSim {
   int configCount = 0;
   bool configFails = false;      // a WiFi.config() hibat adjon vissza
   int softApCount = 0;
+  std::string apPass;            // amivel a softAP()-ot hivtuk
   void reset() { *this = WifiSim(); }
 };
 extern WifiSim wifiSim;
@@ -96,7 +97,13 @@ public:
   }
   void persistent(bool v) { simLog(v ? "WiFi.persistent(true)" : "WiFi.persistent(false)"); }
   bool softAP(const char* n, const char* p) {
-    (void)p; wifiSim.softApCount++;
+    wifiSim.apPass = p ? p : "";
+    // A valodi APClass::create() 8 karakter alatt hibat ad es NEM indit AP-t.
+    if (!wifiSim.apPass.empty() && wifiSim.apPass.size() < 8) {
+      simLog("softAP_FAIL_short_passphrase");
+      return false;
+    }
+    wifiSim.softApCount++;
     simLog(std::string("WiFi.softAP(") + n + ")"); return true;
   }
   IPAddress softAPIP() { return IPAddress(192,168,4,1); }
