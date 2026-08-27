@@ -221,12 +221,20 @@ Nem várunk további teszt ciklusokat: ha nincs Wi-Fi, a tesztnek nincs értelme
 | Esemény | Időtartam |
 |---|---|
 | Portál elérhető: `192.168.4.1` | |
-| Tétlenség után deep sleep | **5 perc** (`AP_TIMEOUT_MS`) |
+| Tétlenség után deep sleep | **5 perc** (`AP_TIMEOUT_MS`) az utolsó kéréstől |
+| A nyitva lévő lap keep-alive-ja | **60 mp**-enként `GET /ping` (1 bájt válasz) |
 | Elfogadott IP / gateway | **csak IPv4**, nem `0.0.0.0`, és csak együtt |
 | SSID / jelszó | mentéskor a szélső szóközök levágódnak |
 | Az alvásból ébredés | **csak a reset gombbal** – időzített ébresztés nincs |
 
-Három védelem óvja a mentést:
+Négy védelem óvja a mentést:
+
+- **Amíg a lap nyitva van, nem alszik el.** A beállító oldal (és a naplóoldal)
+  60 mp-enként meghívja a `/ping` végpontot, ami újraindítja az 5 perces
+  visszaszámlálást. Enélkül az óra a *lapbetöltéstől* ketyegne, nem az utolsó
+  interakciótól – mérve: 6 percnyi lassú gépelés után a Submit már nem érte el
+  az eszközt. Applikációváltás után visszatérve a `visibilitychange` azonnal is
+  jelez, nem kell a következő 60 mp-es ütemre várni.
 
 - **Minden HTTP kérés újraindítja az 5 perces visszaszámlálást** – a 404-es
   válasszal végződő is, mert az is interakció. A határidő **abszolút**: mindig

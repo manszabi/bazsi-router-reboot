@@ -25,6 +25,20 @@ const char PARAM_PASS[]    = "pass";
 const char PARAM_IP[]      = "ip";
 const char PARAM_GATEWAY[] = "gateway";
 
+// Keep-alive: amíg a lap NYITVA van, 60 mp-enként jelez. Enélkül az AP mód
+// "tétlenség" órája a lap betöltésétől ketyegne, nem az utolsó interakciótól -
+// és egy lassan begépelt jelszó közben elaludna az eszköz (mérve: 6 perc
+// gépelés után a Submit már nem érné el).
+// A visibilitychange azért kell, hogy app-váltás után visszatérve azonnal
+// frissüljön a határidő, ne csak a következő 60 mp-es ütemnél.
+// Mindkét űrlapon és a naplóoldalon ugyanez a szöveg szerepel; a const char[]
+// a flash .rodata szekciójába kerül (drom0_0_seg), RAM-ot nem foglal.
+// Egyetlen forrás: a fordító fűzi össze a literálokat, futásidőben nem másolunk.
+#define KEEPALIVE_JS_LIT \
+  "<script>f=()=>fetch('/ping?'+Date.now());setInterval(f,6e4);" \
+  "document.onvisibilitychange=()=>document.hidden||f()</script>"
+const char KEEPALIVE_JS[] = KEEPALIVE_JS_LIT;
+
 // Tartalék űrlap arra az esetre, ha a data/ mappa nincs feltöltve a LittleFS-re.
 // Flashben él, RAM-ot nem foglal.
 const char FALLBACK_FORM[] =
@@ -41,7 +55,9 @@ const char FALLBACK_FORM[] =
   "<small>Statikus IP-hez mindket cimmezot toltsd ki, csak IPv4. "
   "DHCP-hez hagyd mindkettot uresen.</small><br>"
   "<input type=\"submit\" value=\"Submit\"></form>"
-  "<p><a href=\"/log\">Diagnosztikai naplo</a></p></body></html>";
+  "<p><a href=\"/log\">Diagnosztikai naplo</a></p>"
+  KEEPALIVE_JS_LIT
+  "</body></html>";
 
 // AP password (WPA2: min. 8 karakter)
 const char AP_PASSWORD[] = "bazsi1234";
@@ -1281,6 +1297,14 @@ void startConfigPortal() {
     touchApDeadline();
     request->send(LittleFS, "/favicon.png", "image/png");
   });
+  // Keep-alive. A nyitva lévő oldal 60 mp-enként meghívja, így az AP mód
+  // visszaszámlálása addig tolódik, amíg tényleg ott vagy a lapon. A válasz
+  // szándékosan egyetlen bájt: percenként fut, és a rádió a legdrágább.
+  server.on("/ping", HTTP_GET, [](AsyncWebServerRequest* request) {
+    touchApDeadline();
+    request->send(200, "text/plain", "1");
+  });
+
   // Diagnosztikai napló. Ez az egyetlen mód, hogy soros kábel nélkül megtudd,
   // mi történt az eszközzel - és épp AP módban vagy, amikor baj van.
   server.on("/log", HTTP_GET, [](AsyncWebServerRequest* request) {
@@ -1319,7 +1343,11 @@ void startConfigPortal() {
     r->print(F("<p><i>Az uptime minden indulaskor nullarol indul, ezert a "
                "BOOT sorok jelzik az ujraindulasokat. A naplo az "
                "aramtalanitast nem eli tul.</i></p>"
-               "<p><a href=\"/\">Vissza a beallitasokhoz</a></p></body></html>"));
+               "<p><a href=\"/\">Vissza a beallitasokhoz</a></p>"));
+    // A naplót is lehet 5 percnél tovább olvasni - ne aludjon el közben.
+    // Flashből megy a pufferbe, nem allokál külön.
+    r->print(KEEPALIVE_JS);
+    r->print(F("</body></html>"));
     request->send(r);
   });
 

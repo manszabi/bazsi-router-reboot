@@ -69,6 +69,13 @@ Ha nincs mentett Wi-Fi adat (vagy a Wi-Fi reset gombot megnyomtad):
 > Az AP mód **5 perc tétlenség** után elalszik (minden HTTP kérés újraindítja a
 > visszaszámlálást), és utána már csak a reset gomb vagy az áramtalanítás
 > ébreszti fel. Fájlírás közben soha nem alszik el.
+>
+> **Amíg a lap nyitva van, nem alszik el:** a beállító oldal és a naplóoldal
+> 60 mp-enként meghív egy `/ping` végpontot (1 bájt válasz), ami újraindítja a
+> visszaszámlálást. Enélkül az óra a lapbetöltéstől ketyegne, nem az utolsó
+> interakciótól – mérve: 6 percnyi lassú gépelés után a Submit már nem érte el
+> az eszközt, és a portál visszahozásához fizikailag meg kellett nyomni a reset
+> gombot. A lapot bezárva az utolsó pingtől számít újra az 5 perc.
 > Statikus IP esetén a DNS szervernek a megadott gateway (tartalékként `1.1.1.1`)
 > lesz beállítva, különben a névfeloldás – és így a HTTP-teszt – nem működne.
 > (Az ESP32 `WiFi.config()` STA ágában a DNS-t szó szerint a kapott paraméterből
