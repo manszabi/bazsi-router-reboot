@@ -1595,7 +1595,7 @@ static void scL5() {
 }
 
 // --- Felig kitoltott statikus IP --------------------------------------------
-static void scP9() {
+static void scP8() {
   // IP gateway nelkul: az initWiFi() ilyenkor DHCP-re esik vissza, tehat a
   // "menj a megadott fix cimre" uzenet hazugsag lenne.
   coldBoot(false, "", "", "", "");
@@ -1614,7 +1614,7 @@ static void scP9() {
   CHECK(restartPending, "es most mar ujraindul");
 }
 
-static void scP10() {
+static void scP9() {
   // A csonkolatlan indoklas: a snprintf() puffere eleg nagy hozza.
   coldBoot(false, "", "", "", "");
   setup();
@@ -1689,7 +1689,7 @@ static void scIP3() {
 }
 
 // --- Fajliras kozben nincs ujrainditas --------------------------------------
-static void scP11() {
+static void scP10() {
   // A felhasznalo eppen menteskor nyomja meg a reset gombot. A mentes kozbeni
   // ujrainditas felig kiirt konfiguraciot hagyna - ugyanaz a szabaly, mint az
   // elalvasnal.
@@ -1712,7 +1712,7 @@ static void scP11() {
   CHECK(restarted, "a mentes utan viszont lefut (uj 50 ms debounce utan)");
 }
 
-static void scP12() {
+static void scP11() {
   // Ugyanez a wifireset gombra: az mentes kozben a fajlokat is torolne, mikozben
   // az aszinkron task eppen irja oket.
   coldBoot(false, "", "", "", "");
@@ -1736,7 +1736,7 @@ static void scP12() {
 
 
 // --- Amit beirsz, azt is hasznalja -----------------------------------------
-static void scP13() {
+static void scP12() {
   // A readConfigValue() beolvasaskor levagja a whitespace-t. Ha mentéskor nem
   // vagnank, a fajlban mas lenne, mint amivel az eszkoz csatlakozik - es a
   // portal is a nyers erteket visszhangozna.
@@ -1749,7 +1749,7 @@ static void scP13() {
   CHECK(serialHas("SSID set to: MyNetwork"), "es a visszajelzes is a vagott ertek");
 }
 
-static void scP14() {
+static void scP13() {
   // Csupa szokozbol allo SSID: a vagas utan ures marad. Ilyet nem szabad
   // sikerkent elfogadni - ujraindulas utan ugyanitt, AP modban kotnenk ki.
   coldBoot(false, "", "", "", "");
@@ -1758,6 +1758,34 @@ static void scP14() {
   const int code = postConfig("     ", "jelszo123", "", "", &body);
   CHECK(code == 500, "csupa szokoz SSID -> 500");
   CHECK(!restartPending, "nem indul ujra hasznalhatatlan SSID-vel");
+}
+
+
+// --- A LED-ek ne hazudjanak -------------------------------------------------
+static void scLED1() {
+  // A MUKODES.md LED tablazata szerint a reset pulzus alatt MINDKET LED sotet.
+  // A Wi-Fi LED-nek kulonosen: a router ilyenkor aram nelkul van, tehat
+  // kapcsolat sincs. Kabel nelkul a LED az egyetlen visszajelzes.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  CHECK(g_pinState[5] == HIGH, "csatlakozas utan vilagit a Wi-Fi LED (GPIO5)");
+
+  int guard = 0;
+  while (!reset_device() && ++guard < 200000) { feedLoopWDT(); delay(10); }
+  CHECK(guard < 200000, "a reset pulzus lefutott");
+
+  // A pulzus KOZBEN (a relay HIGH es LOW kozott) mindket LED sotet volt.
+  const int relayOn = logIndex("pin7=HIGH");
+  CHECK(relayOn >= 0, "a rele bekapcsolt");
+  bool wifiLedOffInPulse = false, statusLedOffInPulse = false;
+  // Csak a pulzus ablakat nezzuk: a rele bekapcsolasatol a kikapcsolasaig.
+  for (size_t i = (size_t)relayOn; i < g_log.size(); i++) {
+    if (g_log[i] == "pin7=LOW" && (int)i > relayOn) break;
+    if (g_log[i] == "pin5=LOW") wifiLedOffInPulse = true;
+    if (g_log[i] == "pin6=LOW") statusLedOffInPulse = true;
+  }
+  CHECK(statusLedOffInPulse, "a statusz LED sotet a pulzus alatt");
+  CHECK(wifiLedOffInPulse, "a Wi-Fi LED is sotet - nem allitja, hogy van halozat");
 }
 
 struct Scenario { const char* name; void (*fn)(); };
@@ -1775,14 +1803,14 @@ static const Scenario kScenarios[] = {
   { "S2: alvás előtt minden kimenet biztonságos állapotba kerül", sc10 },
   { "S4: a gomb-ébresztés csak RTC-képes lábon működik (C3: GPIO0-5)", sc11 },
   { "S3: ébredés = teljes újraindulás, a számlálók nullázódnak", sc12 },
-  { "R1: a reset pulzus tényleg 90 másodperc (regresszió a fő hibára)", sc13 },
-  { "R2: az 5. reset esemény deep sleepet vált ki", sc14 },
+  { "RL1: a reset pulzus tényleg 90 másodperc (regresszió a fő hibára)", sc13 },
+  { "RL2: az 5. reset esemény deep sleepet vált ki", sc14 },
   { "H1: a záró CR/LF nem buktatja el az egyezést", sc15 },
   { "H2: eltérő tartalom és hibás státusz elbukik", sc16 },
   { "H3: captive portal nagy válaszát el sem olvassa", sc17 },
   { "H4: ismeretlen hosszú (chunked) válasz is korlátozva olvasódik", sc18 },
-  { "P1: 2 sikeres ping után korán kilép", sc19 },
-  { "P2: csupa sikertelen ping - a 3. után eldől", sc20 },
+  { "PG1: 2 sikeres ping után korán kilép", sc19 },
+  { "PG2: csupa sikertelen ping - a 3. után eldől", sc20 },
   { "C1: konfig írás/olvasás oda-vissza, csonkítással", sc21 },
   { "B1: egyetlen zajtüske nem indítja újra az eszközt", sc22 },
   { "F1: hiányzó wifimanager.html esetén is van beállító űrlap", sc23 },
@@ -1862,16 +1890,17 @@ static const Scenario kScenarios[] = {
   { "WDT8: sikertelen konfigurálásnál sem jelent 90 mp-es védelmet", scWDT8 },
   { "L4: 'nincs mentett SSID' AP mód is bekerül a naplóba", scL4 },
   { "L5: végzetes hiba utáni elalvás is bekerül a naplóba", scL5 },
-  { "P9: statikus IP gateway nélkül nem fogadható el sikerként", scP9 },
-  { "P10: a hosszú hibaindoklás nem csonkolódik", scP10 },
+  { "P8: statikus IP gateway nélkül nem fogadható el sikerként", scP8 },
+  { "P9: a hosszú hibaindoklás nem csonkolódik", scP9 },
   { "H5: beragadt szervernél a saját olvasási határidő tart", scH5 },
   { "IP1: a stub ugyanúgy viselkedik, mint a core IPAddress-e", scIP1 },
   { "IP2: IPv6 és 0.0.0.0 cím nem fogadható el a portálon", scIP2 },
   { "IP3: mentett IPv6 gateway esetén DHCP, nem csonka statikus konfig", scIP3 },
-  { "P11: mentés közben a reset gomb nem indít újra", scP11 },
-  { "P12: mentés közben a wifireset gomb nem töröl és nem indít újra", scP12 },
-  { "P13: a mentett érték megegyezik azzal, amit az eszköz használni fog", scP13 },
-  { "P14: csupa szóközből álló SSID nem fogadható el", scP14 },
+  { "P10: mentés közben a reset gomb nem indít újra", scP10 },
+  { "P11: mentés közben a wifireset gomb nem töröl és nem indít újra", scP11 },
+  { "P12: a mentett érték megegyezik azzal, amit az eszköz használni fog", scP12 },
+  { "P13: csupa szóközből álló SSID nem fogadható el", scP13 },
+  { "LED1: a router áramtalanításakor mindkét LED sötét", scLED1 },
 };
 
 

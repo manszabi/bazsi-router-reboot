@@ -38,6 +38,8 @@ const char FALLBACK_FORM[] =
   "Password <input name=\"pass\" type=\"password\" maxlength=\"63\"><br>"
   "IP <input name=\"ip\" maxlength=\"15\" placeholder=\"opcionalis\"><br>"
   "Gateway <input name=\"gateway\" maxlength=\"15\" placeholder=\"opcionalis\"><br>"
+  "<small>Statikus IP-hez mindket cimmezot toltsd ki, csak IPv4. "
+  "DHCP-hez hagyd mindkettot uresen.</small><br>"
   "<input type=\"submit\" value=\"Submit\"></form>"
   "<p><a href=\"/log\">Diagnosztikai naplo</a></p></body></html>";
 
@@ -763,6 +765,10 @@ bool reset_device() {
     digitalWrite(relayPin, HIGH);
     Serial.println("Relay on.");
     digitalWrite(ledPin, LOW);
+    // A Wi-Fi LED is le: a router most áram nélkül van, tehát kapcsolat sincs.
+    // Enélkül a LED a teljes pulzus + RESET_DELAY alatt (~11,5 perc) azt
+    // mutatná, hogy van Wi-Fi. Visszakapcsolni a sikeres újracsatlakozás fogja.
+    digitalWrite(wifiledPin, LOW);
     Serial.println("Reset_pulse delay.");
     testState.resetStep = 1;
     timing.resetPulseStart = millis();

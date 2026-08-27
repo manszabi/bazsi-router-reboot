@@ -7,7 +7,10 @@ SKETCH   := ../bazsi_router_reboot.ino
 BUILD    := build
 SRC      := $(BUILD)/sketch.cpp stubs/main_stub.cpp test_main.cpp
 
-.PHONY: test clean
+# A sanitizeres futtatas kulon cel: ugyanaz a 111 forgatokonyv, de ASan+UBSan
+# alatt. Puffertulcsordulast, hasznalat-utani-felszabaditast es definialatlan
+# viselkedest fog meg - olyasmit, amit egy CHECK() sosem latna.
+.PHONY: test san clean
 test: $(BUILD)/run-idf5 $(BUILD)/run-idf6
 	@echo "=== IDF 5 (ESP32 Arduino 3.3.11) ==="
 	@$(BUILD)/run-idf5
@@ -23,6 +26,14 @@ $(BUILD)/run-idf5: $(BUILD)/sketch.cpp test_main.cpp stubs/main_stub.cpp $(wildc
 
 $(BUILD)/run-idf6: $(BUILD)/sketch.cpp test_main.cpp stubs/main_stub.cpp $(wildcard stubs/*.h)
 	$(CXX) $(CXXFLAGS) -DESP_IDF_VERSION_MAJOR=6 -o $@ $(SRC)
+
+$(BUILD)/run-san: $(BUILD)/sketch.cpp test_main.cpp stubs/main_stub.cpp $(wildcard stubs/*.h)
+	$(CXX) $(CXXFLAGS) -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer \
+	  -DESP_IDF_VERSION_MAJOR=5 -o $@ $(SRC)
+
+san: $(BUILD)/run-san
+	@echo "=== ASan + UBSan (IDF 5) ==="
+	@ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 $(BUILD)/run-san
 
 $(BUILD):
 	@mkdir -p $(BUILD)
