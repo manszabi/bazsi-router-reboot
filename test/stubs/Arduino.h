@@ -46,6 +46,10 @@ extern bool     g_wdtPanic;
 extern uint32_t g_wdtMaxFeedGap;   // leghosszabb szakasz etetés nélkül
 extern uint32_t g_wdtLastFeed;
 extern uint32_t g_wdtFeedBeforeEnable;  // etetes a feliratkozas ELOTT
+extern bool     g_wdtInited;            // fut-e mar a TWDT (ESP_TASK_WDT_INIT)
+extern bool     g_wdtInitFails;         // az esp_task_wdt_init() hibat adjon
+extern bool     g_wdtReconfigureFails;  // az esp_task_wdt_reconfigure() hibazzon
+extern uint32_t g_wdtFeedNotSubscribed; // ennyi log_e() sor menne ki
 extern bool     g_wdtTrack;
 int64_t esp_timer_get_time();
 void esp_sleep_enable_timer_wakeup(uint64_t);
@@ -114,9 +118,13 @@ public:
   size_t println(unsigned long v) { buf_ += std::to_string(v); flushLine(); return 0; }
   size_t println(long v) { buf_ += std::to_string(v); flushLine(); return 0; }
   size_t println() { flushLine(); return 0; }
-  size_t printf(const char* f, ...) { (void)f; return 0; }
+  // A valodi Print::printf formaz es kiir. Ha ezt no-opkent hagyjuk, a
+  // Serial.printf()-fel irt diagnosztika (konfig fajlok irasa/olvasasa/torlese,
+  // POST parameterek) LATHATATLAN a tesztek szamara - vagyis ellenorizhetetlen.
+  size_t printf(const char* f, ...);
 protected:
   void flushLine();
+  void emit(const char* s);
   std::string buf_;
 };
 
@@ -129,22 +137,58 @@ public:
 };
 extern HardwareSerial Serial;
 
+// A core IPAddress-e IPv6-ot is kezel, es ez itt szamit:
+//  - fromString() eloszor IPv4-kent, majd IPv6-kent probal (IPAddress.cpp),
+//    tehat a "::1" is ervenyes cimnek szamit;
+//  - az uint32_t konverzio viszont IPv6-ra 0-t ad (IPAddress.h:83), es a
+//    WiFi.config() pont ezt hasznalja (NetworkInterface.cpp:390).
+// A stub ezt a ketto egyuttest modellezi.
+enum IPType { IPv4, IPv6 };
+
 class IPAddress : public Print {
 public:
   IPAddress() { o[0]=o[1]=o[2]=o[3]=0; }
   IPAddress(uint32_t) { o[0]=o[1]=o[2]=o[3]=0; }
   IPAddress(uint8_t a, uint8_t b, uint8_t c, uint8_t d) { o[0]=a;o[1]=b;o[2]=c;o[3]=d; }
   bool fromString(const char* s) {
+    if (!s) return false;
     unsigned a,b,c,d; char extra;
-    if (!s || sscanf(s, "%u.%u.%u.%u%c", &a,&b,&c,&d,&extra) != 4) return false;
-    if (a>255||b>255||c>255||d>255) return false;
-    o[0]=(uint8_t)a;o[1]=(uint8_t)b;o[2]=(uint8_t)c;o[3]=(uint8_t)d; return true;
+    if (sscanf(s, "%u.%u.%u.%u%c", &a,&b,&c,&d,&extra) == 4
+        && a<=255 && b<=255 && c<=255 && d<=255) {
+      o[0]=(uint8_t)a;o[1]=(uint8_t)b;o[2]=(uint8_t)c;o[3]=(uint8_t)d;
+      t_ = IPv4; return true;
+    }
+    return fromString6(s);
+  }
+  // Csak annyira reszletes, amennyire a viselkedes szamit: hexa csoportok
+  // kettosponttal, legfeljebb egy "::" tomoritessel.
+  bool fromString6(const char* s) {
+    bool sawColon = false, sawDouble = false;
+    for (const char* p = s; *p; p++) {
+      if (*p == ':') {
+        if (p[1] == ':') { if (sawDouble) return false; sawDouble = true; p++; }
+        sawColon = true;
+      } else if (!isxdigit((unsigned char)*p)) {
+        return false;
+      }
+    }
+    if (!sawColon) return false;
+    o[0]=o[1]=o[2]=o[3]=0;
+    t_ = IPv6; return true;
+  }
+  IPType type() const { return t_; }
+  // IPAddress.h:83 - IPv6-ra szandekosan 0
+  operator uint32_t() const {
+    return t_ == IPv4 ? ((uint32_t)o[0]<<24 | (uint32_t)o[1]<<16 | (uint32_t)o[2]<<8 | o[3]) : 0u;
   }
   std::string str() const {
+    if (t_ == IPv6) return "<ipv6>";
     char t[20]; snprintf(t,sizeof(t),"%u.%u.%u.%u",o[0],o[1],o[2],o[3]); return t;
   }
   bool isZero() const { return !o[0] && !o[1] && !o[2] && !o[3]; }
   uint8_t o[4];
+private:
+  IPType t_ = IPv4;
 };
 
 inline size_t Print::print(const IPAddress& a) { buf_ += a.str(); return 0; }

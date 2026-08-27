@@ -12,6 +12,9 @@
 #include "esp_task_wdt.h"
 #include "esp_system.h"
 #include "esp_attr.h"
+// Az esp_timer_get_time()-ot a core is expliciten includeolja (esp32-hal-misc.c),
+// nem hagyatkozik a FreeRTOS fejlecek atteteles behuzasara. Mi sem tesszuk.
+#include "esp_timer.h"
 
 // Create AsyncWebServer object on port 80
 AsyncWebServer server(80);
@@ -35,6 +38,8 @@ const char FALLBACK_FORM[] =
   "Password <input name=\"pass\" type=\"password\" maxlength=\"63\"><br>"
   "IP <input name=\"ip\" maxlength=\"15\" placeholder=\"opcionalis\"><br>"
   "Gateway <input name=\"gateway\" maxlength=\"15\" placeholder=\"opcionalis\"><br>"
+  "<small>Statikus IP-hez mindket cimmezot toltsd ki, csak IPv4. "
+  "DHCP-hez hagyd mindkettot uresen.</small><br>"
   "<input type=\"submit\" value=\"Submit\"></form>"
   "<p><a href=\"/log\">Diagnosztikai naplo</a></p></body></html>";
 
@@ -230,7 +235,8 @@ enum EventCode : uint8_t {
   EV_AP_MODE = 6,       // param: ok (1=nincs SSID 2=auth hiba 3=2 nap letelt)
   EV_CONFIG_SAVED = 7,  // param: 0
   EV_SLEEP = 8,         // param: ok (1=retry 2=internet 3=AP timeout 4=fatal)
-  EV_FATAL = 9,         // param: ok (1=FS mount 2=konfig olvasás 3=watchdog)
+  EV_FATAL = 9,         // param: ok (1=FS mount 2=konfig olvasás 3=watchdog
+                        //           4=wifireset törlés sikertelen)
   EV_WDT_RESET = 10,    // param: hányadik watchdog reset
   EV_STUCK_BUTTON = 11  // param: 0 = reset gomb, 1 = wifireset gomb
 };
@@ -277,10 +283,12 @@ bool reset_device();
 void logEvent(EventCode code, uint16_t param);
 void startConfigPortal();
 void enterFatal(const char* reason);
+void fatalHalt(const char* reason);
 void enterDeepSleep(uint64_t timerUs);
 bool initWiFi();
 bool reconnectWifi();
 bool writeConfigValue(fs::FS& fs, const char* path, const char* message);
+bool isUsableIPv4(const IPAddress& addr);
 
 // Esemény rögzítése a körpufferbe. Nem allokál, nem blokkol.
 void logEvent(EventCode code, uint16_t param) {
@@ -312,6 +320,20 @@ const char* eventName(uint8_t code) {
     case EV_STUCK_BUTTON: return "STUCK BUTTON";
     default: return "?";
   }
+}
+
+// Használható-e ez a cím statikus IPv4 konfigurációnak?
+//
+// Az IPAddress::fromString() az IPv4 után IPv6-ot is megpróbál (IPAddress.cpp),
+// ezért a "::1" vagy a "fe80::1" is érvényesnek látszik - és mindkettő befér a
+// 15 karakteres mezőbe. Az eszköz viszont végig IPv4-en dolgozik (ping 1.1.1.1
+// és 8.8.8.8, HTTP, /24-es maszk), a WiFi.config() pedig az IPAddress uint32_t
+// konverzióját használja (NetworkInterface.cpp:390), ami IPv6-ra 0-t ad
+// (IPAddress.h:83). Vagyis egy IPv6 cím csendben DHCP-t vagy - ami rosszabb -
+// egy 0.0.0.0-s gateway-t és DNS-t eredményezne. A 0.0.0.0 ugyanezt jelenti,
+// ezért az sem fogadható el.
+bool isUsableIPv4(const IPAddress& addr) {
+  return (uint32_t)addr != 0;
 }
 
 // Whitespace levágása helyben, allokáció nélkül
@@ -528,27 +550,48 @@ void checkWatchdogResets() {
 // percekig (90 mp-es relé pulzus), és egy hosszú timeout mellett is kockázatos
 // újraindítási hurkot okozna.
 void initWatchdog() {
-  // FONTOS a sorrend: előbb iratkozunk fel, csak utána konfigurálunk.
-  // Az esp_task_wdt_reconfigure() a végén csak akkor indítja újra a timert, ha
-  // a figyelt taskok listája nem üres. Fordított sorrendben a listánk épp üres
-  // lenne (az idle taskokat leiratkoztatjuk), és a timer elindulása egy belső
-  // részleten (waiting_for_task) múlna - így viszont garantált.
-  enableLoopWDT();
-  watchdogEnabled = true;
-
   esp_task_wdt_config_t cfg = {};
   cfg.timeout_ms = WDT_TIMEOUT_MS;
   cfg.idle_core_mask = 0;
   cfg.trigger_panic = true;
 
-  esp_err_t err = esp_task_wdt_reconfigure(&cfg);
-  if (err == ESP_ERR_INVALID_STATE) {
-    err = esp_task_wdt_init(&cfg);  // ha mégsem lenne inicializálva
+  // 1. A TWDT-nek LÉTEZNIE kell, mielőtt feliratkozunk rá. Az Arduino alapból
+  //    inicializálja (ESP_TASK_WDT_INIT=y), de ha valaki kikapcsolja, az
+  //    esp_task_wdt_add() ESP_ERR_INVALID_STATE-et adna - az enableLoopWDT()
+  //    viszont void, tehát ezt a hibát csendben elnyelné (esp32-hal-misc.c).
+  esp_err_t initErr = ESP_OK;
+  if (esp_task_wdt_status(NULL) == ESP_ERR_INVALID_STATE) {
+    initErr = esp_task_wdt_init(&cfg);
+    // Az init figyelt task nélkül NEM indítja el a timert (waiting_for_task),
+    // azt a lenti feliratkozás teszi meg.
   }
-  if (err != ESP_OK) {
-    Serial.print("Watchdog config failed, error ");
-    Serial.println((int)err);
-    watchdogEnabled = false;
+
+  // 2. Feliratkozás. FONTOS a sorrend: előbb ez, csak utána a konfiguráció.
+  //    Az esp_task_wdt_reconfigure() a végén csak akkor indítja újra a timert,
+  //    ha a figyelt taskok listája nem üres. Fordított sorrendben a listánk épp
+  //    üres lenne (az idle taskokat leiratkoztatjuk).
+  if (initErr == ESP_OK) {
+    enableLoopWDT();
+  }
+
+  // 3. Timeout és panic beállítása.
+  const esp_err_t cfgErr = (initErr == ESP_OK) ? esp_task_wdt_reconfigure(&cfg) : initErr;
+
+  // 4. Az EGYETLEN megbízható visszajelzés. Az enableLoopWDT() void, a
+  //    loopTaskWDTEnabled pedig a core belső változója - enélkül azt hinnénk,
+  //    védve vagyunk, közben a feedWatchdog() csak ESP_ERR_NOT_FOUND-ot kapna,
+  //    és 10 ms-onként egy log_e() sort öntene a soros portra.
+  watchdogEnabled = (esp_task_wdt_status(NULL) == ESP_OK);
+
+  if (!watchdogEnabled || cfgErr != ESP_OK) {
+    // MINDEN hibaág ide fut be, egyetlen, jól kereshető figyelmeztetéssel.
+    // Ne hazudjunk védelmet. Egy 5 mp-es alapértelmezett timeout ráadásul
+    // rosszabb lenne a semminél: a 15 mp-ig tartó HTTP teszt alatt újraindítana.
+    Serial.print("FIGYELEM: a watchdog NEM vedi a loop()-ot (feliratkozas ");
+    Serial.print(watchdogEnabled ? "OK" : "SIKERTELEN");
+    Serial.print(", hibakod ");
+    Serial.print((int)cfgErr);
+    Serial.println("). A program fut, de lefagyas eseten nem indul ujra.");
     return;
   }
   Serial.print("Watchdog enabled, timeout ");
@@ -655,13 +698,15 @@ bool initWiFi() {
   IPAddress localIP;
   IPAddress localGateway;
   if (ipStr[0] != '\0' || gatewayStr[0] != '\0') {
-    const bool ipValid = localIP.fromString(ipStr);
-    const bool gatewayValid = localGateway.fromString(gatewayStr);
+    // Régebbi firmware IPv6 címet is elmenthetett: az ilyet itt is ki kell
+    // szűrni, különben a config() gateway és DNS nélküli statikus IP-t állítana.
+    const bool ipValid = localIP.fromString(ipStr) && isUsableIPv4(localIP);
+    const bool gatewayValid = localGateway.fromString(gatewayStr) && isUsableIPv4(localGateway);
     if (!ipValid) {
-      Serial.println("❌ Invalid IP format!");
+      Serial.println("❌ Invalid IP format (csak IPv4 hasznalhato)!");
     }
     if (!gatewayValid) {
-      Serial.println("❌ Invalid gateway format!");
+      Serial.println("❌ Invalid gateway format (csak IPv4 hasznalhato)!");
     }
     staticOk = ipValid && gatewayValid;
   }
@@ -722,6 +767,10 @@ bool reset_device() {
     digitalWrite(relayPin, HIGH);
     Serial.println("Relay on.");
     digitalWrite(ledPin, LOW);
+    // A Wi-Fi LED is le: a router most áram nélkül van, tehát kapcsolat sincs.
+    // Enélkül a LED a teljes pulzus + RESET_DELAY alatt (~11,5 perc) azt
+    // mutatná, hogy van Wi-Fi. Visszakapcsolni a sikeres újracsatlakozás fogja.
+    digitalWrite(wifiledPin, LOW);
     Serial.println("Reset_pulse delay.");
     testState.resetStep = 1;
     timing.resetPulseStart = millis();
@@ -896,10 +945,49 @@ void fatalSleep() {
   printUptime();
   Serial.println("5 perc hibajelzes utan az ESP elalszik.");
   Serial.println("Idozitett ebresztes NINCS - reset gomb vagy aramtalanitas kell.");
+  logEvent(EV_SLEEP, 4);
   enterDeepSleep(0);
 }
 
+// Végzetes hiba egy BLOKKOLÓ környezetből (a gombkezelőkből).
+//
+// Az enterFatal() csak beállítja a módot, a jelzést pedig a loop() végzi. A
+// gombkezelők viszont mély blokkoló ciklusokból is futnak - a
+// waitWithButtons(RESET_DELAY) például 10 percig nem ad vissza a loop()-nak.
+// Addig az eszköz vidáman tovább működne: tesztelne, relét kapcsolna, aludna.
+// Ezért itt helyben, blokkolva jelzünk, és SOHA nem térünk vissza - pontosan
+// úgy, ahogy az eddigi ESP.restart() sem tért vissza ebből az ágból.
+void fatalHalt(const char* reason) {
+  enterFatal(reason);  // mód, relé LOW (a router kapjon áramot), üzenetek
+  // Az enterFatal() altalanos uzenete a loop()-vezerelt esetre igaz, ahol
+  // mindket gomb el. Itt csak a reset gomb - ezt ki kell mondani.
+  Serial.println("FIGYELEM: itt a wifireset gomb NEM hat, csak a reset gomb.");
+
+  while (millis() - timing.fatalStart < FATAL_SLEEP_AFTER_MS) {
+    const uint32_t now = millis();
+    if (now - timing.blinkLast >= FATAL_BLINK_MS) {
+      timing.blinkLast = now;
+      uiFlags.blinkOn = !uiFlags.blinkOn;
+      digitalWrite(ledPin, uiFlags.blinkOn ? HIGH : LOW);
+      digitalWrite(wifiledPin, uiFlags.blinkOn ? HIGH : LOW);
+    }
+    // Csak a reset gomb él. A wifiresetbutton()-t szándékosan NEM hívjuk:
+    // épp onnan jöhettünk, az önmagába vezető rekurzió lenne.
+    resetbutton();
+    feedWatchdog();
+    delay(BUTTON_POLL_MS);
+  }
+  fatalSleep();  // időzített ébresztés NÉLKÜL - nem tér vissza
+}
+
 void resetbutton() {
+  // Fájlírás közben SEMMIKÉPP nem indítunk újra: a félbeszakadt mentés sérült
+  // konfigurációt hagyna hátra. Ugyanaz a szabály, mint az elalvásnál.
+  // A mentés alatt a debounce sem indul el, tehát utána egy teljes 50 ms-os
+  // lenyomás kell - egy mentés néhány tíz ezredmásodperc, ez nem érzékelhető.
+  if (savingConfig) {
+    return;
+  }
   if (digitalRead(resetPin) != LOW) {
     timing.resetBtnDownSince = 0;  // felengedve: debounce újraindul
     return;
@@ -919,6 +1007,11 @@ void resetbutton() {
 }
 
 void wifiresetbutton() {
+  // Mentés közben a törlés és az újraindítás is végzetes lenne: két task írná
+  // egyszerre ugyanazokat a fájlokat. Lásd resetbutton().
+  if (savingConfig) {
+    return;
+  }
   if (digitalRead(wifiresetPin) != LOW) {
     timing.wifiResetBtnDownSince = 0;
     return;
@@ -931,14 +1024,28 @@ void wifiresetbutton() {
   if (now - timing.wifiResetBtnDownSince >= BUTTON_DEBOUNCE_MS) {
     Serial.println("WIFIRESET button is pulling down!");
     Serial.println("RESET saved wifi data!");
+    // FONTOS a sorrend: az SSID megy ELŐSZÖR. A "wifireset" célja, hogy az
+    // eszköz a beállító portálon jöjjön fel, és ezt egyedül a /ssid.txt dönti
+    // el (setup(): ha üres az SSID -> AP mód). Ha a törlés közben elmegy az
+    // áram, így a legvalószínűbb, hogy a kívánt végállapotba kerülünk.
+    // A &= szándékosan nem rövidzáras: mind a négy törlés lefut akkor is, ha
+    // valamelyik elbukik.
     bool cleared = true;
-    cleared &= clearConfigValue(LittleFS, gatewayPath);
-    cleared &= clearConfigValue(LittleFS, ipPath);
-    cleared &= clearConfigValue(LittleFS, passPath);
     cleared &= clearConfigValue(LittleFS, ssidPath);
+    cleared &= clearConfigValue(LittleFS, passPath);
+    cleared &= clearConfigValue(LittleFS, ipPath);
+    cleared &= clearConfigValue(LittleFS, gatewayPath);
     if (!cleared) {
-      // Az újraindítás után a régi adatokkal jönne fel - legalább tudja a felhasználó.
+      // Ha a fájlrendszer nem írható, az eszköz NEM működhet tovább: a
+      // konfiguráció mentése ugyanígy elbukna, az újraindítás pedig a régi
+      // adatokkal jönne fel - a gomb a felhasználó szemszögéből "nem csinál
+      // semmit". Ez ugyanaz a hibaosztály, mint a többi LittleFS hiba, tehát
+      // ugyanaz a kezelés: mindkét LED gyorsan villog, 5 perc múlva alvás,
+      // amiből csak a gomb vagy az áramtalanítás hoz vissza.
       Serial.println("!!! A mentett wifi adatok törlése NEM sikerült !!!");
+      logEvent(EV_FATAL, 4);
+      fatalHalt("A mentett wifi adatok nem torolhetok - serult fajlrendszer.");
+      // fatalHalt() nem tér vissza
     }
     Serial.println("RESTART ESP32C3 device.");
     Serial.flush();
@@ -988,10 +1095,13 @@ size_t readBounded(WiFiClient& stream, char* buf, size_t maxLen, uint32_t timeou
   size_t n = 0;
   uint32_t lastByte = millis();
   while (n < maxLen && (millis() - lastByte) < timeoutMs) {
-    const int c = stream.read();
-    if (c < 0) {
+    // Csak akkor olvasunk, ha VAN mit: a read() a socket saját fogadási
+    // timeoutját használja, ami nem a mienk. Ha vakon hívnánk, egyetlen
+    // olvasás túlléphetné a timeoutMs határidőt - így viszont a határidő
+    // valóban a miénk, és nem függ a core beállításaitól.
+    if (stream.available() <= 0) {
       // A szerver lezárta és nincs több adat: nincs értelme a timeoutot kivárni
-      if (!stream.connected() && stream.available() <= 0) {
+      if (!stream.connected()) {
         break;
       }
       resetbutton();
@@ -1001,6 +1111,10 @@ size_t readBounded(WiFiClient& stream, char* buf, size_t maxLen, uint32_t timeou
       // ad át vezérlést, tehát üresen pörgetné a CPU-t a válaszra várva.
       delay(BUTTON_POLL_MS);
       continue;
+    }
+    const int c = stream.read();
+    if (c < 0) {
+      break;  // available() adatot ígért, mégsem jött: a kapcsolat elszállt
     }
     buf[n++] = (char)c;
     lastByte = millis();
@@ -1059,8 +1173,9 @@ bool testInternetPing(const IPAddress& target, const char* targetName) {
   uint8_t successCount = 0;
 
   for (uint8_t j = 0; j < PING_ATTEMPTS; j++) {
-    IPAddress dest = target;  // a Ping.ping() érték szerint vár paramétert
-    const bool pingOK = Ping.ping(dest, 1);  // 1 próbálkozás pingenként
+    // A Ping.ping() érték szerint veszi a címet (ESPping: bool ping(IPAddress,
+    // int16_t)), tehát a másolatot ő maga készíti - nem kell külön helyi példány.
+    const bool pingOK = Ping.ping(target, 1);  // 1 próbálkozás pingenként
     Serial.print("Ping ");
     Serial.print(j + 1);
     if (pingOK) {
@@ -1120,9 +1235,9 @@ void handleFirstStart(uint32_t currentMillis) {
         return;
       }
     }
-
-    timing.startMillis = millis();  // újraindítjuk az időzítést (friss bélyeg)
   }
+  // Innentől a firstStart lezárult: a timing.startMillis-t senki nem olvassa
+  // többé, ezért nincs értelme frissíteni.
   uiFlags.firstStart = false;
 }
 
@@ -1239,22 +1354,34 @@ void startConfigPortal() {
       const String& val = p->value();  // referencia: nincs felesleges másolat
 
       if (name == PARAM_SSID) {
-        if (val.length() > 0 && val.length() <= SSID_MAX_LEN) {
+        // A readConfigValue() beolvasáskor levágja a whitespace-t, ezért már
+        // itt is levágjuk: így az elmentett és a visszajelzett érték pontosan
+        // az, amivel az eszköz később csatlakozni fog. A csupa szóközből álló
+        // SSID így üresre fogy - azt pedig nem szabad sikerként elfogadni,
+        // mert az újraindulás után AP módban kötnénk ki.
+        // Előbb helyi pufferbe: hibás bemenet ne írja felül a globálist.
+        char candidate[SSID_MAX_LEN + 1];
+        strlcpy(candidate, val.c_str(), sizeof(candidate));
+        trimInPlace(candidate);
+        if (val.length() <= SSID_MAX_LEN && candidate[0] != '\0') {
           ssidProvided = true;
-          strlcpy(ssid, val.c_str(), sizeof(ssid));
+          strlcpy(ssid, candidate, sizeof(ssid));
           Serial.print("SSID set to: ");
           Serial.println(ssid);
           saveOk &= writeConfigValue(LittleFS, ssidPath, ssid);
         } else {
           Serial.println("Invalid SSID length!");
           saveOk = false;
-          failReason = "Ervenytelen SSID hossz (1-32 karakter).";
+          failReason = "Ervenytelen SSID (1-32 karakter, nem csak szokoz).";
         }
       } else if (name == PARAM_PASS) {
         if (val.length() <= PASS_MAX_LEN) {
           strlcpy(pass, val.c_str(), sizeof(pass));
+          trimInPlace(pass);  // ugyanaz a szabály, mint az SSID-nél
+          // (itt a hossz már ellenőrzött, tehát a globálist csak érvényes
+          // bemenettel írjuk felül)
           Serial.print("Password set to: ");
-          Serial.print(val.length());
+          Serial.print((unsigned)strlen(pass));
           Serial.println(" chars");
           saveOk &= writeConfigValue(LittleFS, passPath, pass);
         } else {
@@ -1268,7 +1395,8 @@ void startConfigPortal() {
           ipStr[0] = '\0';
           Serial.println("IP empty, using DHCP.");
           saveOk &= writeConfigValue(LittleFS, ipPath, "");
-        } else if (val.length() <= IPSTR_MAX_LEN && testIP.fromString(val.c_str())) {
+        } else if (val.length() <= IPSTR_MAX_LEN && testIP.fromString(val.c_str())
+                   && isUsableIPv4(testIP)) {
           strlcpy(ipStr, val.c_str(), sizeof(ipStr));
           Serial.print("IP Address set to: ");
           Serial.println(ipStr);
@@ -1276,7 +1404,7 @@ void startConfigPortal() {
         } else {
           Serial.println("Invalid IP format!");
           saveOk = false;
-          if (failReason == nullptr) failReason = "Ervenytelen IP cim formatum.";
+          if (failReason == nullptr) failReason = "Ervenytelen IP cim (csak IPv4, nem 0.0.0.0).";
         }
       } else if (name == PARAM_GATEWAY) {
         IPAddress testIP;
@@ -1284,7 +1412,8 @@ void startConfigPortal() {
           gatewayStr[0] = '\0';
           Serial.println("Gateway empty, using DHCP.");
           saveOk &= writeConfigValue(LittleFS, gatewayPath, "");
-        } else if (val.length() <= IPSTR_MAX_LEN && testIP.fromString(val.c_str())) {
+        } else if (val.length() <= IPSTR_MAX_LEN && testIP.fromString(val.c_str())
+                   && isUsableIPv4(testIP)) {
           strlcpy(gatewayStr, val.c_str(), sizeof(gatewayStr));
           Serial.print("Gateway set to: ");
           Serial.println(gatewayStr);
@@ -1292,7 +1421,7 @@ void startConfigPortal() {
         } else {
           Serial.println("Invalid gateway format!");
           saveOk = false;
-          if (failReason == nullptr) failReason = "Ervenytelen gateway formatum.";
+          if (failReason == nullptr) failReason = "Ervenytelen gateway (csak IPv4, nem 0.0.0.0).";
         }
       }
 
@@ -1311,6 +1440,17 @@ void startConfigPortal() {
       if (failReason == nullptr) failReason = "Hianyzo SSID.";
     }
 
+    // Statikus IP-hez a gateway is kell. Az initWiFi() csak akkor konfigurál,
+    // ha MINDKETTŐ értelmezhető - félig kitöltve csendben DHCP-re esne vissza,
+    // a felhasználó viszont azt olvasná, hogy a megadott fix címen lesz.
+    if ((ipStr[0] != '\0') != (gatewayStr[0] != '\0')) {
+      saveOk = false;
+      if (failReason == nullptr) {
+        failReason = "Statikus IP-hez az IP cimet ES a gateway-t is meg kell adni "
+                     "(DHCP-hez hagyd mindkettot uresen).";
+      }
+    }
+
     savingConfig = false;
     touchApDeadline();
 
@@ -1318,7 +1458,9 @@ void startConfigPortal() {
       // Ne hazudjunk sikert és főleg ne indítsunk újra: az újraindítás
       // eldobná a beírt adatokat, a felhasználó pedig ugyanitt kötne ki.
       Serial.println("A beallitasok mentese SIKERTELEN.");
-      char err[160];
+      // A leghosszabb indoklás (statikus IP + gateway) a rögzített szöveggel
+      // együtt 176 bájt; a snprintf() csonkolna, ha ennél kisebb lenne.
+      char err[208];
       snprintf(err, sizeof(err),
                "A beallitasok mentese nem sikerult: %s "
                "Az eszkoz NEM indul ujra, probald meg ismet.",
@@ -1424,6 +1566,7 @@ void setup() {
 
     } else if (ssid[0] == '\0') {
       // Nincs mentett hálózat: csak a beállító portál segíthet.
+      logEvent(EV_AP_MODE, 1);
       startConfigPortal();
 
     } else {

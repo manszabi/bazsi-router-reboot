@@ -49,7 +49,26 @@ Ha nincs mentett Wi-Fi adat (vagy a Wi-Fi reset gombot megnyomtad):
    - **Gateway** – a router IP-je (opcionális, ha üres → DHCP)
 5. Küldés után az ESP újraindul és csatlakozik a megadott hálózathoz
 
-> Az AP mód addig aktív marad, amíg be nem küldöd az űrlapot – nincs időkorlát.
+> **Statikus IP-hez mindkét mezőt ki kell tölteni.** Gateway nélkül a firmware
+> DHCP-re esne vissza, ezért a beállító portál a félig kitöltött párost
+> visszautasítja, ahelyett hogy sikert jelentene egy olyan fix címre, amit az
+> eszköz végül nem használ. DHCP-hez hagyd mindkettőt üresen.
+>
+> **Csak IPv4 cím adható meg** (és nem `0.0.0.0`). Az `IPAddress::fromString()`
+> az IPv4 után IPv6-ot is megpróbál, ezért a `::1` vagy a `fe80::1` is
+> érvényesnek *látszana* – a `WiFi.config()` viszont az `IPAddress` `uint32_t`
+> konverzióját használja, ami IPv6-ra `0`-t ad. Egy IPv6 cím így csendben
+> DHCP-t, IPv4-cím + IPv6-gateway párosnál pedig **gateway és elsődleges DNS
+> nélküli** statikus konfigurációt eredményezne – vagyis nem lenne internet.
+>
+> **Az SSID és a jelszó elejéről/végéről a szóközök levágódnak**, már mentéskor.
+> Így az elmentett érték pontosan az, amivel az eszköz csatlakozni fog, és a
+> portál visszajelzése is ezt mutatja. (Következmény: olyan SSID vagy jelszó
+> nem használható, aminek szándékosan szóköz van a szélén.)
+>
+> Az AP mód **5 perc tétlenség** után elalszik (minden HTTP kérés újraindítja a
+> visszaszámlálást), és utána már csak a reset gomb vagy az áramtalanítás
+> ébreszti fel. Fájlírás közben soha nem alszik el.
 > Statikus IP esetén a DNS szervernek a megadott gateway (tartalékként `1.1.1.1`)
 > lesz beállítva, különben a névfeloldás – és így a HTTP-teszt – nem működne.
 > (Az ESP32 `WiFi.config()` STA ágában a DNS-t szó szerint a kapott paraméterből
@@ -298,6 +317,28 @@ Ezért az `initWatchdog()` mindhármat kifejezetten beállítja:
 > Ez a gyakorlatban nem számít: az aszinkron szerver csak AP konfigurációs
 > módban fut, és ott a `loop()` amúgy is ezredmásodpercek alatt körbeér.
 
+### A feliratkozás ellenőrzése
+
+Az `enableLoopWDT()` a core-ban **`void`** (`esp32-hal-misc.c`): ha az
+`esp_task_wdt_add()` hibázik, csak egy belső `log_e()` jelzi, a visszatérési
+értékből semmi. Ez akkor fordulhat elő, ha a TWDT nincs inicializálva
+(`ESP_TASK_WDT_INIT=n`) – ilyenkor az `add()` `ESP_ERR_INVALID_STATE`-et ad.
+
+Ezért az `initWatchdog()`:
+
+1. ha kell, maga hívja az `esp_task_wdt_init()`-et (figyelt task nélkül ez még
+   nem indítja el a timert),
+2. **utána** iratkozik fel – ez a sorrend azért kell, mert az
+   `esp_task_wdt_reconfigure()` csak nem üres tasklistánál indítja újra a
+   timert (`task_wdt.c:595`),
+3. végül `esp_task_wdt_status(NULL)`-lal **visszakérdezi**, hogy a `loop()`
+   tényleg figyelve van-e.
+
+Csak ha ez igaz, írja ki, hogy `Watchdog enabled`. Ha nem, egyértelmű
+figyelmeztetést ad, és **nem etet**: feliratkozás nélkül minden
+`feedLoopWDT()` `ESP_ERR_NOT_FOUND`-ot kapna, amire a core `log_e()`-t hív –
+mérve **100 hibasor percenként** normál működésben, védelem nélkül.
+
 ### Ismétlődő watchdog újraindulás
 
 Ha a program ismételten megakad, az újraindítgatás önmagában nem megoldás.
@@ -360,9 +401,9 @@ Két védelem gondoskodik arról, hogy a mentés ne vesszen el:
 - **Fájlírás közben az eszköz soha nem alszik el** (`savingConfig` jelző), így
   nem maradhat félig kiírt konfiguráció.
 
-## 🚨 Végzetes hiba – a konfiguráció nem tölthető be
+## 🚨 Végzetes hiba – a fájlrendszer nem használható
 
-A wifi beállítások a LittleFS-en vannak. Ha ezek **nem tölthetők be**, a program
+A wifi beállítások a LittleFS-en vannak. Ha ez **nem használható**, a program
 nem fut tovább: nem tesztel, nem kapcsolja a relét, és AP módba sem lép.
 Mindkét LED (`D3` és `D4`) **együtt, gyorsan villog** (5 Hz).
 
@@ -374,11 +415,21 @@ Fontos a megkülönböztetés – a „nincs még konfiguráció" **nem hiba**:
 | A fájlok léteznek, de üresek (wifireset után) | `CONFIG_OK`, üres érték | normális → **AP beállító portál** |
 | A LittleFS nem csatolható | hiba | **hibajelzés**, villogás |
 | A fájl létezik, de nem nyitható / hibás olvasás | `CONFIG_ERROR` | **hibajelzés**, villogás |
+| A wifireset gomb **nem tudta törölni** a mentett adatokat | hiba | **hibajelzés**, villogás |
+
+Az utolsó eset ugyanaz a hibaosztály: ha a fájlrendszer nem írható, akkor új
+konfigurációt sem lehetne menteni. Az újraindítás csak a régi adatokkal hozná
+vissza az eszközt – a gomb kívülről nézve „nem csinálna semmit", és a
+felhasználó soros kábel nélkül sosem tudná meg, miért. Ezért itt sem indulunk
+újra, hanem jelzünk.
 
 Hibajelzés közben:
 
 - a **relé `LOW`** marad, tehát a router végig kap áramot
-- a **gombok élnek**: a reset gomb újraindít, a wifireset gomb törli a mentett adatokat
+- a **reset gomb mindig él**: bármikor újraindítja az eszközt. A wifireset gomb
+  az induláskor felismert hibáknál szintén él (a `loop()` figyeli), a *sikertelen
+  törlés* miatti hibajelzésnél viszont nem – oda épp a wifireset gombtól
+  érkeztünk, önmagát hívná újra
 - a watchdog aktív
 - **5 perc után az eszköz deep sleepbe megy** – és **időzített ébresztés nélkül**.
   Egy sérült fájlrendszer magától nem gyógyul meg, ezért értelmetlen lenne

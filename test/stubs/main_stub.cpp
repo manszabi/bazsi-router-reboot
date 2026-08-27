@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <cstdarg>
 #include <WiFi.h>
 #include <LittleFS.h>
 #include <ESPping.h>
@@ -18,6 +19,8 @@ bool   g_fsWritable = true;
 size_t g_fsCapacity = 0;
 bool   g_fsRemoveOk = true;
 bool   g_fsReadable = true;
+bool   g_fsSilentWriteFail = false;
+bool   g_fsShortRead = false;
 esp_reset_reason_t g_resetReason = ESP_RST_POWERON;
 esp_reset_reason_t esp_reset_reason(void) { return g_resetReason; }
 size_t g_fsUsed() { size_t n = 0; for (auto& kv : g_fs) n += kv.second.size(); return n; }
@@ -29,6 +32,7 @@ int g_httpCode = 200;
 std::string g_httpBody = "Microsoft NCSI";
 int g_httpSize = -2;
 bool g_httpBeginOk = true;
+bool g_httpStall = false;
 bool     g_wdtEnabled = false;
 uint32_t g_wdtTimeoutMs = 0;
 uint32_t g_wdtIdleMask = 0xFFFFFFFF;
@@ -37,21 +41,40 @@ uint32_t g_wdtMaxFeedGap = 0;
 uint32_t g_wdtLastFeed = 0;
 uint32_t g_wdtFeedBeforeEnable = 0;
 bool     g_wdtTrack = false;
-static bool g_wdtInited = true;   // IDF: ESP_TASK_WDT_INIT=y -> boot óta fut
+bool g_wdtInited = true;          // IDF: ESP_TASK_WDT_INIT=y -> boot óta fut
+bool g_wdtInitFails = false;      // esp_task_wdt_init() hibát ad (pl. NO_MEM)
+bool g_wdtReconfigureFails = false;
+uint32_t g_wdtFeedNotSubscribed = 0;  // ennyi log_e() sor menne a soros portra
 
 static void wdtApply(const esp_task_wdt_config_t* c) {
   g_wdtTimeoutMs = c->timeout_ms; g_wdtIdleMask = c->idle_core_mask; g_wdtPanic = c->trigger_panic;
 }
 esp_err_t esp_task_wdt_init(const esp_task_wdt_config_t* c) {
   if (g_wdtInited) return ESP_ERR_INVALID_STATE;
+  if (g_wdtInitFails) { simLog("wdt_init_FAIL"); return ESP_FAIL; }
+  // Az IDF a figyelt taskok listája nélkül NEM indítja el a timert.
   g_wdtInited = true; wdtApply(c); simLog("wdt_init"); return ESP_OK;
 }
 esp_err_t esp_task_wdt_reconfigure(const esp_task_wdt_config_t* c) {
   if (!g_wdtInited) return ESP_ERR_INVALID_STATE;
+  if (g_wdtReconfigureFails) { simLog("wdt_reconfigure_FAIL"); return ESP_FAIL; }
   wdtApply(c); simLog("wdt_reconfigure"); return ESP_OK;
 }
-void enableLoopWDT() { g_wdtEnabled = true; simLog("enableLoopWDT"); }
+// A valódi enableLoopWDT() (esp32-hal-misc.c) void: csak akkor kapcsolja be a
+// loopTaskWDTEnabled-et, ha az esp_task_wdt_add() sikerult. Az add() pedig
+// ESP_ERR_INVALID_STATE-et ad, ha a TWDT nincs inicializalva.
+void enableLoopWDT() {
+  if (!g_wdtInited) { simLog("enableLoopWDT_FAIL"); return; }
+  g_wdtEnabled = true; simLog("enableLoopWDT");
+}
+esp_err_t esp_task_wdt_status(void*) {
+  if (!g_wdtInited) return ESP_ERR_INVALID_STATE;
+  return g_wdtEnabled ? ESP_OK : ESP_ERR_NOT_FOUND;
+}
 void feedLoopWDT() {
+  // Feliratkozas nelkul az esp_task_wdt_reset() ESP_ERR_NOT_FOUND-ot ad,
+  // amire a core log_e()-t hiv - ez lenne az elarasztott soros port.
+  if (!g_wdtEnabled) g_wdtFeedNotSubscribed++;
   if (!g_wdtEnabled) g_wdtFeedBeforeEnable++;
   if (g_wdtTrack) {
     const uint32_t gap = g_millis - g_wdtLastFeed;
@@ -72,8 +95,29 @@ WifiSim wifiSim;
 PingSim pingSim;
 
 void simLog(const std::string& s) { g_log.push_back(s); }
+// A sorvegeken tordel, hogy a printf-fel irt tobbsoros kimenet is ugyanugy
+// keruljon a g_serialLog-ba, mint a println().
+void Print::emit(const char* s) {
+  for (const char* p = s; *p; p++) {
+    if (*p == '\n') { flushLine(); }
+    else if (*p != '\r') { buf_ += *p; }
+  }
+}
+
+size_t Print::printf(const char* f, ...) {
+  char b[512];
+  va_list ap; va_start(ap, f);
+  const int n = vsnprintf(b, sizeof(b), f, ap);
+  va_end(ap);
+  emit(b);
+  return n < 0 ? 0 : (size_t)n;
+}
+
 void Print::flushLine() {
-  if (g_serialEcho) printf("    | %s\n", buf_.c_str());
+  // ::printf, NEM a tagfuggveny! Enelkul a Print::printf hivna sajat magat
+  // (vegtelen rekurzio). Amig a tag no-op volt, ez a sor csendben nem is
+  // csinalt semmit - vagyis a g_serialEcho valojaban sosem mukodott.
+  if (g_serialEcho) ::printf("    | %s\n", buf_.c_str());
   if (g_serialLog.size() < 5000) g_serialLog.push_back(buf_);
   buf_.clear();
 }

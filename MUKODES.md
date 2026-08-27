@@ -13,7 +13,7 @@ Az eszköz mindig pontosan egy üzemmódban van.
 |---|---|---|
 | `MODE_MONITOR` | Van Wi-Fi kapcsolat, vagy épp épül | Internetet tesztel, szükség esetén routert indít újra |
 | `MODE_CONFIG` | Nincs használható Wi-Fi konfiguráció | AP beállító portál (`ESP-<chip>` / `bazsi1234`, `192.168.4.1`) |
-| `MODE_FATAL` | Betölthetetlen konfiguráció, vagy 3 watchdog reset | Mindkét LED villog, semmi más nem fut |
+| `MODE_FATAL` | A fájlrendszer nem használható, vagy 3 watchdog reset | Mindkét LED villog, semmi más nem fut |
 
 ---
 
@@ -119,10 +119,21 @@ portál `/log` oldalán kiírja. Soros kábel nélkül is megtudható, mi tört�
 `RTC_NOINIT_ATTR`-ben van, ezért éli túl a resetet is – pont azokat a hibákat,
 amiket ki akarunk vizsgálni. Mérete 264 bájt a C3 ~8 KB-os RTC memóriájából.
 
-Rögzített események: `BOOT` (a reset okával), `WIFI OK`, `WIFI LOST`,
-`TEST FAIL`, `ROUTER RESET`, `AP MODE`, `CONFIG SAVED`, `SLEEP`, `FATAL`,
-`WDT RESET` – mindegyik uptime bélyeggel és egy paraméterrel (pl. a hiba oka
-vagy a sorszám).
+Minden bejegyzés uptime bélyeget, egy eseménykódot és egy paramétert tartalmaz:
+
+| Esemény | A paraméter jelentése |
+|---|---|
+| `BOOT` | az indulás oka (`esp_reset_reason()`) |
+| `WIFI OK` | hányadik újrapróbálkozási körben sikerült |
+| `WIFI LOST` | `WiFi.status()` a kiesés pillanatában |
+| `TEST FAIL` | a teszt ciklus indexe (csak a hibasorozat **első** tagja) |
+| `ROUTER RESET` | hányadik reset esemény (1–4) |
+| `AP MODE` | 1 = nincs mentett SSID, 2 = hitelesítési hiba, 3 = letelt a 2 nap |
+| `CONFIG SAVED` | 0 |
+| `SLEEP` | 1 = újrapróbálkozás, 2 = tartós internetkiesés, 3 = AP időtúllépés, 4 = végzetes hiba |
+| `FATAL` | 1 = LittleFS csatolás, 2 = konfiguráció olvasás, 3 = watchdog, 4 = a wifireset törlése nem sikerült |
+| `WDT RESET` | hányadik rendellenes újraindulás |
+| `STUCK BUTTON` | 0 = reset gomb, 1 = wifireset gomb |
 
 A `/log` oldal az aktuális állapotot is mutatja: reset ok, watchdog számláló,
 újrapróbálkozási körök, uptime.
@@ -159,7 +170,10 @@ eldőlt (tehát általában 2–3 pinget futtat).
 
 ## 4. Az internet kiesik – router újraindítás
 
-Akkor indul, ha **3 sikertelen teszt** és a **ciklus index > 3** (kb. 4 kör).
+Akkor indul, ha `failedCount >= 3` **és** `cycleIndex > 3`. A kettő közül a
+ciklus index a szűkebb feltétel, ezért a gyakorlatban **5 egymás utáni
+sikertelen teszt** kell hozzá – mérve **2,4 perc** az első hibától a relé
+megszólalásáig.
 
 | Lépés | Időtartam |
 |---|---|
@@ -169,7 +183,7 @@ Akkor indul, ha **3 sikertelen teszt** és a **ciklus index > 3** (kb. 4 kör).
 | Várakozás a router bootolására | **10 perc** (`RESET_DELAY`) |
 | Wi-Fi újracsatlakozás: 3 próba, köztük 30 mp | max. ~2 perc |
 
-**Egy teljes reset ciklus:** ~4 kör teszt (~1 perc) + 90 mp + 10 perc + ~2 perc ≈ **14 perc**
+**Egy teljes reset ciklus:** 5 teszt (2,4 perc) + 90 mp + 10 perc + újracsatlakozás ≈ **14 perc**
 
 ### Ha az újracsatlakozás sem sikerül
 
@@ -208,14 +222,20 @@ Nem várunk további teszt ciklusokat: ha nincs Wi-Fi, a tesztnek nincs értelme
 |---|---|
 | Portál elérhető: `192.168.4.1` | |
 | Tétlenség után deep sleep | **5 perc** (`AP_TIMEOUT_MS`) |
+| Elfogadott IP / gateway | **csak IPv4**, nem `0.0.0.0`, és csak együtt |
+| SSID / jelszó | mentéskor a szélső szóközök levágódnak |
 | Az alvásból ébredés | **csak a reset gombbal** – időzített ébresztés nincs |
 
-Két védelem óvja a mentést:
+Három védelem óvja a mentést:
 
 - **Minden HTTP kérés újraindítja az 5 perces visszaszámlálást.** Ha az utolsó
   pillanatban nyitod meg az oldalt, kapsz még egy teljes időablakot.
 - **Fájlírás közben az eszköz soha nem alszik el**, tehát nem maradhat félig
   kiírt konfiguráció.
+- **Fájlírás közben a gombok sem indítanak újra.** A mentést az aszinkron
+  webszerver taskja végzi, a gombokat viszont a `loop()` figyeli – egy éppen
+  odaeső gombnyomás félbeszakított írást (a wifireset esetén ráadásul egyidejű
+  törlést) okozna. A gombok a mentés befejeztével működnek tovább.
 
 Sikeres mentés után: válasz elküldése, **2 mp** türelmi idő, majd újraindulás.
 Sikertelen mentésnél HTTP 500 és **nincs** újraindulás – a beírt adatok maradnak.
@@ -224,23 +244,36 @@ Sikertelen mentésnél HTTP 500 és **nincs** újraindulás – a beírt adatok 
 
 ## 7. Végzetes hiba – `MODE_FATAL`
 
-| Kiváltó ok | |
-|---|---|
-| A LittleFS nem csatolható | |
-| A konfigurációs fájl létezik, de nem olvasható | |
-| 3 watchdog/panic miatti újraindulás | |
+| Kiváltó ok | Napló |
+|---|:---:|
+| A LittleFS nem csatolható | `FATAL` 1 |
+| A konfigurációs fájl létezik, de nem olvasható | `FATAL` 2 |
+| 3 watchdog/panic miatti újraindulás | `FATAL` 3 |
+| **A wifireset gomb nem tudta törölni a mentett adatokat** | `FATAL` 4 |
 
 > A **hiányzó vagy üres** konfiguráció **nem** végzetes hiba – az első indítás
 > és a wifireset gomb utáni állapot is ilyen. Ilyenkor AP mód indul.
 
+Mind a négy ok ugyanaz a hibaosztály: **a fájlrendszer nem használható**, tehát
+a konfiguráció sem betölteni, sem menteni nem lehet. Ilyen állapotban az eszköz
+nem fut tovább – az újraindítgatás csak elfedné a hibát.
+
 | Viselkedés | Érték |
 |---|---|
-| Mindkét LED együtt villog | **100 mp be / 100 mp ki** (5 Hz) |
+| Mindkét LED együtt villog | **100 ms be / 100 ms ki** (`FATAL_BLINK_MS`, 5 Hz) |
 | Relé | `LOW` – a router végig kap áramot |
 | Állapotgép | nem fut |
-| Gombok | működnek |
-| Deep sleep | **5 perc** után |
-| Ébredés | **csak a reset gombbal** |
+| Gombok | a reset gomb mindig; a wifireset a 4-es oknál nem (lásd lent) |
+| Deep sleep | **5 perc** után (`FATAL_SLEEP_AFTER_MS`) |
+| Ébredés | **csak a reset gombbal** vagy áramtalanítással |
+
+### Hol keletkezik a jelzés
+
+A 4-es ok annyiban különbözik, hogy a gombkezelőből jön, ami **blokkoló
+ciklusokból is futhat** (a `waitWithButtons(RESET_DELAY)` például 10 percig nem
+ad vissza a `loop()`-nak). Ha csak beállítanánk a módot, az eszköz addig tovább
+működne – tesztelne, relét kapcsolna. Ezért a jelzés ott helyben, blokkolva
+történik, és soha nem tér vissza. Kívülről nézve a viselkedés azonos.
 
 ---
 
@@ -257,14 +290,44 @@ Sikertelen mentésnél HTTP 500 és **nincs** újraindulás – a beírt adatok 
 Rendellenesnek számít: `ESP_RST_TASK_WDT`, `ESP_RST_INT_WDT`, `ESP_RST_WDT`,
 `ESP_RST_PANIC`, `ESP_RST_CPU_LOCKUP`.
 
+### Ha a watchdogot nem sikerül élesíteni
+
+Az `enableLoopWDT()` a core-ban `void`: ha a feliratkozás nem sikerül, csak egy
+belső hibaüzenet jelzi. Ezért az indulás után visszakérdezünk
+(`esp_task_wdt_status()`), és **csak akkor** írjuk ki, hogy `Watchdog enabled`,
+ha a `loop()` tényleg figyelve van. Ha nem:
+
+```
+FIGYELEM: a watchdog NEM vedi a loop()-ot (...). A program fut, de
+lefagyas eseten nem indul ujra.
+```
+
+Ilyenkor a firmware **nem etet** – etetés feliratkozás nélkül csak
+hibaüzeneteket öntene a soros portra (mérve 100 sor/perc), védelmet nem adna.
+
 ---
 
 ## 9. Gombok
 
 | Gomb | Pin | Hatás | Feltétel |
 |---|---|---|---|
-| Reset | `D1` = GPIO3 | Azonnali újraindítás; deep sleepből ébreszt | **50 mp** folyamatos nyomás |
-| Wi-Fi reset | `D0` = GPIO2 | Mentett adatok törlése + újraindítás | **50 mp** folyamatos nyomás |
+| Reset | `D1` = GPIO3 | Azonnali újraindítás; deep sleepből ébreszt | **50 ms** folyamatos nyomás (`BUTTON_DEBOUNCE_MS`) |
+| Wi-Fi reset | `D0` = GPIO2 | Mentett adatok törlése + újraindítás | **50 ms** folyamatos nyomás (`BUTTON_DEBOUNCE_MS`) |
+
+A gombokat 10 ms-onként mintavételezzük, és csak a végig lenyomva maradt
+állapotot fogadjuk el – egyetlen zajtüske tehát nem indít újra.
+
+**Fájlírás közben egyik gomb sem hat.** A mentést az aszinkron webszerver
+taskja végzi; egy odaeső gombnyomás félbeszakított írást okozna. A gombok a
+mentés befejeztével működnek tovább (ilyenkor egy új 50 ms-os lenyomás kell).
+
+A wifireset a `/ssid.txt`-t törli **először**: a gomb célja, hogy az eszköz a
+beállító portálon jöjjön fel, és ezt egyedül ez a fájl dönti el.
+
+**Ha a törlés nem sikerül, az végzetes hiba** (7. fejezet, `FATAL` 4). Ilyenkor
+a fájlrendszer nem írható, tehát új konfigurációt sem lehetne menteni – az
+újraindítás csak a régi adatokkal hozná vissza az eszközt, a gomb pedig kívülről
+nézve „nem csinálna semmit". Az eszköz ezért nem indul újra, hanem jelez.
 
 ### Beragadt gomb induláskor
 

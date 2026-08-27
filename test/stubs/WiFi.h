@@ -9,9 +9,15 @@ typedef int wl_status_t;
 #define WIFI_AP 2
 
 // Olvasható HTTP-törzset hordozó kliens (a HTTPClient stub tölti fel)
+// A "beragadt szerver" modellezese: a kapcsolat EL, de nem jon tobb adat.
+// available() = 0 es connected() = true - ilyenkor a valodi socket olvasas a
+// sajat fogadasi timeoutjaig blokkolna, a sketchnek a sajat hataridejevel kell
+// kilepnie.
+extern bool g_httpStall;
+
 class WiFiClient : public Stream {
 public:
-  virtual bool connected() { return pos_ < data_.size(); }
+  virtual bool connected() { return g_httpStall ? true : (pos_ < data_.size()); }
   int read() override { return pos_ < data_.size() ? (unsigned char)data_[pos_++] : -1; }
   int available() override { return (int)(data_.size() - pos_); }
   void setData(const std::string& d) { data_ = d; pos_ = 0; }
@@ -39,6 +45,7 @@ struct WifiSim {
   IPAddress cfgIp, cfgGw, cfgDns1, cfgDns2;
   int beginCount = 0;
   int configCount = 0;
+  bool configFails = false;      // a WiFi.config() hibat adjon vissza
   int softApCount = 0;
   void reset() { *this = WifiSim(); }
 };
@@ -70,6 +77,9 @@ public:
   int RSSI() { return -50; }
   bool config(IPAddress ip, IPAddress gw, IPAddress sn, IPAddress d1 = IPAddress(), IPAddress d2 = IPAddress()) {
     (void)sn;
+    // A valodi NetworkInterface::config() false-t ad, ha nincs netif, vagy ha
+    // a DNS beallitasa hibazik (NetworkInterface.cpp:378, :411).
+    if (wifiSim.configFails) { wifiSim.configCount++; simLog("WiFi.config_FAIL"); return false; }
     wifiSim.staticApplied = true; wifiSim.configCount++;
     wifiSim.cfgIp = ip; wifiSim.cfgGw = gw; wifiSim.cfgDns1 = d1; wifiSim.cfgDns2 = d2;
     simLog("WiFi.config(ip=" + ip.str() + ",gw=" + gw.str() + ",dns1=" + d1.str() + ",dns2=" + d2.str() + ")");

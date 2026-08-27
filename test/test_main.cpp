@@ -10,6 +10,9 @@ extern std::map<std::string, ArRequestHandlerFunction> g_handlers;
 #include <cassert>
 #include <unistd.h>
 #include <sys/wait.h>
+#ifdef COVERAGE_BUILD
+extern "C" void __gcov_dump(void);
+#endif
 
 // --- a sketch globális állapota ---
 void setup(); void loop();
@@ -48,6 +51,7 @@ void resetbutton();
 void wifiresetbutton();
 void waitWithButtons(uint32_t);
 void touchApDeadline();
+void printUptime();
 void startConfigPortal();
 
 static int failures = 0, checks = 0;
@@ -60,6 +64,13 @@ static int failures = 0, checks = 0;
 static bool serialHas(const char* frag) {
   for (auto& l : g_serialLog) if (l.find(frag) != std::string::npos) return true;
   return false;
+}
+
+// Ugyanaz, de a SOROS kimeneten (a Serial.printf-fel irt sorok is itt vannak)
+static int serialIndex(const char* frag) {
+  for (size_t i = 0; i < g_serialLog.size(); i++)
+    if (g_serialLog[i].find(frag) != std::string::npos) return (int)i;
+  return -1;
 }
 
 static int logIndex(const char* frag) {
@@ -1496,6 +1507,658 @@ static void scOV1() {
   CHECK(guard < 400000, "nem ragadt be végtelen ciklusba");
 }
 
+
+// --- A watchdog feliratkozas tenyleges ellenorzese ---------------------------
+// Az enableLoopWDT() (esp32-hal-misc.c) void: ha az esp_task_wdt_add() hibazik,
+// csak egy log_e() jelzi. Ha vakon feltetelezzuk a sikert, ket baj tortenik:
+// (1) azt hisszuk, vedve vagyunk, kozben egy lefagyas eszrevetlen marad,
+// (2) minden feedLoopWDT() ESP_ERR_NOT_FOUND-ot kap -> 10 ms-onkent egy
+//     log_e() sor a soros portra.
+static void scWDT6() {
+  // A TWDT nincs inicializalva (ESP_TASK_WDT_INIT=n). A sketchnek fel kell
+  // huznia, es utana tenylegesen vedenie a loop()-ot.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_wdtInited = false; g_wdtEnabled = false;
+  setup();
+  CHECK(logIndex("wdt_init") >= 0, "a sketch inicializalta a TWDT-t");
+  CHECK(g_wdtEnabled, "a loop task VEGUL fel van iratkozva");
+  CHECK(g_wdtTimeoutMs == 90000 && g_wdtPanic, "90 mp-es timeout, panic bekapcsolva");
+  CHECK(serialHas("Watchdog enabled"), "csak most jelenti sikeresnek");
+
+  // A masik fele: feliratkozas nelkul minden etetes ESP_ERR_NOT_FOUND lenne,
+  // amire a core log_e()-t hiv - 10 ms-onkent egy sor a soros portra.
+  g_wdtFeedNotSubscribed = 0;
+  const uint32_t t0 = g_millis;
+  int guard = 0;
+  try { while (g_millis - t0 < 60u * 1000 && ++guard < 500000) loop(); }
+  catch (...) {}
+  CHECK(g_wdtFeedNotSubscribed == 0, "nincs feliratkozas nelkuli etetes (nincs log_e() aradat)");
+}
+
+static void scWDT7() {
+  // A TWDT nincs inicializalva ES nem is huzhato fel. A feliratkozas tehat
+  // sikertelen - ilyenkor TILOS etetni (az lenne az elarasztott konzol), es
+  // tilos vedelmet allitani.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_wdtInited = false; g_wdtEnabled = false; g_wdtInitFails = true;
+  setup();
+  g_wdtFeedNotSubscribed = 0;
+  const size_t before = g_serialLog.size();
+  const uint32_t t0 = g_millis;
+  int guard = 0;
+  try { while (g_millis - t0 < 60u * 1000 && ++guard < 500000) loop(); }
+  catch (...) {}
+  CHECK(!g_wdtEnabled, "a loop task NINCS feliratkozva");
+  CHECK(!serialHas("Watchdog enabled"), "nem allitja, hogy vedve van");
+  CHECK(serialHas("FIGYELEM"), "kiirja, hogy a watchdog nem vedi a loop()-ot");
+  CHECK(g_wdtFeedNotSubscribed == 0,
+        "egyetlen feliratkozas nelkuli etetes sincs (nincs log_e() aradat)");
+  CHECK(g_serialLog.size() - before < 60,
+        "1 perc alatt sem arasztja el a konzolt");
+}
+
+static void scWDT8() {
+  // A feliratkozas sikerul, de a konfiguralas nem. Ilyenkor a timeout az IDF
+  // 5 mp-es alapertelmezese maradna, ami a 15 mp-ig tarto HTTP teszt alatt
+  // ujrainditana - tehat semmikepp nem szabad sikert jelenteni.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_wdtReconfigureFails = true;
+  setup();
+  CHECK(!serialHas("Watchdog enabled"), "nem jelent sikeres 90 mp-es timeoutot");
+  CHECK(serialHas("FIGYELEM"), "figyelmeztet, hogy nincs vedelem");
+  CHECK(g_wdtEnabled, "a feliratkozas maga megvolt, tehat etetni szabad");
+}
+
+// --- Diagnosztikai naplo: a dokumentalt esemenykodok tenyleg keletkeznek ----
+static void scL4() {
+  // Elso indulas mentett halozat nelkul -> AP mod. A naplobol ennek ki kell
+  // derulnie, kulonben soros kabel nelkul nem tudni, miert all AP modban.
+  coldBoot(false, "", "", "", "");
+  rtcEvMagic = 0; rtcEvNext = 0;
+  setup();
+  CHECK(deviceMode == (DeviceMode)1, "AP mod");
+  bool found = false;
+  for (uint32_t i = 0; i < rtcEvNext && i < 32; i++) {
+    if (rtcEvents[i].code == 6 && rtcEvents[i].param == 1) found = true;
+  }
+  CHECK(found, "AP MODE esemeny a 'nincs mentett SSID' okkal (param=1)");
+}
+
+static void scL5() {
+  // Vegzetes hiba utani elalvas: ez az utolso dolog, ami tortent - a naplobol
+  // meg kell latszania, hogy nem magatol halt meg az eszkoz.
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcEvMagic = 0; rtcEvNext = 0;
+  g_fsMountOk = false;
+  setup();
+  CHECK(deviceMode == (DeviceMode)2, "MODE_FATAL");
+  bool slept = false;
+  int guard = 0;
+  try { while (++guard < 500000) loop(); }
+  catch (DeepSleepSignal&) { slept = true; }
+  CHECK(slept, "5 perc utan elaludt");
+  CHECK(g_wakeupUs == 0, "idozitett ebresztes NINCS");
+  bool found = false;
+  for (uint32_t i = 0; i < rtcEvNext && i < 32; i++) {
+    if (rtcEvents[i].code == 8 && rtcEvents[i].param == 4) found = true;
+  }
+  CHECK(found, "SLEEP esemeny a vegzetes hiba okkal (param=4)");
+}
+
+// --- Felig kitoltott statikus IP --------------------------------------------
+static void scP8() {
+  // IP gateway nelkul: az initWiFi() ilyenkor DHCP-re esik vissza, tehat a
+  // "menj a megadott fix cimre" uzenet hazugsag lenne.
+  coldBoot(false, "", "", "", "");
+  setup();
+  std::string body;
+  int code = postConfig("Halozat", "jelszo123", "192.168.1.200", "", &body);
+  CHECK(code == 500, "IP gateway nelkul -> 500, nem hamis siker");
+  CHECK(body.find("gateway") != std::string::npos, "az indoklas megnevezi a gateway-t");
+  CHECK(!restartPending, "nem indul ujra a hianyos konfiggal");
+
+  code = postConfig("Halozat", "jelszo123", "", "192.168.1.1", &body);
+  CHECK(code == 500, "gateway IP nelkul -> szinten 500");
+
+  code = postConfig("Halozat", "jelszo123", "192.168.1.200", "192.168.1.1", &body);
+  CHECK(code == 200, "mindketto megadva -> 200");
+  CHECK(restartPending, "es most mar ujraindul");
+}
+
+static void scP9() {
+  // A csonkolatlan indoklas: a snprintf() puffere eleg nagy hozza.
+  coldBoot(false, "", "", "", "");
+  setup();
+  std::string body;
+  postConfig("Halozat", "jelszo123", "192.168.1.200", "", &body);
+  CHECK(body.find("probald meg ismet") != std::string::npos,
+        "a hibauzenet vege sem csonkolodik le");
+}
+
+// --- Beragadt szerver: a sajat hatarido tartson ------------------------------
+static void scH5() {
+  // A kapcsolat el, de nem jon tobb adat. A readBounded() nem varhat a socket
+  // sajat fogadasi timeoutjara, mert az nem a mienk - a sajat hataridejevel
+  // kell kilepnie, jocskan a watchdog timeout alatt.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  g_httpCode = 200; g_httpSize = -1; g_httpBody = "Micro";  // fel valasz
+  g_httpStall = true;
+  const uint32_t t0 = g_millis;
+  const bool ok = testInternetHTTP("http://pelda/x", "Microsoft NCSI");
+  const uint32_t elapsed = g_millis - t0;
+  g_httpStall = false;
+  CHECK(!ok, "a csonka valasz nem egyezik");
+  CHECK(elapsed < 5000, "a hatarido ~1,5 mp korul tart, nem 10 mp-ig var");
+  CHECK(elapsed < 90000, "biztosan a watchdog timeout alatt marad");
+}
+
+
+// --- Csak IPv4 hasznalhato --------------------------------------------------
+// Az IPAddress::fromString() az IPv4 utan IPv6-ot is megprobal, ezert a "::1"
+// is ervenyesnek latszik - de a WiFi.config() az uint32_t konverziot hasznalja,
+// ami IPv6-ra 0-t ad. Igy egy IPv6 cim csendben DHCP-t, vegyes paros eseten
+// pedig gateway es DNS nelkuli statikus IP-t eredmenyezne.
+static void scIP1() {
+  // Eloszor: a stub tenyleg ugy viselkedik, mint a core.
+  IPAddress a;
+  CHECK(a.fromString("::1"), "a core-hoz huen a '::1' ervenyes cimnek szamit");
+  CHECK((uint32_t)a == 0, "de az uint32_t konverzio 0-t ad (IPAddress.h:83)");
+  IPAddress b;
+  CHECK(b.fromString("192.168.1.5") && (uint32_t)b != 0, "IPv4 viszont nem nulla");
+}
+
+static void scIP2() {
+  coldBoot(false, "", "", "", "");
+  setup();
+  std::string body;
+  int code = postConfig("Halozat", "jelszo123", "::1", "fe80::1", &body);
+  CHECK(code == 500, "IPv6 cimparos -> 500, nem csendes DHCP");
+  CHECK(!restartPending, "nem indul ujra ervenytelen cimmel");
+
+  // A vegyes paros a rosszabb eset: IPv4 IP + IPv6 gateway eseten a config()
+  // 0.0.0.0-s gateway-t ES 0.0.0.0-s elsodleges DNS-t allitana be.
+  code = postConfig("Halozat", "jelszo123", "192.168.1.200", "fe80::1", &body);
+  CHECK(code == 500, "IPv4 IP + IPv6 gateway -> 500");
+
+  code = postConfig("Halozat", "jelszo123", "0.0.0.0", "192.168.1.1", &body);
+  CHECK(code == 500, "0.0.0.0 sem fogadhato el (a config() DHCP-nek venne)");
+
+  code = postConfig("Halozat", "jelszo123", "192.168.1.200", "192.168.1.1", &body);
+  CHECK(code == 200, "ervenyes IPv4 paros -> 200");
+}
+
+static void scIP3() {
+  // Regebbi firmware IPv6 cimet is elmenthetett: az initWiFi()-nek akkor is
+  // DHCP-re kell esnie, nem gateway nelkuli statikus IP-t beallitania.
+  coldBoot(true, "TestNet", "pw", "192.168.1.200", "fe80::1");
+  setup();
+  CHECK(wifiSim.configCount == 0, "nem hivott config()-ot a hibas parossal");
+  CHECK(!wifiSim.staticApplied, "DHCP-re esett vissza");
+  CHECK(serialHas("Invalid gateway format"), "es meg is mondja, miert");
+  CHECK(wifiSim.beginCount == 1, "de csatlakozni azert megprobalt");
+}
+
+// --- Fajliras kozben nincs ujrainditas --------------------------------------
+static void scP10() {
+  // A felhasznalo eppen menteskor nyomja meg a reset gombot. A mentes kozbeni
+  // ujrainditas felig kiirt konfiguraciot hagyna - ugyanaz a szabaly, mint az
+  // elalvasnal.
+  coldBoot(false, "", "", "", "");
+  setup();
+  savingConfig = true;
+  g_pinRead[3] = LOW;                      // D1 = GPIO3, reset gomb
+  bool restarted = false;
+  try {
+    for (int i = 0; i < 50; i++) { resetbutton(); delay(10); }
+  } catch (RestartSignal&) { restarted = true; }
+  CHECK(!restarted, "mentes kozben NEM indul ujra");
+
+  savingConfig = false;
+  try {
+    // A mentes alatt a debounce sem indult el, tehat itt egy teljes 50 ms-os
+    // lenyomas kell - nehany tized masodperc bosegesen eleg ra.
+    for (int i = 0; i < 20; i++) { resetbutton(); delay(10); }
+  } catch (RestartSignal&) { restarted = true; }
+  CHECK(restarted, "a mentes utan viszont lefut (uj 50 ms debounce utan)");
+}
+
+static void scP11() {
+  // Ugyanez a wifireset gombra: az mentes kozben a fajlokat is torolne, mikozben
+  // az aszinkron task eppen irja oket.
+  coldBoot(false, "", "", "", "");
+  setup();
+  g_fs["/ssid.txt"] = "RegiHalozat";
+  savingConfig = true;
+  g_pinRead[2] = LOW;                      // D0 = GPIO2, wifireset gomb
+  bool restarted = false;
+  try {
+    for (int i = 0; i < 50; i++) { wifiresetbutton(); delay(10); }
+  } catch (RestartSignal&) { restarted = true; }
+  CHECK(!restarted, "mentes kozben NEM indul ujra");
+  CHECK(g_fs["/ssid.txt"] == "RegiHalozat", "es nem is torolte a fajlokat");
+
+  savingConfig = false;
+  try {
+    for (int i = 0; i < 20; i++) { wifiresetbutton(); delay(10); }
+  } catch (RestartSignal&) { restarted = true; }
+  CHECK(restarted, "a mentes utan viszont torol es ujraindit");
+}
+
+
+// --- Amit beirsz, azt is hasznalja -----------------------------------------
+static void scP12() {
+  // A readConfigValue() beolvasaskor levagja a whitespace-t. Ha mentéskor nem
+  // vagnank, a fajlban mas lenne, mint amivel az eszkoz csatlakozik - es a
+  // portal is a nyers erteket visszhangozna.
+  coldBoot(false, "", "", "", "");
+  setup();
+  const int code = postConfig("  MyNetwork  ", "  titok123  ", "", "");
+  CHECK(code == 200, "elfogadja");
+  CHECK(g_fs["/ssid.txt"] == "MyNetwork", "az elmentett SSID mar vagott");
+  CHECK(g_fs["/pass.txt"] == "titok123", "a jelszo is");
+  CHECK(serialHas("SSID set to: MyNetwork"), "es a visszajelzes is a vagott ertek");
+}
+
+static void scP13() {
+  // Csupa szokozbol allo SSID: a vagas utan ures marad. Ilyet nem szabad
+  // sikerkent elfogadni - ujraindulas utan ugyanitt, AP modban kotnenk ki.
+  coldBoot(false, "", "", "", "");
+  setup();
+  std::string body;
+  const int code = postConfig("     ", "jelszo123", "", "", &body);
+  CHECK(code == 500, "csupa szokoz SSID -> 500");
+  CHECK(!restartPending, "nem indul ujra hasznalhatatlan SSID-vel");
+}
+
+
+// --- A LED-ek ne hazudjanak -------------------------------------------------
+static void scLED1() {
+  // A MUKODES.md LED tablazata szerint a reset pulzus alatt MINDKET LED sotet.
+  // A Wi-Fi LED-nek kulonosen: a router ilyenkor aram nelkul van, tehat
+  // kapcsolat sincs. Kabel nelkul a LED az egyetlen visszajelzes.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  CHECK(g_pinState[5] == HIGH, "csatlakozas utan vilagit a Wi-Fi LED (GPIO5)");
+
+  int guard = 0;
+  while (!reset_device() && ++guard < 200000) { feedLoopWDT(); delay(10); }
+  CHECK(guard < 200000, "a reset pulzus lefutott");
+
+  // A pulzus KOZBEN (a relay HIGH es LOW kozott) mindket LED sotet volt.
+  const int relayOn = logIndex("pin7=HIGH");
+  CHECK(relayOn >= 0, "a rele bekapcsolt");
+  bool wifiLedOffInPulse = false, statusLedOffInPulse = false;
+  // Csak a pulzus ablakat nezzuk: a rele bekapcsolasatol a kikapcsolasaig.
+  for (size_t i = (size_t)relayOn; i < g_log.size(); i++) {
+    if (g_log[i] == "pin7=LOW" && (int)i > relayOn) break;
+    if (g_log[i] == "pin5=LOW") wifiLedOffInPulse = true;
+    if (g_log[i] == "pin6=LOW") statusLedOffInPulse = true;
+  }
+  CHECK(statusLedOffInPulse, "a statusz LED sotet a pulzus alatt");
+  CHECK(wifiLedOffInPulse, "a Wi-Fi LED is sotet - nem allitja, hogy van halozat");
+}
+
+
+// ===========================================================================
+// A kovetkezo esetek a lefedettseg-meres (gcov) alapjan keszultek: ezeket az
+// agakat a 111 forgatokonyv egyike sem futtatta le, tehat semmi nem vedte oket.
+// ===========================================================================
+
+// --- A halasztott ujrainditas tenyleg lefut ---------------------------------
+static void scP14() {
+  // A sikeres mentes utan a loop() feladata ujrainditani, miutan a valasz
+  // kiment. Eddig csak azt ellenoriztuk, hogy a jelzo beall - azt nem, hogy
+  // az ujrainditas valoban megtortenik, es hogy a turelmi ido elotte NEM.
+  coldBoot(false, "", "", "", "");
+  setup();
+  CHECK(postConfig("Halozat", "jelszo123", "", "") == 200, "mentes OK");
+  CHECK(restartPending, "ujrainditas beutemezve");
+
+  bool early = false;
+  try {
+    // A turelmi ido (2 mp) alatt meg nem szabad ujraindulnia: a valasznak
+    // ki kell mennie a bongeszo fele.
+    for (int i = 0; i < 150; i++) { loop(); }     // ~1,5 mp
+  } catch (RestartSignal&) { early = true; }
+  CHECK(!early, "a 2 mp-es turelmi ido alatt NEM indul ujra");
+
+  bool restarted = false;
+  try {
+    for (int i = 0; i < 200; i++) { loop(); }     // tovabbi ~2 mp
+  } catch (RestartSignal&) { restarted = true; }
+  CHECK(restarted, "a turelmi ido utan viszont ujraindul");
+}
+
+// --- A naplo cimkei ---------------------------------------------------------
+static void scL6() {
+  // A /log oldal emberi olvasasra szant resze. Ha egy cimke elcsuszna, a
+  // naplo felrevezetne - es eddig csak a BOOT sor volt tesztelve.
+  coldBoot(false, "", "", "", "");
+  rtcEvMagic = 0; rtcEvNext = 0;
+  setup();
+  logEvent((EventCode)2, 7);    // WIFI OK
+  logEvent((EventCode)3, 3);    // WIFI LOST
+  logEvent((EventCode)4, 1);    // TEST FAIL
+  logEvent((EventCode)5, 2);    // ROUTER RESET
+  logEvent((EventCode)7, 0);    // CONFIG SAVED
+  logEvent((EventCode)8, 4);    // SLEEP
+  logEvent((EventCode)9, 3);    // FATAL
+  logEvent((EventCode)10, 2);   // WDT RESET
+  logEvent((EventCode)11, 1);   // STUCK BUTTON
+
+  AsyncWebServerRequest req;
+  g_handlers["/log#1"](&req);
+  const std::string& b = req._body;
+  const char* want[] = { ">BOOT<", ">WIFI OK<", ">WIFI LOST<", ">TEST FAIL<",
+                         ">ROUTER RESET<", ">CONFIG SAVED<", ">SLEEP<",
+                         ">FATAL<", ">WDT RESET<", ">STUCK BUTTON<" };
+  bool all = true;
+  for (const char* w : want) if (b.find(w) == std::string::npos) { all = false; printf("     [info] hianyzik: %s\n", w); }
+  CHECK(all, "minden esemenykod olvashato cimket kap");
+  CHECK(b.find(">?<") == std::string::npos, "nincs ismeretlen kod a naplóban");
+}
+
+static void scL7() {
+  // Ures naplo: a /log oldal ne dobjon tablat fejlec nelkul.
+  coldBoot(false, "", "", "", "");
+  setup();
+  rtcEvMagic = 0; rtcEvNext = 0;      // a setup() BOOT sora utan uritjuk
+  AsyncWebServerRequest req;
+  g_handlers["/log#1"](&req);
+  CHECK(req._body.find("Nincs rogzitett esemeny") != std::string::npos,
+        "ures naplonal ezt irja ki");
+  CHECK(req._body.find("<table") == std::string::npos, "es nem rajzol ures tablat");
+}
+
+// --- A tobbi HTTP vegpont ---------------------------------------------------
+static void scF2() {
+  // Ha a data/ mappa FEL van toltve, a / a fajlt adja vissza, nem a tartalek
+  // urlapot. A tobbi statikus vegpont is eljon.
+  coldBoot(false, "", "", "", "");
+  setup();
+  g_fs["/wifimanager.html"] = "<html>igazi</html>";
+  g_fs["/style.css"] = "body{}";
+  g_fs["/favicon.png"] = "png";
+  AsyncWebServerRequest a; g_handlers["/#1"](&a);
+  CHECK(a._code == 200, "/ -> 200");
+  CHECK(a._body.find("data/") == std::string::npos, "a fajlt adja, nem a tartalek urlapot");
+  AsyncWebServerRequest b; g_handlers["/style.css#1"](&b);
+  CHECK(b._code == 200, "/style.css -> 200");
+  AsyncWebServerRequest c; g_handlers["/favicon.png#1"](&c);
+  CHECK(c._code == 200, "/favicon.png -> 200");
+}
+
+static void scF3() {
+  // Ismeretlen utvonal: 404, es semmikepp nem szivarog ki fajltartalom.
+  coldBoot(false, "", "", "", "");
+  setup();
+  g_fs["/pass.txt"] = "szupertitkos";
+  AsyncWebServerRequest req;
+  g_handlers["404"](&req);
+  CHECK(req._code == 404, "ismeretlen utvonal -> 404");
+  CHECK(req._body.find("szupertitkos") == std::string::npos, "nem szivarog jelszo");
+}
+
+static void scF4() {
+  // Minden vegpont kitolja az AP hataridot - kulonben olvasgatas kozben
+  // elaludna az eszkoz.
+  coldBoot(false, "", "", "", "");
+  setup();
+  g_fs["/style.css"] = "body{}";
+  const uint32_t first = apDeadline;
+  g_millis += 60u * 1000;
+  AsyncWebServerRequest a; g_handlers["/style.css#1"](&a);
+  CHECK(apDeadline > first, "a /style.css is kitolja a hataridot");
+  const uint32_t second = apDeadline;
+  g_millis += 60u * 1000;
+  AsyncWebServerRequest b; g_handlers["/log#1"](&b);
+  CHECK(apDeadline > second, "a /log is kitolja");
+}
+
+// --- Tovabbi validacio ------------------------------------------------------
+static void scP15() {
+  // A HTML maxlength csak a bongeszot koti; egy sajat POST barmit kuldhet.
+  coldBoot(false, "", "", "", "");
+  setup();
+  std::string body;
+  std::string longPass(80, 'x');
+  const int code = postConfig("Halozat", longPass.c_str(), "", "", &body);
+  CHECK(code == 500, "tul hosszu jelszo -> 500");
+  CHECK(body.find("jelszo") != std::string::npos, "az indoklas a jelszot nevezi meg");
+  CHECK(!restartPending, "nem indul ujra");
+}
+
+// --- Monitorozas: a kapcsolat visszajon -------------------------------------
+static void scE6() {
+  // A kapcsolat kiesik, majd a reconnectWifi() visszahozza. Ilyenkor NEM szabad
+  // routert ujrainditani - eddig ez az ag teljesen tesztelet len volt.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  g_httpBody = "Microsoft Connect Test";
+  loop();                                   // firstStart lezarasa
+  rtcRetryRounds = 3;                       // legyen mit nullazni
+  wifiSim.begun = false;                    // a kapcsolat kiesett
+  wifiSim.willConnect = true;               // de azonnal visszajon
+  g_log.clear();
+  int guard = 0;
+  try { while (++guard < 100000 && logIndex("pin7=HIGH") < 0
+               && !serialHas("Beginning Test.")) loop(); }
+  catch (...) {}
+  CHECK(logIndex("pin7=HIGH") < 0, "NEM indit routert, ha visszajott a WiFi");
+  CHECK(serialHas("WIFI RECONNECTED!"), "ujracsatlakozott");
+  CHECK(rtcRetryRounds == 0, "a sikeres teszt nullazza a 2 napos ablakot");
+}
+
+
+// --- A wifireset a legfontosabbat torli eloszor -----------------------------
+static void scX7() {
+  // A "wifireset" celja, hogy az eszkoz a beallito portalon jojjon fel, es ezt
+  // egyedul a /ssid.txt donti el. Ha a torles kozben elmegy az aram, akkor is
+  // a kivant vegallapotban kell maradni - tehat az SSID megy eloszor.
+  coldBoot(true, "TestNet", "pw", "192.168.1.5", "192.168.1.1");
+  setup();
+  g_log.clear(); g_serialLog.clear();       // a setup() sorai ne zavarjanak
+  g_pinRead[2] = LOW;                       // D0 = GPIO2, wifireset
+  try { for (int i = 0; i < 20; i++) { wifiresetbutton(); delay(10); } }
+  catch (RestartSignal&) {}
+  // A clearConfigValue() minden fajlt bejelent ("Clearing file: ..."), tehat
+  // a soros naplo sorrendje mutatja a torles sorrendjet.
+  int iSsid = serialIndex("Clearing file: /ssid.txt");
+  int iPass = serialIndex("Clearing file: /pass.txt");
+  int iIp   = serialIndex("Clearing file: /ip.txt");
+  int iGw   = serialIndex("Clearing file: /gateway.txt");
+  CHECK(iSsid >= 0 && iPass >= 0 && iIp >= 0 && iGw >= 0, "mind a negy fajlt erinti");
+  CHECK(iSsid < iPass && iSsid < iIp && iSsid < iGw, "az SSID torlese az ELSO");
+}
+
+static void scX8() {
+  // Ha a fajlrendszer nem irhato, az eszkoz NEM mukodhet tovabb: a konfiguracio
+  // mentese ugyanigy elbukna, az ujrainditas pedig a regi adatokkal jonne fel.
+  // Ugyanaz a hibaosztaly, mint a tobbi LittleFS hiba -> ugyanaz a kezeles.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  rtcEvMagic = 0; rtcEvNext = 0;
+  g_fsWritable = false; g_fsRemoveOk = false;   // se irni, se torolni nem tud
+  g_pinRead[2] = LOW;
+  g_log.clear();
+  bool restarted = false, slept = false;
+  const uint32_t t0 = g_millis;
+  try { for (int i = 0; i < 200000; i++) { wifiresetbutton(); delay(10); } }
+  catch (RestartSignal&) { restarted = true; }
+  catch (DeepSleepSignal&) { slept = true; }
+
+  CHECK(!restarted, "NEM indul ujra a regi adatokkal");
+  CHECK(slept, "hanem vegzetes hibat jelez, majd elalszik");
+  CHECK(deviceMode == (DeviceMode)2, "MODE_FATAL");
+  CHECK(serialHas("VEGZETES HIBA"), "a soros porton is vegzetes hibat jelent");
+  CHECK(g_wakeupUs == 0, "idozitett ebresztes NINCS - csak gomb vagy aramtalanitas");
+
+  const uint32_t elapsed = g_millis - t0;
+  CHECK(elapsed >= 5u * 60 * 1000 && elapsed < 6u * 60 * 1000,
+        "5 percig jelez, csak utana alszik el");
+
+  bool logged = false;
+  for (uint32_t i = 0; i < rtcEvNext && i < 32; i++)
+    if (rtcEvents[i].code == EV_FATAL_C && rtcEvents[i].param == 4) logged = true;
+  CHECK(logged, "a naploba is bekerul (FATAL, param=4)");
+}
+
+static void scX12() {
+  // A jelzes ugyanaz, mint a tobbi vegzetes hibanal: a ket LED EGYUTT villog
+  // (a beragadt gombnal felvaltva) - igy ranezesre megkulonboztetheto.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  g_fsWritable = false; g_fsRemoveOk = false;
+  g_pinRead[2] = LOW;
+  g_log.clear();
+  try { for (int i = 0; i < 200000; i++) { wifiresetbutton(); delay(10); } }
+  catch (...) {}
+  int together = 0, opposite = 0;
+  for (size_t i = 0; i + 1 < g_log.size(); i++) {
+    // A ket digitalWrite egymas utan jon; a parokat nezzuk.
+    if (g_log[i] == "pin6=HIGH" && g_log[i+1] == "pin5=HIGH") together++;
+    if (g_log[i] == "pin6=LOW"  && g_log[i+1] == "pin5=LOW")  together++;
+    if (g_log[i] == "pin6=HIGH" && g_log[i+1] == "pin5=LOW")  opposite++;
+    if (g_log[i] == "pin6=LOW"  && g_log[i+1] == "pin5=HIGH") opposite++;
+  }
+  CHECK(together > 100, "a ket LED EGYUTT villog (vegzetes hiba jelzese)");
+  CHECK(opposite == 0, "sosem ellentetes fazisban (az a beragadt gomb jele)");
+}
+
+static void scX13() {
+  // A vegzetes jelzes alatt a reset gomb az egyetlen kiut - annak viszont
+  // mukodnie kell, kulonben csak aramtalanitassal lehetne kimaszni.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  g_fsWritable = false; g_fsRemoveOk = false;
+  g_pinRead[2] = LOW;
+  // A reset gombot is nyomva tartjuk. A fatalHalt() blokkol es nem ter vissza,
+  // ezert a teszt ciklusabol menet kozben nem lehetne "megnyomni" - a
+  // felhasznalo viszont barmikor lenyomhatja, tehat eleve nyomva modellezzuk.
+  g_pinRead[3] = LOW;
+  const uint32_t t0 = g_millis;
+  bool restarted = false, slept = false;
+  try { for (int i = 0; i < 200000; i++) { wifiresetbutton(); delay(10); } }
+  catch (RestartSignal&) { restarted = true; }
+  catch (DeepSleepSignal&) { slept = true; }
+  CHECK(restarted, "a reset gomb a hibajelzes alatt is ujraindit");
+  CHECK(!slept, "tehat nem varja ki az 5 percet");
+  CHECK(g_millis - t0 < 5u * 60 * 1000, "meg az 5 perces hatarido elott");
+}
+
+static void scX14() {
+  // Regresszio: a SIKERES torles tovabbra is egyszeru ujrainditas legyen.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  g_pinRead[2] = LOW;
+  bool restarted = false, slept = false;
+  try { for (int i = 0; i < 20; i++) { wifiresetbutton(); delay(10); } }
+  catch (RestartSignal&) { restarted = true; }
+  catch (DeepSleepSignal&) { slept = true; }
+  CHECK(restarted && !slept, "sikeres torles -> ujrainditas, nem hibajelzes");
+  CHECK(deviceMode != (DeviceMode)2, "nem megy MODE_FATAL-ba");
+}
+
+// --- A query-string parameter nem konfiguralhat -----------------------------
+static void scX9() {
+  // A request->params() a GET query parametereket IS visszaadja. Ha ezeket nem
+  // szurnenk ki, egy sima link (/?ssid=...) atirhatna a konfiguraciot.
+  coldBoot(false, "", "", "", "");
+  setup();
+  g_fs["/ssid.txt"] = "EredetiHalozat";
+  AsyncWebServerRequest req;
+  req.addParam("ssid", "TamadoHalozat", false);   // isPost() == false
+  req.addParam("pass", "tamado", false);
+  g_handlers["/#2"](&req);
+  CHECK(g_fs["/ssid.txt"] == "EredetiHalozat", "a query parameter NEM irja at az SSID-t");
+  CHECK(req._code == 500, "SSID nelkuli mentes -> 500");
+  CHECK(!restartPending, "es nem indit ujra");
+}
+
+// --- Egy napnal hosszabb uptime ---------------------------------------------
+static void scX10() {
+  // Az uptime kiirasnak kulon aga van 1 napon tul. Egy 24/7-ben futo eszkoznel
+  // ez az ag lesz a normalis - eddig egyetlen teszt sem jart benne.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  const size_t before = g_serialLog.size();
+  g_millis = 3u * 86400u * 1000u + 5u * 3600u * 1000u + 7u * 60u * 1000u + 9u * 1000u;
+  printUptime();
+  bool found = false;
+  for (size_t i = before; i < g_serialLog.size(); i++)
+    if (g_serialLog[i].find("Uptime: 3d 5h 7m 9s") != std::string::npos) found = true;
+  CHECK(found, "3 nap 5 ora 7 perc 9 mp helyesen jelenik meg");
+}
+
+// --- Sikertelen statikus IP konfiguralas ------------------------------------
+static void scX11() {
+  // Ha a WiFi.config() elbukik, akkor sem szabad elvernie a csatlakozast:
+  // DHCP-vel meg mindig mukodhet az eszkoz.
+  coldBoot(true, "TestNet", "pw", "192.168.1.5", "192.168.1.1");
+  wifiSim.configFails = true;
+  setup();
+  CHECK(serialHas("STA Failed to configure"), "jelzi a hibat");
+  CHECK(wifiSim.beginCount >= 1, "de azert megprobal csatlakozni");
+  CHECK(deviceMode == (DeviceMode)0, "es monitor modban marad");
+}
+
+
+// --- A visszaolvasasos ellenorzes tenyleg ved -------------------------------
+static void scFS7() {
+  // A legalattomosabb hiba: a print() a helyes bajtszamot adja vissza, a
+  // tartalom megsem kerul ki. A File::close() es a File::flush() void, tehat
+  // a lezaraskori hibat CSAK a visszaolvasas foghatja meg. Eddig ezt az agat
+  // egyetlen teszt sem futtatta vegig a writeConfigValue()-n keresztul.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  g_fs.clear();
+  g_fsSilentWriteFail = true;
+  const bool ok = writeConfigValue(LittleFS, "/x.txt", "fontos adat");
+  g_fsSilentWriteFail = false;
+  CHECK(!ok, "a 'sikeres' iras is elbukik, ha nem olvashato vissza");
+  CHECK(serialHas("verify FAILED"), "es meg is mondja, miert");
+}
+
+static void scFS8() {
+  // Ugyanez a beallito portalon at: ilyenkor sem szabad sikert jelenteni,
+  // mert az ujraindulas utan hasznalhatatlan konfiguracioval jonne fel.
+  coldBoot(false, "", "", "", "");
+  setup();
+  g_fsSilentWriteFail = true;
+  std::string body;
+  const int code = postConfig("Halozat", "jelszo123", "", "", &body);
+  g_fsSilentWriteFail = false;
+  CHECK(code == 500, "nema irashiba -> 500, nem hamis siker");
+  CHECK(!restartPending, "es nem indul ujra hasznalhatatlan konfiggal");
+}
+
+static void scFS9() {
+  // Csonka olvasas: a fajl letezik, de kevesebb bajt jon vissza, mint amennyi
+  // a merete. Ilyenkor NEM szabad a csonka erteket ervenyes konfigkent venni.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_fsShortRead = true;
+  try { setup(); } catch (DeepSleepSignal&) {}
+  g_fsShortRead = false;
+  CHECK(deviceMode == (DeviceMode)2, "MODE_FATAL - serult konfig");
+  CHECK(serialHas("short read"), "jelzi a csonka olvasast");
+  CHECK(wifiSim.beginCount == 0, "es meg csak meg sem probal csatlakozni");
+}
+
+static void scFS10() {
+  // A fileMatches() ket tovabbi elbukasi modja: nem nyithato meg a fajl, es
+  // maskora a merete. Egyik sem szamithat egyezesnek.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  g_fs["/m.txt"] = "hosszabb tartalom";
+  CHECK(!fileMatches(LittleFS, "/m.txt", "rovid", 5), "elteroo meret -> nem egyezik");
+  CHECK(!fileMatches(LittleFS, "/nincs.txt", "barmi", 5), "hianyzo fajl -> nem egyezik");
+  g_fsReadable = false;
+  CHECK(!fileMatches(LittleFS, "/m.txt", "hosszabb tartalom", 17),
+        "olvashatatlan fajl -> nem egyezik");
+  g_fsReadable = true;
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -1511,14 +2174,14 @@ static const Scenario kScenarios[] = {
   { "S2: alvás előtt minden kimenet biztonságos állapotba kerül", sc10 },
   { "S4: a gomb-ébresztés csak RTC-képes lábon működik (C3: GPIO0-5)", sc11 },
   { "S3: ébredés = teljes újraindulás, a számlálók nullázódnak", sc12 },
-  { "R1: a reset pulzus tényleg 90 másodperc (regresszió a fő hibára)", sc13 },
-  { "R2: az 5. reset esemény deep sleepet vált ki", sc14 },
+  { "RL1: a reset pulzus tényleg 90 másodperc (regresszió a fő hibára)", sc13 },
+  { "RL2: az 5. reset esemény deep sleepet vált ki", sc14 },
   { "H1: a záró CR/LF nem buktatja el az egyezést", sc15 },
   { "H2: eltérő tartalom és hibás státusz elbukik", sc16 },
   { "H3: captive portal nagy válaszát el sem olvassa", sc17 },
   { "H4: ismeretlen hosszú (chunked) válasz is korlátozva olvasódik", sc18 },
-  { "P1: 2 sikeres ping után korán kilép", sc19 },
-  { "P2: csupa sikertelen ping - a 3. után eldől", sc20 },
+  { "PG1: 2 sikeres ping után korán kilép", sc19 },
+  { "PG2: csupa sikertelen ping - a 3. után eldől", sc20 },
   { "C1: konfig írás/olvasás oda-vissza, csonkítással", sc21 },
   { "B1: egyetlen zajtüske nem indítja újra az eszközt", sc22 },
   { "F1: hiányzó wifimanager.html esetén is van beállító űrlap", sc23 },
@@ -1593,6 +2256,42 @@ static const Scenario kScenarios[] = {
   { "SER2: internet kiesés soros terhelése", scSER2 },
   { "SER3: AP és hibajelző mód néma", scSER3 },
   { "OV1: több reset ciklus, számlálók korlátosak", scOV1 },
+  { "WDT6: nem futó TWDT esetén a sketch felhúzza és tényleg feliratkozik", scWDT6 },
+  { "WDT7: sikertelen feliratkozásnál nem etet és nem hazudik védelmet", scWDT7 },
+  { "WDT8: sikertelen konfigurálásnál sem jelent 90 mp-es védelmet", scWDT8 },
+  { "L4: 'nincs mentett SSID' AP mód is bekerül a naplóba", scL4 },
+  { "L5: végzetes hiba utáni elalvás is bekerül a naplóba", scL5 },
+  { "P8: statikus IP gateway nélkül nem fogadható el sikerként", scP8 },
+  { "P9: a hosszú hibaindoklás nem csonkolódik", scP9 },
+  { "H5: beragadt szervernél a saját olvasási határidő tart", scH5 },
+  { "IP1: a stub ugyanúgy viselkedik, mint a core IPAddress-e", scIP1 },
+  { "IP2: IPv6 és 0.0.0.0 cím nem fogadható el a portálon", scIP2 },
+  { "IP3: mentett IPv6 gateway esetén DHCP, nem csonka statikus konfig", scIP3 },
+  { "P10: mentés közben a reset gomb nem indít újra", scP10 },
+  { "P11: mentés közben a wifireset gomb nem töröl és nem indít újra", scP11 },
+  { "P12: a mentett érték megegyezik azzal, amit az eszköz használni fog", scP12 },
+  { "P13: csupa szóközből álló SSID nem fogadható el", scP13 },
+  { "LED1: a router áramtalanításakor mindkét LED sötét", scLED1 },
+  { "P14: a halasztott újraindítás a türelmi idő UTÁN fut le", scP14 },
+  { "L6: minden eseménykód olvasható címkét kap a /log oldalon", scL6 },
+  { "L7: üres napló esetén nincs üres táblázat", scL7 },
+  { "F2: feltöltött data/ esetén a fájlokat szolgálja ki", scF2 },
+  { "F3: ismeretlen útvonal 404, nem szivárog fájltartalom", scF3 },
+  { "F4: minden végpont kitolja az AP határidőt", scF4 },
+  { "P15: túl hosszú jelszó elutasítva (a maxlength csak a böngészőt köti)", scP15 },
+  { "E6: visszatérő WiFi esetén nincs felesleges router reset", scE6 },
+  { "X7: a wifireset az SSID-t törli először", scX7 },
+  { "X8: sikertelen wifireset törlés végzetes hiba, nem újraindítás", scX8 },
+  { "X9: query-string paraméter nem írhatja át a konfigurációt", scX9 },
+  { "X10: egy napnál hosszabb uptime helyesen jelenik meg", scX10 },
+  { "X11: sikertelen WiFi.config() után is megpróbál csatlakozni", scX11 },
+  { "X12: a sikertelen törlés jelzése együtt villogó LED-ek", scX12 },
+  { "X13: a reset gomb a hibajelzés alatt is működik", scX13 },
+  { "X14: a sikeres törlés továbbra is sima újraindítás", scX14 },
+  { "FS7: néma írási hiba - a visszaolvasás fogja meg", scFS7 },
+  { "FS8: néma írási hiba a portálon sem jelent sikert", scFS8 },
+  { "FS9: csonka olvasás -> végzetes hiba, nem csonka konfig", scFS9 },
+  { "FS10: a fileMatches() minden elbukási módja", scFS10 },
 };
 
 
@@ -1618,6 +2317,11 @@ static Result runIsolated(const Scenario& sc) {
     (void)n;
     close(fds[1]);
     fflush(stdout);
+#ifdef COVERAGE_BUILD
+    // A gyerekprocessz _exit()-tel lep ki, ami NEM uriti a gcov szamlalokat.
+    // Lefedettseg-meresnel tehat kezzel kell kiirni oket.
+    __gcov_dump();
+#endif
     _exit(0);
   }
   close(fds[1]);

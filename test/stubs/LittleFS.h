@@ -8,6 +8,13 @@ extern bool   g_fsWritable;   // false = minden megnyitás írásra elbukik
 extern size_t g_fsCapacity;   // 0 = korlátlan; egyébként a tárolható összméret
 extern bool   g_fsRemoveOk;   // a remove() sikerül-e
 extern bool   g_fsReadable;   // false = a létező fájl sem nyitható olvasásra
+// A legalattomosabb hiba: az írás a helyes bájtszámot adja vissza, a tartalom
+// mégsem kerül ki. Pontosan ezért nem elég a print() visszatérési értéke - a
+// File::close() és a File::flush() ugyanis void, tehát a lezáráskori hibát
+// másképp nem lehet észrevenni. Csak a visszaolvasás fogja meg.
+extern bool   g_fsSilentWriteFail;
+// A méret szerint kért olvasás kevesebb bájtot ad vissza (sérült fájlrendszer).
+extern bool   g_fsShortRead;
 extern size_t g_fsUsed();
 
 class File : public Stream {
@@ -22,6 +29,7 @@ public:
   size_t size() { return data_.size(); }
   size_t read(uint8_t* b, size_t n) {
     size_t c = n < data_.size() - pos_ ? n : data_.size() - pos_;
+    if (g_fsShortRead && c > 0) c--;      // sérült FS: rövidebb olvasás
     memcpy(b, data_.data() + pos_, c); pos_ += c; return c;
   }
   // Szimulált írás: a kapacitás túllépésekor rövidebb visszatérési érték,
@@ -39,6 +47,7 @@ public:
         return want.size();
       }
     }
+    if (g_fsSilentWriteFail) return want.size();   // "sikeres" írás, üres fájl
     g_fs[path_] = want;
     return want.size();
   }

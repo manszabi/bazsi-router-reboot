@@ -13,11 +13,26 @@ A suite **kétszer** fut: az ESP32 Arduino 3.3.11 által használt **IDF 5**-ös
 ágon, és az **IDF 6**-os ágon is – a deep sleep gomb-ébresztés API-ját ugyanis
 az IDF 6 átnevezte, és a sketch mindkét nevet kezeli.
 
-Egyetlen forgatókönyv futtatása név-előtag alapján:
+A memóriahibákat és a definiálatlan viselkedést külön cél fogja meg – ugyanaz
+a forgatókönyv-halmaz, ASan + UBSan alatt:
 
 ```bash
-./build/run W3      # csak a "W3: statikus IP ..." eset
-./build/run S       # minden sleep teszt
+make san
+```
+
+A sorlefedettség megmutatja, mely ágakat **nem futtatja egyetlen forgatókönyv
+sem** – oda ugyanis semmi nem néz rá:
+
+```bash
+make cov
+```
+
+Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` után áll elő):
+
+```bash
+./build/run-idf5 W3     # csak a "W3: statikus IP ..." eset
+./build/run-idf5 S      # minden sleep teszt
+./build/run-idf6 SN     # ugyanaz az IDF 6-os ágon
 ```
 
 ## Hogyan működik
@@ -38,30 +53,53 @@ Egyetlen forgatókönyv futtatása név-előtag alapján:
 
 ## Lefedett esetek
 
+**131 forgatókönyv, 411 ellenőrzés. Sorlefedettség: 98,47%.**
+
 | | |
 |---|---|
 | `W1`–`W9` | Wi-Fi: konfig portál, DHCP vs. statikus IP, DNS, timeout, újracsatlakozás, netif-elvesztés |
 | `S1`–`S4` | Deep sleep: beragadt gomb, kimenetek állapota alvás előtt, ébresztőforrások, RTC-láb megkötés |
-| `R1`–`R2` | Relé: a 90 másodperces reset pulzus hossza, elalvás N reset után |
-| `H1`–`H4` | HTTP teszt: CR/LF vágás, hibás státusz, captive portal, chunked válasz |
-| `P1`–`P2` | Ping teszt: 2-a-4-ből szabály és korai kilépés |
+| `RL1`–`RL2` | Relé: a 90 másodperces reset pulzus hossza, elalvás N reset után |
+| `H1`–`H5` | HTTP teszt: CR/LF vágás, hibás státusz, captive portal, chunked válasz, beragadt szerver |
+| `PG1`–`PG2` | Ping teszt: 2-a-4-ből szabály és korai kilépés |
 | `C1` | Konfig fájlok írása/olvasása, csonkítás, hiányzó fájl |
 | `B1` | Gomb debounce: zajtüske vs. tartós nyomás |
-| `F1` | Tartalék beállító űrlap, ha a `data/` mappa nincs feltöltve |
-| `SB1`–`SB4` | Beragadt gomb: mindkét gomb, váltakozó LED-villogás, naplózás |
-| `R1`–`R4` | Újrapróbálkozási politika: rossz jelszó vs. hiányzó hálózat, 2 napos határ |
-| `L1`–`L4` | Diagnosztikai napló: rögzítés, /log oldal, körpuffer, spam-védelem |
-| `PO1`–`PO3` | Áramszünet: mekkora router-indulási késést tolerál |
-| `X1`–`X6` | Határesetek: gomb a relé pulzus közben, nyílt hálózat, SSID/jelszó határértékek |
-| `CPU1`–`CPU2` | A loop() nem pörgeti a CPU-t a várakozó állapotokban |
-| `P1`–`P7` | Beállító portál mentése: validáció, írási hiba, jelszó-szivárgás, határidő |
-| `E1`–`E5` | Végponttól végpontig: egészséges ciklus, router reset, AP mód, gombok |
-| `WF1`–`WF5` | Csatlakozási hiba: újrapróbálkozás vs. AP portál, RTC-számláló |
-| `FS1`–`FS6` | LittleFS hibák: csatolás, írásvédettség, megtelt tár, sérült tartalom, törlés tartalék útvonala |
-| `FT1`–`FT6` | Végzetes hiba: betölthetetlen konfig vs. „nincs még konfig", LED-villogás, gombok |
+| `F1`–`F4` | Webszerver: tartalék űrlap, feltöltött `data/`, 404, AP-határidő kitolása |
+| `WDT1`–`WDT8` | Watchdog: konfiguráció, etetés a hosszú blokkolások alatt, `delay()` vs. CPU-pörgetés, a feliratkozás tényleges ellenőrzése |
 | `SN1`–`SN2` | Biztonsági háló: ha a gomb-ébresztés armolása hibázik, időzítő |
+| `FS1`–`FS10` | LittleFS hibák: csatolás, írásvédettség, megtelt tár, **néma írási hiba**, csonka olvasás, törlés tartalék útvonala |
+| `FT1`–`FT8` | Végzetes hiba: betölthetetlen konfig vs. „nincs még konfig", LED-villogás, gombok |
+| `WF1`–`WF6` | Csatlakozási hiba: újrapróbálkozás vs. AP portál, RTC-számláló |
 | `WD1`–`WD6` | Ismétlődő watchdog újraindulás: számlálás, végzetes leállás, nullázási feltételek |
-| `WDT1`–`WDT4` | Watchdog: konfiguráció, etetés a hosszú blokkolások alatt, `delay()` vs. CPU-pörgetés |
+| `E1`–`E6` | Végponttól végpontig: egészséges ciklus, router reset, AP mód, gombok, visszatérő WiFi |
+| `P1`–`P15` | Beállító portál mentése: validáció, írási hiba, jelszó-szivárgás, határidő, IP+gateway páros, whitespace, mentés közbeni gombnyomás, halasztott újraindítás |
+| `CPU1`–`CPU2` | A loop() nem pörgeti a CPU-t a várakozó állapotokban |
+| `X1`–`X14` | Határesetek: gomb a relé pulzus közben, nyílt hálózat, SSID/jelszó határértékek, wifireset törlési sorrend és **sikertelen törlés → végzetes hiba**, query-paraméter, 1 napnál hosszabb uptime |
+| `PO1`–`PO3` | Áramszünet: mekkora router-indulási késést tolerál |
+| `R1`–`R4` | Újrapróbálkozási politika: rossz jelszó vs. hiányzó hálózat, 2 napos határ |
+| `L1`–`L7` | Diagnosztikai napló: rögzítés, /log oldal, körpuffer, spam-védelem, esemény-kódok, minden címke, üres napló |
+| `SB1`–`SB4` | Beragadt gomb: mindkét gomb, váltakozó LED-villogás, naplózás |
+| `SER1`–`SER3` | Soros kimenet terhelése: nem árasztja el a konzolt |
+| `OV1` | Számlálók korlátosak több reset cikluson át |
+| `IP1`–`IP3` | Csak IPv4 fogadható el (IPv6 és `0.0.0.0` nem) |
+| `LED1` | A router áramtalanításakor egyik LED sem hazudik |
+
+A név-előtag **prefix**, nem pontos egyezés: a `P1` így a `P1`, `P10`–`P15`
+eseteket is futtatja.
+
+### Ami szándékosan fedetlen
+
+A `make cov` hét sort jelez, mindegyik védekező vagy bizonyíthatóan
+elérhetetlen – ezeket **nem** kell tesztelni:
+
+| Hol | Miért nem érhető el |
+|---|---|
+| `eventName()` `default` ága | minden létező eseménykódnak van címkéje (az `L6` ezt ellenőrzi) |
+| `readConfigValue()` `file.close()` a könyvtár-ágon | a stub nem tud könyvtárat adni |
+| `readBounded()` két `break`-je | védekező ág arra, ha az `available()` hazudik |
+| `testInternetPing()` záró `return`-je | a ciklus minden ága korábban visszatér (az utolsó körben `remaining == 0`) |
+| POST `!fsReady` ága | ha a LittleFS nem csatolható, a `setup()` `MODE_FATAL`-ba megy, és a portál el sem indul |
+| `FAILURE_STATE` záró `break`-je | előtte `wifiGiveUp()` vagy módváltás történik |
 
 ## Fontos
 
