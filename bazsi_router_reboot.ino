@@ -235,7 +235,8 @@ enum EventCode : uint8_t {
   EV_AP_MODE = 6,       // param: ok (1=nincs SSID 2=auth hiba 3=2 nap letelt)
   EV_CONFIG_SAVED = 7,  // param: 0
   EV_SLEEP = 8,         // param: ok (1=retry 2=internet 3=AP timeout 4=fatal)
-  EV_FATAL = 9,         // param: ok (1=FS mount 2=konfig olvasás 3=watchdog)
+  EV_FATAL = 9,         // param: ok (1=FS mount 2=konfig olvasás 3=watchdog
+                        //           4=wifireset törlés sikertelen)
   EV_WDT_RESET = 10,    // param: hányadik watchdog reset
   EV_STUCK_BUTTON = 11  // param: 0 = reset gomb, 1 = wifireset gomb
 };
@@ -991,14 +992,23 @@ void wifiresetbutton() {
   if (now - timing.wifiResetBtnDownSince >= BUTTON_DEBOUNCE_MS) {
     Serial.println("WIFIRESET button is pulling down!");
     Serial.println("RESET saved wifi data!");
+    // FONTOS a sorrend: az SSID megy ELŐSZÖR. A "wifireset" célja, hogy az
+    // eszköz a beállító portálon jöjjön fel, és ezt egyedül a /ssid.txt dönti
+    // el (setup(): ha üres az SSID -> AP mód). Ha a törlés közben elmegy az
+    // áram, így a legvalószínűbb, hogy a kívánt végállapotba kerülünk.
+    // A &= szándékosan nem rövidzáras: mind a négy törlés lefut akkor is, ha
+    // valamelyik elbukik.
     bool cleared = true;
-    cleared &= clearConfigValue(LittleFS, gatewayPath);
-    cleared &= clearConfigValue(LittleFS, ipPath);
-    cleared &= clearConfigValue(LittleFS, passPath);
     cleared &= clearConfigValue(LittleFS, ssidPath);
+    cleared &= clearConfigValue(LittleFS, passPath);
+    cleared &= clearConfigValue(LittleFS, ipPath);
+    cleared &= clearConfigValue(LittleFS, gatewayPath);
     if (!cleared) {
-      // Az újraindítás után a régi adatokkal jönne fel - legalább tudja a felhasználó.
+      // Az újraindítás után a régi adatokkal jönne fel - legalább tudja a
+      // felhasználó, és a diagnosztikai naplóban is nyoma marad. (Enélkül ez
+      // teljesen néma hiba lenne: a gomb "nem csinál semmit".)
       Serial.println("!!! A mentett wifi adatok törlése NEM sikerült !!!");
+      logEvent(EV_FATAL, 4);
     }
     Serial.println("RESTART ESP32C3 device.");
     Serial.flush();

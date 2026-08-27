@@ -131,7 +131,7 @@ Minden bejegyzés uptime bélyeget, egy eseménykódot és egy paramétert tarta
 | `AP MODE` | 1 = nincs mentett SSID, 2 = hitelesítési hiba, 3 = letelt a 2 nap |
 | `CONFIG SAVED` | 0 |
 | `SLEEP` | 1 = újrapróbálkozás, 2 = tartós internetkiesés, 3 = AP időtúllépés, 4 = végzetes hiba |
-| `FATAL` | 1 = LittleFS csatolás, 2 = konfiguráció olvasás, 3 = watchdog |
+| `FATAL` | 1 = LittleFS csatolás, 2 = konfiguráció olvasás, 3 = watchdog, 4 = a wifireset törlése nem sikerült |
 | `WDT RESET` | hányadik rendellenes újraindulás |
 | `STUCK BUTTON` | 0 = reset gomb, 1 = wifireset gomb |
 
@@ -298,8 +298,20 @@ hibaüzeneteket öntene a soros portra (mérve 100 sor/perc), védelmet nem adna
 
 | Gomb | Pin | Hatás | Feltétel |
 |---|---|---|---|
-| Reset | `D1` = GPIO3 | Azonnali újraindítás; deep sleepből ébreszt | **50 mp** folyamatos nyomás |
-| Wi-Fi reset | `D0` = GPIO2 | Mentett adatok törlése + újraindítás | **50 mp** folyamatos nyomás |
+| Reset | `D1` = GPIO3 | Azonnali újraindítás; deep sleepből ébreszt | **50 ms** folyamatos nyomás (`BUTTON_DEBOUNCE_MS`) |
+| Wi-Fi reset | `D0` = GPIO2 | Mentett adatok törlése + újraindítás | **50 ms** folyamatos nyomás (`BUTTON_DEBOUNCE_MS`) |
+
+A gombokat 10 ms-onként mintavételezzük, és csak a végig lenyomva maradt
+állapotot fogadjuk el – egyetlen zajtüske tehát nem indít újra.
+
+**Fájlírás közben egyik gomb sem hat.** A mentést az aszinkron webszerver
+taskja végzi; egy odaeső gombnyomás félbeszakított írást okozna. A gombok a
+mentés befejeztével működnek tovább (ilyenkor egy új 50 ms-os lenyomás kell).
+
+A wifireset a `/ssid.txt`-t törli **először**: a gomb célja, hogy az eszköz a
+beállító portálon jöjjön fel, és ezt egyedül ez a fájl dönti el. Ha a törlés
+nem sikerül, az eszköz a régi adatokkal indul újra – ez a soros porton és a
+diagnosztikai naplóban is megjelenik (`FATAL`, paraméter 4).
 
 ### Beragadt gomb induláskor
 

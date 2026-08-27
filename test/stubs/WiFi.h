@@ -45,6 +45,7 @@ struct WifiSim {
   IPAddress cfgIp, cfgGw, cfgDns1, cfgDns2;
   int beginCount = 0;
   int configCount = 0;
+  bool configFails = false;      // a WiFi.config() hibat adjon vissza
   int softApCount = 0;
   void reset() { *this = WifiSim(); }
 };
@@ -76,6 +77,9 @@ public:
   int RSSI() { return -50; }
   bool config(IPAddress ip, IPAddress gw, IPAddress sn, IPAddress d1 = IPAddress(), IPAddress d2 = IPAddress()) {
     (void)sn;
+    // A valodi NetworkInterface::config() false-t ad, ha nincs netif, vagy ha
+    // a DNS beallitasa hibazik (NetworkInterface.cpp:378, :411).
+    if (wifiSim.configFails) { wifiSim.configCount++; simLog("WiFi.config_FAIL"); return false; }
     wifiSim.staticApplied = true; wifiSim.configCount++;
     wifiSim.cfgIp = ip; wifiSim.cfgGw = gw; wifiSim.cfgDns1 = d1; wifiSim.cfgDns2 = d2;
     simLog("WiFi.config(ip=" + ip.str() + ",gw=" + gw.str() + ",dns1=" + d1.str() + ",dns2=" + d2.str() + ")");

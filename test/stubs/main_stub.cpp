@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <cstdarg>
 #include <WiFi.h>
 #include <LittleFS.h>
 #include <ESPping.h>
@@ -18,6 +19,8 @@ bool   g_fsWritable = true;
 size_t g_fsCapacity = 0;
 bool   g_fsRemoveOk = true;
 bool   g_fsReadable = true;
+bool   g_fsSilentWriteFail = false;
+bool   g_fsShortRead = false;
 esp_reset_reason_t g_resetReason = ESP_RST_POWERON;
 esp_reset_reason_t esp_reset_reason(void) { return g_resetReason; }
 size_t g_fsUsed() { size_t n = 0; for (auto& kv : g_fs) n += kv.second.size(); return n; }
@@ -92,8 +95,29 @@ WifiSim wifiSim;
 PingSim pingSim;
 
 void simLog(const std::string& s) { g_log.push_back(s); }
+// A sorvegeken tordel, hogy a printf-fel irt tobbsoros kimenet is ugyanugy
+// keruljon a g_serialLog-ba, mint a println().
+void Print::emit(const char* s) {
+  for (const char* p = s; *p; p++) {
+    if (*p == '\n') { flushLine(); }
+    else if (*p != '\r') { buf_ += *p; }
+  }
+}
+
+size_t Print::printf(const char* f, ...) {
+  char b[512];
+  va_list ap; va_start(ap, f);
+  const int n = vsnprintf(b, sizeof(b), f, ap);
+  va_end(ap);
+  emit(b);
+  return n < 0 ? 0 : (size_t)n;
+}
+
 void Print::flushLine() {
-  if (g_serialEcho) printf("    | %s\n", buf_.c_str());
+  // ::printf, NEM a tagfuggveny! Enelkul a Print::printf hivna sajat magat
+  // (vegtelen rekurzio). Amig a tag no-op volt, ez a sor csendben nem is
+  // csinalt semmit - vagyis a g_serialEcho valojaban sosem mukodott.
+  if (g_serialEcho) ::printf("    | %s\n", buf_.c_str());
   if (g_serialLog.size() < 5000) g_serialLog.push_back(buf_);
   buf_.clear();
 }

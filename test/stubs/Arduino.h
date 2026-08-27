@@ -118,9 +118,13 @@ public:
   size_t println(unsigned long v) { buf_ += std::to_string(v); flushLine(); return 0; }
   size_t println(long v) { buf_ += std::to_string(v); flushLine(); return 0; }
   size_t println() { flushLine(); return 0; }
-  size_t printf(const char* f, ...) { (void)f; return 0; }
+  // A valodi Print::printf formaz es kiir. Ha ezt no-opkent hagyjuk, a
+  // Serial.printf()-fel irt diagnosztika (konfig fajlok irasa/olvasasa/torlese,
+  // POST parameterek) LATHATATLAN a tesztek szamara - vagyis ellenorizhetetlen.
+  size_t printf(const char* f, ...);
 protected:
   void flushLine();
+  void emit(const char* s);
   std::string buf_;
 };
 
