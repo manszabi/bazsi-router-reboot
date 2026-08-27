@@ -283,6 +283,7 @@ bool reset_device();
 void logEvent(EventCode code, uint16_t param);
 void startConfigPortal();
 void enterFatal(const char* reason);
+void fatalHalt(const char* reason);
 void enterDeepSleep(uint64_t timerUs);
 bool initWiFi();
 bool reconnectWifi();
@@ -948,6 +949,37 @@ void fatalSleep() {
   enterDeepSleep(0);
 }
 
+// Végzetes hiba egy BLOKKOLÓ környezetből (a gombkezelőkből).
+//
+// Az enterFatal() csak beállítja a módot, a jelzést pedig a loop() végzi. A
+// gombkezelők viszont mély blokkoló ciklusokból is futnak - a
+// waitWithButtons(RESET_DELAY) például 10 percig nem ad vissza a loop()-nak.
+// Addig az eszköz vidáman tovább működne: tesztelne, relét kapcsolna, aludna.
+// Ezért itt helyben, blokkolva jelzünk, és SOHA nem térünk vissza - pontosan
+// úgy, ahogy az eddigi ESP.restart() sem tért vissza ebből az ágból.
+void fatalHalt(const char* reason) {
+  enterFatal(reason);  // mód, relé LOW (a router kapjon áramot), üzenetek
+  // Az enterFatal() altalanos uzenete a loop()-vezerelt esetre igaz, ahol
+  // mindket gomb el. Itt csak a reset gomb - ezt ki kell mondani.
+  Serial.println("FIGYELEM: itt a wifireset gomb NEM hat, csak a reset gomb.");
+
+  while (millis() - timing.fatalStart < FATAL_SLEEP_AFTER_MS) {
+    const uint32_t now = millis();
+    if (now - timing.blinkLast >= FATAL_BLINK_MS) {
+      timing.blinkLast = now;
+      uiFlags.blinkOn = !uiFlags.blinkOn;
+      digitalWrite(ledPin, uiFlags.blinkOn ? HIGH : LOW);
+      digitalWrite(wifiledPin, uiFlags.blinkOn ? HIGH : LOW);
+    }
+    // Csak a reset gomb él. A wifiresetbutton()-t szándékosan NEM hívjuk:
+    // épp onnan jöhettünk, az önmagába vezető rekurzió lenne.
+    resetbutton();
+    feedWatchdog();
+    delay(BUTTON_POLL_MS);
+  }
+  fatalSleep();  // időzített ébresztés NÉLKÜL - nem tér vissza
+}
+
 void resetbutton() {
   // Fájlírás közben SEMMIKÉPP nem indítunk újra: a félbeszakadt mentés sérült
   // konfigurációt hagyna hátra. Ugyanaz a szabály, mint az elalvásnál.
@@ -1004,11 +1036,16 @@ void wifiresetbutton() {
     cleared &= clearConfigValue(LittleFS, ipPath);
     cleared &= clearConfigValue(LittleFS, gatewayPath);
     if (!cleared) {
-      // Az újraindítás után a régi adatokkal jönne fel - legalább tudja a
-      // felhasználó, és a diagnosztikai naplóban is nyoma marad. (Enélkül ez
-      // teljesen néma hiba lenne: a gomb "nem csinál semmit".)
+      // Ha a fájlrendszer nem írható, az eszköz NEM működhet tovább: a
+      // konfiguráció mentése ugyanígy elbukna, az újraindítás pedig a régi
+      // adatokkal jönne fel - a gomb a felhasználó szemszögéből "nem csinál
+      // semmit". Ez ugyanaz a hibaosztály, mint a többi LittleFS hiba, tehát
+      // ugyanaz a kezelés: mindkét LED gyorsan villog, 5 perc múlva alvás,
+      // amiből csak a gomb vagy az áramtalanítás hoz vissza.
       Serial.println("!!! A mentett wifi adatok törlése NEM sikerült !!!");
       logEvent(EV_FATAL, 4);
+      fatalHalt("A mentett wifi adatok nem torolhetok - serult fajlrendszer.");
+      // fatalHalt() nem tér vissza
     }
     Serial.println("RESTART ESP32C3 device.");
     Serial.flush();

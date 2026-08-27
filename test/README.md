@@ -53,7 +53,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 
 ## Lefedett esetek
 
-**128 forgatókönyv, 400 ellenőrzés. Sorlefedettség: 98,56%.**
+**131 forgatókönyv, 411 ellenőrzés. Sorlefedettség: 98,47%.**
 
 | | |
 |---|---|
@@ -74,7 +74,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 | `E1`–`E6` | Végponttól végpontig: egészséges ciklus, router reset, AP mód, gombok, visszatérő WiFi |
 | `P1`–`P15` | Beállító portál mentése: validáció, írási hiba, jelszó-szivárgás, határidő, IP+gateway páros, whitespace, mentés közbeni gombnyomás, halasztott újraindítás |
 | `CPU1`–`CPU2` | A loop() nem pörgeti a CPU-t a várakozó állapotokban |
-| `X1`–`X11` | Határesetek: gomb a relé pulzus közben, nyílt hálózat, SSID/jelszó határértékek, wifireset törlési sorrend, query-paraméter, 1 napnál hosszabb uptime |
+| `X1`–`X14` | Határesetek: gomb a relé pulzus közben, nyílt hálózat, SSID/jelszó határértékek, wifireset törlési sorrend és **sikertelen törlés → végzetes hiba**, query-paraméter, 1 napnál hosszabb uptime |
 | `PO1`–`PO3` | Áramszünet: mekkora router-indulási késést tolerál |
 | `R1`–`R4` | Újrapróbálkozási politika: rossz jelszó vs. hiányzó hálózat, 2 napos határ |
 | `L1`–`L7` | Diagnosztikai napló: rögzítés, /log oldal, körpuffer, spam-védelem, esemény-kódok, minden címke, üres napló |

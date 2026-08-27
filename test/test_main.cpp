@@ -1973,22 +1973,91 @@ static void scX7() {
 }
 
 static void scX8() {
-  // Sikertelen torles: az eszkoz ujraindul a regi adatokkal, ami kabel nelkul
-  // teljesen nema hiba lenne. Legalabb a diagnosztikai naploban maradjon nyom.
+  // Ha a fajlrendszer nem irhato, az eszkoz NEM mukodhet tovabb: a konfiguracio
+  // mentese ugyanigy elbukna, az ujrainditas pedig a regi adatokkal jonne fel.
+  // Ugyanaz a hibaosztaly, mint a tobbi LittleFS hiba -> ugyanaz a kezeles.
   coldBoot(true, "TestNet", "pw", "", "");
   setup();
   rtcEvMagic = 0; rtcEvNext = 0;
   g_fsWritable = false; g_fsRemoveOk = false;   // se irni, se torolni nem tud
   g_pinRead[2] = LOW;
-  bool restarted = false;
-  try { for (int i = 0; i < 20; i++) { wifiresetbutton(); delay(10); } }
+  g_log.clear();
+  bool restarted = false, slept = false;
+  const uint32_t t0 = g_millis;
+  try { for (int i = 0; i < 200000; i++) { wifiresetbutton(); delay(10); } }
   catch (RestartSignal&) { restarted = true; }
-  CHECK(restarted, "azert ujraindul");
-  CHECK(serialHas("A mentett wifi adatok"), "a soros porton szol rola");
+  catch (DeepSleepSignal&) { slept = true; }
+
+  CHECK(!restarted, "NEM indul ujra a regi adatokkal");
+  CHECK(slept, "hanem vegzetes hibat jelez, majd elalszik");
+  CHECK(deviceMode == (DeviceMode)2, "MODE_FATAL");
+  CHECK(serialHas("VEGZETES HIBA"), "a soros porton is vegzetes hibat jelent");
+  CHECK(g_wakeupUs == 0, "idozitett ebresztes NINCS - csak gomb vagy aramtalanitas");
+
+  const uint32_t elapsed = g_millis - t0;
+  CHECK(elapsed >= 5u * 60 * 1000 && elapsed < 6u * 60 * 1000,
+        "5 percig jelez, csak utana alszik el");
+
   bool logged = false;
   for (uint32_t i = 0; i < rtcEvNext && i < 32; i++)
     if (rtcEvents[i].code == EV_FATAL_C && rtcEvents[i].param == 4) logged = true;
-  CHECK(logged, "es a naploba is bekerul (FATAL, param=4)");
+  CHECK(logged, "a naploba is bekerul (FATAL, param=4)");
+}
+
+static void scX12() {
+  // A jelzes ugyanaz, mint a tobbi vegzetes hibanal: a ket LED EGYUTT villog
+  // (a beragadt gombnal felvaltva) - igy ranezesre megkulonboztetheto.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  g_fsWritable = false; g_fsRemoveOk = false;
+  g_pinRead[2] = LOW;
+  g_log.clear();
+  try { for (int i = 0; i < 200000; i++) { wifiresetbutton(); delay(10); } }
+  catch (...) {}
+  int together = 0, opposite = 0;
+  for (size_t i = 0; i + 1 < g_log.size(); i++) {
+    // A ket digitalWrite egymas utan jon; a parokat nezzuk.
+    if (g_log[i] == "pin6=HIGH" && g_log[i+1] == "pin5=HIGH") together++;
+    if (g_log[i] == "pin6=LOW"  && g_log[i+1] == "pin5=LOW")  together++;
+    if (g_log[i] == "pin6=HIGH" && g_log[i+1] == "pin5=LOW")  opposite++;
+    if (g_log[i] == "pin6=LOW"  && g_log[i+1] == "pin5=HIGH") opposite++;
+  }
+  CHECK(together > 100, "a ket LED EGYUTT villog (vegzetes hiba jelzese)");
+  CHECK(opposite == 0, "sosem ellentetes fazisban (az a beragadt gomb jele)");
+}
+
+static void scX13() {
+  // A vegzetes jelzes alatt a reset gomb az egyetlen kiut - annak viszont
+  // mukodnie kell, kulonben csak aramtalanitassal lehetne kimaszni.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  g_fsWritable = false; g_fsRemoveOk = false;
+  g_pinRead[2] = LOW;
+  // A reset gombot is nyomva tartjuk. A fatalHalt() blokkol es nem ter vissza,
+  // ezert a teszt ciklusabol menet kozben nem lehetne "megnyomni" - a
+  // felhasznalo viszont barmikor lenyomhatja, tehat eleve nyomva modellezzuk.
+  g_pinRead[3] = LOW;
+  const uint32_t t0 = g_millis;
+  bool restarted = false, slept = false;
+  try { for (int i = 0; i < 200000; i++) { wifiresetbutton(); delay(10); } }
+  catch (RestartSignal&) { restarted = true; }
+  catch (DeepSleepSignal&) { slept = true; }
+  CHECK(restarted, "a reset gomb a hibajelzes alatt is ujraindit");
+  CHECK(!slept, "tehat nem varja ki az 5 percet");
+  CHECK(g_millis - t0 < 5u * 60 * 1000, "meg az 5 perces hatarido elott");
+}
+
+static void scX14() {
+  // Regresszio: a SIKERES torles tovabbra is egyszeru ujrainditas legyen.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  g_pinRead[2] = LOW;
+  bool restarted = false, slept = false;
+  try { for (int i = 0; i < 20; i++) { wifiresetbutton(); delay(10); } }
+  catch (RestartSignal&) { restarted = true; }
+  catch (DeepSleepSignal&) { slept = true; }
+  CHECK(restarted && !slept, "sikeres torles -> ujrainditas, nem hibajelzes");
+  CHECK(deviceMode != (DeviceMode)2, "nem megy MODE_FATAL-ba");
 }
 
 // --- A query-string parameter nem konfiguralhat -----------------------------
@@ -2212,10 +2281,13 @@ static const Scenario kScenarios[] = {
   { "P15: túl hosszú jelszó elutasítva (a maxlength csak a böngészőt köti)", scP15 },
   { "E6: visszatérő WiFi esetén nincs felesleges router reset", scE6 },
   { "X7: a wifireset az SSID-t törli először", scX7 },
-  { "X8: sikertelen wifireset törlés nyomot hagy a naplóban", scX8 },
+  { "X8: sikertelen wifireset törlés végzetes hiba, nem újraindítás", scX8 },
   { "X9: query-string paraméter nem írhatja át a konfigurációt", scX9 },
   { "X10: egy napnál hosszabb uptime helyesen jelenik meg", scX10 },
   { "X11: sikertelen WiFi.config() után is megpróbál csatlakozni", scX11 },
+  { "X12: a sikertelen törlés jelzése együtt villogó LED-ek", scX12 },
+  { "X13: a reset gomb a hibajelzés alatt is működik", scX13 },
+  { "X14: a sikeres törlés továbbra is sima újraindítás", scX14 },
   { "FS7: néma írási hiba - a visszaolvasás fogja meg", scFS7 },
   { "FS8: néma írási hiba a portálon sem jelent sikert", scFS8 },
   { "FS9: csonka olvasás -> végzetes hiba, nem csonka konfig", scFS9 },

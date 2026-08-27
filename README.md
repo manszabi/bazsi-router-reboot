@@ -401,9 +401,9 @@ Két védelem gondoskodik arról, hogy a mentés ne vesszen el:
 - **Fájlírás közben az eszköz soha nem alszik el** (`savingConfig` jelző), így
   nem maradhat félig kiírt konfiguráció.
 
-## 🚨 Végzetes hiba – a konfiguráció nem tölthető be
+## 🚨 Végzetes hiba – a fájlrendszer nem használható
 
-A wifi beállítások a LittleFS-en vannak. Ha ezek **nem tölthetők be**, a program
+A wifi beállítások a LittleFS-en vannak. Ha ez **nem használható**, a program
 nem fut tovább: nem tesztel, nem kapcsolja a relét, és AP módba sem lép.
 Mindkét LED (`D3` és `D4`) **együtt, gyorsan villog** (5 Hz).
 
@@ -415,11 +415,21 @@ Fontos a megkülönböztetés – a „nincs még konfiguráció" **nem hiba**:
 | A fájlok léteznek, de üresek (wifireset után) | `CONFIG_OK`, üres érték | normális → **AP beállító portál** |
 | A LittleFS nem csatolható | hiba | **hibajelzés**, villogás |
 | A fájl létezik, de nem nyitható / hibás olvasás | `CONFIG_ERROR` | **hibajelzés**, villogás |
+| A wifireset gomb **nem tudta törölni** a mentett adatokat | hiba | **hibajelzés**, villogás |
+
+Az utolsó eset ugyanaz a hibaosztály: ha a fájlrendszer nem írható, akkor új
+konfigurációt sem lehetne menteni. Az újraindítás csak a régi adatokkal hozná
+vissza az eszközt – a gomb kívülről nézve „nem csinálna semmit", és a
+felhasználó soros kábel nélkül sosem tudná meg, miért. Ezért itt sem indulunk
+újra, hanem jelzünk.
 
 Hibajelzés közben:
 
 - a **relé `LOW`** marad, tehát a router végig kap áramot
-- a **gombok élnek**: a reset gomb újraindít, a wifireset gomb törli a mentett adatokat
+- a **reset gomb mindig él**: bármikor újraindítja az eszközt. A wifireset gomb
+  az induláskor felismert hibáknál szintén él (a `loop()` figyeli), a *sikertelen
+  törlés* miatti hibajelzésnél viszont nem – oda épp a wifireset gombtól
+  érkeztünk, önmagát hívná újra
 - a watchdog aktív
 - **5 perc után az eszköz deep sleepbe megy** – és **időzített ébresztés nélkül**.
   Egy sérült fájlrendszer magától nem gyógyul meg, ezért értelmetlen lenne

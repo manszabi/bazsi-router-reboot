@@ -13,7 +13,7 @@ Az eszköz mindig pontosan egy üzemmódban van.
 |---|---|---|
 | `MODE_MONITOR` | Van Wi-Fi kapcsolat, vagy épp épül | Internetet tesztel, szükség esetén routert indít újra |
 | `MODE_CONFIG` | Nincs használható Wi-Fi konfiguráció | AP beállító portál (`ESP-<chip>` / `bazsi1234`, `192.168.4.1`) |
-| `MODE_FATAL` | Betölthetetlen konfiguráció, vagy 3 watchdog reset | Mindkét LED villog, semmi más nem fut |
+| `MODE_FATAL` | A fájlrendszer nem használható, vagy 3 watchdog reset | Mindkét LED villog, semmi más nem fut |
 
 ---
 
@@ -244,23 +244,36 @@ Sikertelen mentésnél HTTP 500 és **nincs** újraindulás – a beírt adatok 
 
 ## 7. Végzetes hiba – `MODE_FATAL`
 
-| Kiváltó ok | |
-|---|---|
-| A LittleFS nem csatolható | |
-| A konfigurációs fájl létezik, de nem olvasható | |
-| 3 watchdog/panic miatti újraindulás | |
+| Kiváltó ok | Napló |
+|---|:---:|
+| A LittleFS nem csatolható | `FATAL` 1 |
+| A konfigurációs fájl létezik, de nem olvasható | `FATAL` 2 |
+| 3 watchdog/panic miatti újraindulás | `FATAL` 3 |
+| **A wifireset gomb nem tudta törölni a mentett adatokat** | `FATAL` 4 |
 
 > A **hiányzó vagy üres** konfiguráció **nem** végzetes hiba – az első indítás
 > és a wifireset gomb utáni állapot is ilyen. Ilyenkor AP mód indul.
 
+Mind a négy ok ugyanaz a hibaosztály: **a fájlrendszer nem használható**, tehát
+a konfiguráció sem betölteni, sem menteni nem lehet. Ilyen állapotban az eszköz
+nem fut tovább – az újraindítgatás csak elfedné a hibát.
+
 | Viselkedés | Érték |
 |---|---|
-| Mindkét LED együtt villog | **100 mp be / 100 mp ki** (5 Hz) |
+| Mindkét LED együtt villog | **100 ms be / 100 ms ki** (`FATAL_BLINK_MS`, 5 Hz) |
 | Relé | `LOW` – a router végig kap áramot |
 | Állapotgép | nem fut |
-| Gombok | működnek |
-| Deep sleep | **5 perc** után |
-| Ébredés | **csak a reset gombbal** |
+| Gombok | a reset gomb mindig; a wifireset a 4-es oknál nem (lásd lent) |
+| Deep sleep | **5 perc** után (`FATAL_SLEEP_AFTER_MS`) |
+| Ébredés | **csak a reset gombbal** vagy áramtalanítással |
+
+### Hol keletkezik a jelzés
+
+A 4-es ok annyiban különbözik, hogy a gombkezelőből jön, ami **blokkoló
+ciklusokból is futhat** (a `waitWithButtons(RESET_DELAY)` például 10 percig nem
+ad vissza a `loop()`-nak). Ha csak beállítanánk a módot, az eszköz addig tovább
+működne – tesztelne, relét kapcsolna. Ezért a jelzés ott helyben, blokkolva
+történik, és soha nem tér vissza. Kívülről nézve a viselkedés azonos.
 
 ---
 
@@ -309,9 +322,12 @@ taskja végzi; egy odaeső gombnyomás félbeszakított írást okozna. A gombok
 mentés befejeztével működnek tovább (ilyenkor egy új 50 ms-os lenyomás kell).
 
 A wifireset a `/ssid.txt`-t törli **először**: a gomb célja, hogy az eszköz a
-beállító portálon jöjjön fel, és ezt egyedül ez a fájl dönti el. Ha a törlés
-nem sikerül, az eszköz a régi adatokkal indul újra – ez a soros porton és a
-diagnosztikai naplóban is megjelenik (`FATAL`, paraméter 4).
+beállító portálon jöjjön fel, és ezt egyedül ez a fájl dönti el.
+
+**Ha a törlés nem sikerül, az végzetes hiba** (7. fejezet, `FATAL` 4). Ilyenkor
+a fájlrendszer nem írható, tehát új konfigurációt sem lehetne menteni – az
+újraindítás csak a régi adatokkal hozná vissza az eszközt, a gomb pedig kívülről
+nézve „nem csinálna semmit". Az eszköz ezért nem indul újra, hanem jelez.
 
 ### Beragadt gomb induláskor
 
