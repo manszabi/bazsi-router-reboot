@@ -46,6 +46,10 @@ extern bool     g_wdtPanic;
 extern uint32_t g_wdtMaxFeedGap;   // leghosszabb szakasz etetés nélkül
 extern uint32_t g_wdtLastFeed;
 extern uint32_t g_wdtFeedBeforeEnable;  // etetes a feliratkozas ELOTT
+extern bool     g_wdtInited;            // fut-e mar a TWDT (ESP_TASK_WDT_INIT)
+extern bool     g_wdtInitFails;         // az esp_task_wdt_init() hibat adjon
+extern bool     g_wdtReconfigureFails;  // az esp_task_wdt_reconfigure() hibazzon
+extern uint32_t g_wdtFeedNotSubscribed; // ennyi log_e() sor menne ki
 extern bool     g_wdtTrack;
 int64_t esp_timer_get_time();
 void esp_sleep_enable_timer_wakeup(uint64_t);

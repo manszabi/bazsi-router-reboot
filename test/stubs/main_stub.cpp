@@ -29,6 +29,7 @@ int g_httpCode = 200;
 std::string g_httpBody = "Microsoft NCSI";
 int g_httpSize = -2;
 bool g_httpBeginOk = true;
+bool g_httpStall = false;
 bool     g_wdtEnabled = false;
 uint32_t g_wdtTimeoutMs = 0;
 uint32_t g_wdtIdleMask = 0xFFFFFFFF;
@@ -37,21 +38,40 @@ uint32_t g_wdtMaxFeedGap = 0;
 uint32_t g_wdtLastFeed = 0;
 uint32_t g_wdtFeedBeforeEnable = 0;
 bool     g_wdtTrack = false;
-static bool g_wdtInited = true;   // IDF: ESP_TASK_WDT_INIT=y -> boot óta fut
+bool g_wdtInited = true;          // IDF: ESP_TASK_WDT_INIT=y -> boot óta fut
+bool g_wdtInitFails = false;      // esp_task_wdt_init() hibát ad (pl. NO_MEM)
+bool g_wdtReconfigureFails = false;
+uint32_t g_wdtFeedNotSubscribed = 0;  // ennyi log_e() sor menne a soros portra
 
 static void wdtApply(const esp_task_wdt_config_t* c) {
   g_wdtTimeoutMs = c->timeout_ms; g_wdtIdleMask = c->idle_core_mask; g_wdtPanic = c->trigger_panic;
 }
 esp_err_t esp_task_wdt_init(const esp_task_wdt_config_t* c) {
   if (g_wdtInited) return ESP_ERR_INVALID_STATE;
+  if (g_wdtInitFails) { simLog("wdt_init_FAIL"); return ESP_FAIL; }
+  // Az IDF a figyelt taskok listája nélkül NEM indítja el a timert.
   g_wdtInited = true; wdtApply(c); simLog("wdt_init"); return ESP_OK;
 }
 esp_err_t esp_task_wdt_reconfigure(const esp_task_wdt_config_t* c) {
   if (!g_wdtInited) return ESP_ERR_INVALID_STATE;
+  if (g_wdtReconfigureFails) { simLog("wdt_reconfigure_FAIL"); return ESP_FAIL; }
   wdtApply(c); simLog("wdt_reconfigure"); return ESP_OK;
 }
-void enableLoopWDT() { g_wdtEnabled = true; simLog("enableLoopWDT"); }
+// A valódi enableLoopWDT() (esp32-hal-misc.c) void: csak akkor kapcsolja be a
+// loopTaskWDTEnabled-et, ha az esp_task_wdt_add() sikerult. Az add() pedig
+// ESP_ERR_INVALID_STATE-et ad, ha a TWDT nincs inicializalva.
+void enableLoopWDT() {
+  if (!g_wdtInited) { simLog("enableLoopWDT_FAIL"); return; }
+  g_wdtEnabled = true; simLog("enableLoopWDT");
+}
+esp_err_t esp_task_wdt_status(void*) {
+  if (!g_wdtInited) return ESP_ERR_INVALID_STATE;
+  return g_wdtEnabled ? ESP_OK : ESP_ERR_NOT_FOUND;
+}
 void feedLoopWDT() {
+  // Feliratkozas nelkul az esp_task_wdt_reset() ESP_ERR_NOT_FOUND-ot ad,
+  // amire a core log_e()-t hiv - ez lenne az elarasztott soros port.
+  if (!g_wdtEnabled) g_wdtFeedNotSubscribed++;
   if (!g_wdtEnabled) g_wdtFeedBeforeEnable++;
   if (g_wdtTrack) {
     const uint32_t gap = g_millis - g_wdtLastFeed;

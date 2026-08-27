@@ -49,7 +49,14 @@ Ha nincs mentett Wi-Fi adat (vagy a Wi-Fi reset gombot megnyomtad):
    - **Gateway** – a router IP-je (opcionális, ha üres → DHCP)
 5. Küldés után az ESP újraindul és csatlakozik a megadott hálózathoz
 
-> Az AP mód addig aktív marad, amíg be nem küldöd az űrlapot – nincs időkorlát.
+> **Statikus IP-hez mindkét mezőt ki kell tölteni.** Gateway nélkül a firmware
+> DHCP-re esne vissza, ezért a beállító portál a félig kitöltött párost
+> visszautasítja, ahelyett hogy sikert jelentene egy olyan fix címre, amit az
+> eszköz végül nem használ. DHCP-hez hagyd mindkettőt üresen.
+>
+> Az AP mód **5 perc tétlenség** után elalszik (minden HTTP kérés újraindítja a
+> visszaszámlálást), és utána már csak a reset gomb vagy az áramtalanítás
+> ébreszti fel. Fájlírás közben soha nem alszik el.
 > Statikus IP esetén a DNS szervernek a megadott gateway (tartalékként `1.1.1.1`)
 > lesz beállítva, különben a névfeloldás – és így a HTTP-teszt – nem működne.
 > (Az ESP32 `WiFi.config()` STA ágában a DNS-t szó szerint a kapott paraméterből
@@ -297,6 +304,28 @@ Ezért az `initWatchdog()` mindhármat kifejezetten beállítja:
 > 5 mp-ről 90 mp-re lazul (`CONFIG_ASYNC_TCP_USE_WDT=1`, `AsyncTCP.cpp:334`).
 > Ez a gyakorlatban nem számít: az aszinkron szerver csak AP konfigurációs
 > módban fut, és ott a `loop()` amúgy is ezredmásodpercek alatt körbeér.
+
+### A feliratkozás ellenőrzése
+
+Az `enableLoopWDT()` a core-ban **`void`** (`esp32-hal-misc.c`): ha az
+`esp_task_wdt_add()` hibázik, csak egy belső `log_e()` jelzi, a visszatérési
+értékből semmi. Ez akkor fordulhat elő, ha a TWDT nincs inicializálva
+(`ESP_TASK_WDT_INIT=n`) – ilyenkor az `add()` `ESP_ERR_INVALID_STATE`-et ad.
+
+Ezért az `initWatchdog()`:
+
+1. ha kell, maga hívja az `esp_task_wdt_init()`-et (figyelt task nélkül ez még
+   nem indítja el a timert),
+2. **utána** iratkozik fel – ez a sorrend azért kell, mert az
+   `esp_task_wdt_reconfigure()` csak nem üres tasklistánál indítja újra a
+   timert (`task_wdt.c:595`),
+3. végül `esp_task_wdt_status(NULL)`-lal **visszakérdezi**, hogy a `loop()`
+   tényleg figyelve van-e.
+
+Csak ha ez igaz, írja ki, hogy `Watchdog enabled`. Ha nem, egyértelmű
+figyelmeztetést ad, és **nem etet**: feliratkozás nélkül minden
+`feedLoopWDT()` `ESP_ERR_NOT_FOUND`-ot kapna, amire a core `log_e()`-t hív –
+mérve **100 hibasor percenként** normál működésben, védelem nélkül.
 
 ### Ismétlődő watchdog újraindulás
 

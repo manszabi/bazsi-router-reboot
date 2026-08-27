@@ -119,10 +119,21 @@ portál `/log` oldalán kiírja. Soros kábel nélkül is megtudható, mi tört�
 `RTC_NOINIT_ATTR`-ben van, ezért éli túl a resetet is – pont azokat a hibákat,
 amiket ki akarunk vizsgálni. Mérete 264 bájt a C3 ~8 KB-os RTC memóriájából.
 
-Rögzített események: `BOOT` (a reset okával), `WIFI OK`, `WIFI LOST`,
-`TEST FAIL`, `ROUTER RESET`, `AP MODE`, `CONFIG SAVED`, `SLEEP`, `FATAL`,
-`WDT RESET` – mindegyik uptime bélyeggel és egy paraméterrel (pl. a hiba oka
-vagy a sorszám).
+Minden bejegyzés uptime bélyeget, egy eseménykódot és egy paramétert tartalmaz:
+
+| Esemény | A paraméter jelentése |
+|---|---|
+| `BOOT` | az indulás oka (`esp_reset_reason()`) |
+| `WIFI OK` | hányadik újrapróbálkozási körben sikerült |
+| `WIFI LOST` | `WiFi.status()` a kiesés pillanatában |
+| `TEST FAIL` | a teszt ciklus indexe (csak a hibasorozat **első** tagja) |
+| `ROUTER RESET` | hányadik reset esemény (1–4) |
+| `AP MODE` | 1 = nincs mentett SSID, 2 = hitelesítési hiba, 3 = letelt a 2 nap |
+| `CONFIG SAVED` | 0 |
+| `SLEEP` | 1 = újrapróbálkozás, 2 = tartós internetkiesés, 3 = AP időtúllépés, 4 = végzetes hiba |
+| `FATAL` | 1 = LittleFS csatolás, 2 = konfiguráció olvasás, 3 = watchdog |
+| `WDT RESET` | hányadik rendellenes újraindulás |
+| `STUCK BUTTON` | 0 = reset gomb, 1 = wifireset gomb |
 
 A `/log` oldal az aktuális állapotot is mutatja: reset ok, watchdog számláló,
 újrapróbálkozási körök, uptime.
@@ -159,7 +170,10 @@ eldőlt (tehát általában 2–3 pinget futtat).
 
 ## 4. Az internet kiesik – router újraindítás
 
-Akkor indul, ha **3 sikertelen teszt** és a **ciklus index > 3** (kb. 4 kör).
+Akkor indul, ha `failedCount >= 3` **és** `cycleIndex > 3`. A kettő közül a
+ciklus index a szűkebb feltétel, ezért a gyakorlatban **5 egymás utáni
+sikertelen teszt** kell hozzá – mérve **2,4 perc** az első hibától a relé
+megszólalásáig.
 
 | Lépés | Időtartam |
 |---|---|
@@ -169,7 +183,7 @@ Akkor indul, ha **3 sikertelen teszt** és a **ciklus index > 3** (kb. 4 kör).
 | Várakozás a router bootolására | **10 perc** (`RESET_DELAY`) |
 | Wi-Fi újracsatlakozás: 3 próba, köztük 30 mp | max. ~2 perc |
 
-**Egy teljes reset ciklus:** ~4 kör teszt (~1 perc) + 90 mp + 10 perc + ~2 perc ≈ **14 perc**
+**Egy teljes reset ciklus:** 5 teszt (2,4 perc) + 90 mp + 10 perc + újracsatlakozás ≈ **14 perc**
 
 ### Ha az újracsatlakozás sem sikerül
 
@@ -256,6 +270,21 @@ Sikertelen mentésnél HTTP 500 és **nincs** újraindulás – a beírt adatok 
 
 Rendellenesnek számít: `ESP_RST_TASK_WDT`, `ESP_RST_INT_WDT`, `ESP_RST_WDT`,
 `ESP_RST_PANIC`, `ESP_RST_CPU_LOCKUP`.
+
+### Ha a watchdogot nem sikerül élesíteni
+
+Az `enableLoopWDT()` a core-ban `void`: ha a feliratkozás nem sikerül, csak egy
+belső hibaüzenet jelzi. Ezért az indulás után visszakérdezünk
+(`esp_task_wdt_status()`), és **csak akkor** írjuk ki, hogy `Watchdog enabled`,
+ha a `loop()` tényleg figyelve van. Ha nem:
+
+```
+FIGYELEM: a watchdog NEM vedi a loop()-ot (...). A program fut, de
+lefagyas eseten nem indul ujra.
+```
+
+Ilyenkor a firmware **nem etet** – etetés feliratkozás nélkül csak
+hibaüzeneteket öntene a soros portra (mérve 100 sor/perc), védelmet nem adna.
 
 ---
 

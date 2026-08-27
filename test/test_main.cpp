@@ -1496,6 +1496,152 @@ static void scOV1() {
   CHECK(guard < 400000, "nem ragadt be végtelen ciklusba");
 }
 
+
+// --- A watchdog feliratkozas tenyleges ellenorzese ---------------------------
+// Az enableLoopWDT() (esp32-hal-misc.c) void: ha az esp_task_wdt_add() hibazik,
+// csak egy log_e() jelzi. Ha vakon feltetelezzuk a sikert, ket baj tortenik:
+// (1) azt hisszuk, vedve vagyunk, kozben egy lefagyas eszrevetlen marad,
+// (2) minden feedLoopWDT() ESP_ERR_NOT_FOUND-ot kap -> 10 ms-onkent egy
+//     log_e() sor a soros portra.
+static void scWDT6() {
+  // A TWDT nincs inicializalva (ESP_TASK_WDT_INIT=n). A sketchnek fel kell
+  // huznia, es utana tenylegesen vedenie a loop()-ot.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_wdtInited = false; g_wdtEnabled = false;
+  setup();
+  CHECK(logIndex("wdt_init") >= 0, "a sketch inicializalta a TWDT-t");
+  CHECK(g_wdtEnabled, "a loop task VEGUL fel van iratkozva");
+  CHECK(g_wdtTimeoutMs == 90000 && g_wdtPanic, "90 mp-es timeout, panic bekapcsolva");
+  CHECK(serialHas("Watchdog enabled"), "csak most jelenti sikeresnek");
+
+  // A masik fele: feliratkozas nelkul minden etetes ESP_ERR_NOT_FOUND lenne,
+  // amire a core log_e()-t hiv - 10 ms-onkent egy sor a soros portra.
+  g_wdtFeedNotSubscribed = 0;
+  const uint32_t t0 = g_millis;
+  int guard = 0;
+  try { while (g_millis - t0 < 60u * 1000 && ++guard < 500000) loop(); }
+  catch (...) {}
+  CHECK(g_wdtFeedNotSubscribed == 0, "nincs feliratkozas nelkuli etetes (nincs log_e() aradat)");
+}
+
+static void scWDT7() {
+  // A TWDT nincs inicializalva ES nem is huzhato fel. A feliratkozas tehat
+  // sikertelen - ilyenkor TILOS etetni (az lenne az elarasztott konzol), es
+  // tilos vedelmet allitani.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_wdtInited = false; g_wdtEnabled = false; g_wdtInitFails = true;
+  setup();
+  g_wdtFeedNotSubscribed = 0;
+  const size_t before = g_serialLog.size();
+  const uint32_t t0 = g_millis;
+  int guard = 0;
+  try { while (g_millis - t0 < 60u * 1000 && ++guard < 500000) loop(); }
+  catch (...) {}
+  CHECK(!g_wdtEnabled, "a loop task NINCS feliratkozva");
+  CHECK(!serialHas("Watchdog enabled"), "nem allitja, hogy vedve van");
+  CHECK(serialHas("FIGYELEM"), "kiirja, hogy a watchdog nem vedi a loop()-ot");
+  CHECK(g_wdtFeedNotSubscribed == 0,
+        "egyetlen feliratkozas nelkuli etetes sincs (nincs log_e() aradat)");
+  CHECK(g_serialLog.size() - before < 60,
+        "1 perc alatt sem arasztja el a konzolt");
+}
+
+static void scWDT8() {
+  // A feliratkozas sikerul, de a konfiguralas nem. Ilyenkor a timeout az IDF
+  // 5 mp-es alapertelmezese maradna, ami a 15 mp-ig tarto HTTP teszt alatt
+  // ujrainditana - tehat semmikepp nem szabad sikert jelenteni.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_wdtReconfigureFails = true;
+  setup();
+  CHECK(!serialHas("Watchdog enabled"), "nem jelent sikeres 90 mp-es timeoutot");
+  CHECK(serialHas("FIGYELEM"), "figyelmeztet, hogy nincs vedelem");
+  CHECK(g_wdtEnabled, "a feliratkozas maga megvolt, tehat etetni szabad");
+}
+
+// --- Diagnosztikai naplo: a dokumentalt esemenykodok tenyleg keletkeznek ----
+static void scL4() {
+  // Elso indulas mentett halozat nelkul -> AP mod. A naplobol ennek ki kell
+  // derulnie, kulonben soros kabel nelkul nem tudni, miert all AP modban.
+  coldBoot(false, "", "", "", "");
+  rtcEvMagic = 0; rtcEvNext = 0;
+  setup();
+  CHECK(deviceMode == (DeviceMode)1, "AP mod");
+  bool found = false;
+  for (uint32_t i = 0; i < rtcEvNext && i < 32; i++) {
+    if (rtcEvents[i].code == 6 && rtcEvents[i].param == 1) found = true;
+  }
+  CHECK(found, "AP MODE esemeny a 'nincs mentett SSID' okkal (param=1)");
+}
+
+static void scL5() {
+  // Vegzetes hiba utani elalvas: ez az utolso dolog, ami tortent - a naplobol
+  // meg kell latszania, hogy nem magatol halt meg az eszkoz.
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcEvMagic = 0; rtcEvNext = 0;
+  g_fsMountOk = false;
+  setup();
+  CHECK(deviceMode == (DeviceMode)2, "MODE_FATAL");
+  bool slept = false;
+  int guard = 0;
+  try { while (++guard < 500000) loop(); }
+  catch (DeepSleepSignal&) { slept = true; }
+  CHECK(slept, "5 perc utan elaludt");
+  CHECK(g_wakeupUs == 0, "idozitett ebresztes NINCS");
+  bool found = false;
+  for (uint32_t i = 0; i < rtcEvNext && i < 32; i++) {
+    if (rtcEvents[i].code == 8 && rtcEvents[i].param == 4) found = true;
+  }
+  CHECK(found, "SLEEP esemeny a vegzetes hiba okkal (param=4)");
+}
+
+// --- Felig kitoltott statikus IP --------------------------------------------
+static void scP9() {
+  // IP gateway nelkul: az initWiFi() ilyenkor DHCP-re esik vissza, tehat a
+  // "menj a megadott fix cimre" uzenet hazugsag lenne.
+  coldBoot(false, "", "", "", "");
+  setup();
+  std::string body;
+  int code = postConfig("Halozat", "jelszo123", "192.168.1.200", "", &body);
+  CHECK(code == 500, "IP gateway nelkul -> 500, nem hamis siker");
+  CHECK(body.find("gateway") != std::string::npos, "az indoklas megnevezi a gateway-t");
+  CHECK(!restartPending, "nem indul ujra a hianyos konfiggal");
+
+  code = postConfig("Halozat", "jelszo123", "", "192.168.1.1", &body);
+  CHECK(code == 500, "gateway IP nelkul -> szinten 500");
+
+  code = postConfig("Halozat", "jelszo123", "192.168.1.200", "192.168.1.1", &body);
+  CHECK(code == 200, "mindketto megadva -> 200");
+  CHECK(restartPending, "es most mar ujraindul");
+}
+
+static void scP10() {
+  // A csonkolatlan indoklas: a snprintf() puffere eleg nagy hozza.
+  coldBoot(false, "", "", "", "");
+  setup();
+  std::string body;
+  postConfig("Halozat", "jelszo123", "192.168.1.200", "", &body);
+  CHECK(body.find("probald meg ismet") != std::string::npos,
+        "a hibauzenet vege sem csonkolodik le");
+}
+
+// --- Beragadt szerver: a sajat hatarido tartson ------------------------------
+static void scH5() {
+  // A kapcsolat el, de nem jon tobb adat. A readBounded() nem varhat a socket
+  // sajat fogadasi timeoutjara, mert az nem a mienk - a sajat hataridejevel
+  // kell kilepnie, jocskan a watchdog timeout alatt.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  g_httpCode = 200; g_httpSize = -1; g_httpBody = "Micro";  // fel valasz
+  g_httpStall = true;
+  const uint32_t t0 = g_millis;
+  const bool ok = testInternetHTTP("http://pelda/x", "Microsoft NCSI");
+  const uint32_t elapsed = g_millis - t0;
+  g_httpStall = false;
+  CHECK(!ok, "a csonka valasz nem egyezik");
+  CHECK(elapsed < 5000, "a hatarido ~1,5 mp korul tart, nem 10 mp-ig var");
+  CHECK(elapsed < 90000, "biztosan a watchdog timeout alatt marad");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -1593,6 +1739,14 @@ static const Scenario kScenarios[] = {
   { "SER2: internet kiesés soros terhelése", scSER2 },
   { "SER3: AP és hibajelző mód néma", scSER3 },
   { "OV1: több reset ciklus, számlálók korlátosak", scOV1 },
+  { "WDT6: nem futó TWDT esetén a sketch felhúzza és tényleg feliratkozik", scWDT6 },
+  { "WDT7: sikertelen feliratkozásnál nem etet és nem hazudik védelmet", scWDT7 },
+  { "WDT8: sikertelen konfigurálásnál sem jelent 90 mp-es védelmet", scWDT8 },
+  { "L4: 'nincs mentett SSID' AP mód is bekerül a naplóba", scL4 },
+  { "L5: végzetes hiba utáni elalvás is bekerül a naplóba", scL5 },
+  { "P9: statikus IP gateway nélkül nem fogadható el sikerként", scP9 },
+  { "P10: a hosszú hibaindoklás nem csonkolódik", scP10 },
+  { "H5: beragadt szervernél a saját olvasási határidő tart", scH5 },
 };
 
 

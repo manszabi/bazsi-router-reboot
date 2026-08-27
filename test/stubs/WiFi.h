@@ -9,9 +9,15 @@ typedef int wl_status_t;
 #define WIFI_AP 2
 
 // Olvasható HTTP-törzset hordozó kliens (a HTTPClient stub tölti fel)
+// A "beragadt szerver" modellezese: a kapcsolat EL, de nem jon tobb adat.
+// available() = 0 es connected() = true - ilyenkor a valodi socket olvasas a
+// sajat fogadasi timeoutjaig blokkolna, a sketchnek a sajat hataridejevel kell
+// kilepnie.
+extern bool g_httpStall;
+
 class WiFiClient : public Stream {
 public:
-  virtual bool connected() { return pos_ < data_.size(); }
+  virtual bool connected() { return g_httpStall ? true : (pos_ < data_.size()); }
   int read() override { return pos_ < data_.size() ? (unsigned char)data_[pos_++] : -1; }
   int available() override { return (int)(data_.size() - pos_); }
   void setData(const std::string& d) { data_ = d; pos_ = 0; }

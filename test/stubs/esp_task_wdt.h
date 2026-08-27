@@ -12,6 +12,10 @@ typedef int esp_err_t;
 #define ESP_FAIL -1
 #define ESP_ERR_INVALID_STATE 0x103
 #define ESP_ERR_INVALID_ARG 0x102
+#define ESP_ERR_NOT_FOUND 0x105
 
 esp_err_t esp_task_wdt_init(const esp_task_wdt_config_t*);
 esp_err_t esp_task_wdt_reconfigure(const esp_task_wdt_config_t*);
+// ESP_OK = a task fel van iratkozva, ESP_ERR_NOT_FOUND = nincs,
+// ESP_ERR_INVALID_STATE = a TWDT nincs inicializálva. NULL = az aktuális task.
+esp_err_t esp_task_wdt_status(void*);

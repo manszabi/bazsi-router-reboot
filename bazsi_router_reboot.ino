@@ -12,6 +12,9 @@
 #include "esp_task_wdt.h"
 #include "esp_system.h"
 #include "esp_attr.h"
+// Az esp_timer_get_time()-ot a core is expliciten includeolja (esp32-hal-misc.c),
+// nem hagyatkozik a FreeRTOS fejlecek atteteles behuzasara. Mi sem tesszuk.
+#include "esp_timer.h"
 
 // Create AsyncWebServer object on port 80
 AsyncWebServer server(80);
@@ -528,27 +531,48 @@ void checkWatchdogResets() {
 // percekig (90 mp-es relé pulzus), és egy hosszú timeout mellett is kockázatos
 // újraindítási hurkot okozna.
 void initWatchdog() {
-  // FONTOS a sorrend: előbb iratkozunk fel, csak utána konfigurálunk.
-  // Az esp_task_wdt_reconfigure() a végén csak akkor indítja újra a timert, ha
-  // a figyelt taskok listája nem üres. Fordított sorrendben a listánk épp üres
-  // lenne (az idle taskokat leiratkoztatjuk), és a timer elindulása egy belső
-  // részleten (waiting_for_task) múlna - így viszont garantált.
-  enableLoopWDT();
-  watchdogEnabled = true;
-
   esp_task_wdt_config_t cfg = {};
   cfg.timeout_ms = WDT_TIMEOUT_MS;
   cfg.idle_core_mask = 0;
   cfg.trigger_panic = true;
 
-  esp_err_t err = esp_task_wdt_reconfigure(&cfg);
-  if (err == ESP_ERR_INVALID_STATE) {
-    err = esp_task_wdt_init(&cfg);  // ha mégsem lenne inicializálva
+  // 1. A TWDT-nek LÉTEZNIE kell, mielőtt feliratkozunk rá. Az Arduino alapból
+  //    inicializálja (ESP_TASK_WDT_INIT=y), de ha valaki kikapcsolja, az
+  //    esp_task_wdt_add() ESP_ERR_INVALID_STATE-et adna - az enableLoopWDT()
+  //    viszont void, tehát ezt a hibát csendben elnyelné (esp32-hal-misc.c).
+  esp_err_t initErr = ESP_OK;
+  if (esp_task_wdt_status(NULL) == ESP_ERR_INVALID_STATE) {
+    initErr = esp_task_wdt_init(&cfg);
+    // Az init figyelt task nélkül NEM indítja el a timert (waiting_for_task),
+    // azt a lenti feliratkozás teszi meg.
   }
-  if (err != ESP_OK) {
-    Serial.print("Watchdog config failed, error ");
-    Serial.println((int)err);
-    watchdogEnabled = false;
+
+  // 2. Feliratkozás. FONTOS a sorrend: előbb ez, csak utána a konfiguráció.
+  //    Az esp_task_wdt_reconfigure() a végén csak akkor indítja újra a timert,
+  //    ha a figyelt taskok listája nem üres. Fordított sorrendben a listánk épp
+  //    üres lenne (az idle taskokat leiratkoztatjuk).
+  if (initErr == ESP_OK) {
+    enableLoopWDT();
+  }
+
+  // 3. Timeout és panic beállítása.
+  const esp_err_t cfgErr = (initErr == ESP_OK) ? esp_task_wdt_reconfigure(&cfg) : initErr;
+
+  // 4. Az EGYETLEN megbízható visszajelzés. Az enableLoopWDT() void, a
+  //    loopTaskWDTEnabled pedig a core belső változója - enélkül azt hinnénk,
+  //    védve vagyunk, közben a feedWatchdog() csak ESP_ERR_NOT_FOUND-ot kapna,
+  //    és 10 ms-onként egy log_e() sort öntene a soros portra.
+  watchdogEnabled = (esp_task_wdt_status(NULL) == ESP_OK);
+
+  if (!watchdogEnabled || cfgErr != ESP_OK) {
+    // MINDEN hibaág ide fut be, egyetlen, jól kereshető figyelmeztetéssel.
+    // Ne hazudjunk védelmet. Egy 5 mp-es alapértelmezett timeout ráadásul
+    // rosszabb lenne a semminél: a 15 mp-ig tartó HTTP teszt alatt újraindítana.
+    Serial.print("FIGYELEM: a watchdog NEM vedi a loop()-ot (feliratkozas ");
+    Serial.print(watchdogEnabled ? "OK" : "SIKERTELEN");
+    Serial.print(", hibakod ");
+    Serial.print((int)cfgErr);
+    Serial.println("). A program fut, de lefagyas eseten nem indul ujra.");
     return;
   }
   Serial.print("Watchdog enabled, timeout ");
@@ -896,6 +920,7 @@ void fatalSleep() {
   printUptime();
   Serial.println("5 perc hibajelzes utan az ESP elalszik.");
   Serial.println("Idozitett ebresztes NINCS - reset gomb vagy aramtalanitas kell.");
+  logEvent(EV_SLEEP, 4);
   enterDeepSleep(0);
 }
 
@@ -988,10 +1013,13 @@ size_t readBounded(WiFiClient& stream, char* buf, size_t maxLen, uint32_t timeou
   size_t n = 0;
   uint32_t lastByte = millis();
   while (n < maxLen && (millis() - lastByte) < timeoutMs) {
-    const int c = stream.read();
-    if (c < 0) {
+    // Csak akkor olvasunk, ha VAN mit: a read() a socket saját fogadási
+    // timeoutját használja, ami nem a mienk. Ha vakon hívnánk, egyetlen
+    // olvasás túlléphetné a timeoutMs határidőt - így viszont a határidő
+    // valóban a miénk, és nem függ a core beállításaitól.
+    if (stream.available() <= 0) {
       // A szerver lezárta és nincs több adat: nincs értelme a timeoutot kivárni
-      if (!stream.connected() && stream.available() <= 0) {
+      if (!stream.connected()) {
         break;
       }
       resetbutton();
@@ -1001,6 +1029,10 @@ size_t readBounded(WiFiClient& stream, char* buf, size_t maxLen, uint32_t timeou
       // ad át vezérlést, tehát üresen pörgetné a CPU-t a válaszra várva.
       delay(BUTTON_POLL_MS);
       continue;
+    }
+    const int c = stream.read();
+    if (c < 0) {
+      break;  // available() adatot ígért, mégsem jött: a kapcsolat elszállt
     }
     buf[n++] = (char)c;
     lastByte = millis();
@@ -1120,9 +1152,9 @@ void handleFirstStart(uint32_t currentMillis) {
         return;
       }
     }
-
-    timing.startMillis = millis();  // újraindítjuk az időzítést (friss bélyeg)
   }
+  // Innentől a firstStart lezárult: a timing.startMillis-t senki nem olvassa
+  // többé, ezért nincs értelme frissíteni.
   uiFlags.firstStart = false;
 }
 
@@ -1311,6 +1343,17 @@ void startConfigPortal() {
       if (failReason == nullptr) failReason = "Hianyzo SSID.";
     }
 
+    // Statikus IP-hez a gateway is kell. Az initWiFi() csak akkor konfigurál,
+    // ha MINDKETTŐ értelmezhető - félig kitöltve csendben DHCP-re esne vissza,
+    // a felhasználó viszont azt olvasná, hogy a megadott fix címen lesz.
+    if ((ipStr[0] != '\0') != (gatewayStr[0] != '\0')) {
+      saveOk = false;
+      if (failReason == nullptr) {
+        failReason = "Statikus IP-hez az IP cimet ES a gateway-t is meg kell adni "
+                     "(DHCP-hez hagyd mindkettot uresen).";
+      }
+    }
+
     savingConfig = false;
     touchApDeadline();
 
@@ -1318,7 +1361,9 @@ void startConfigPortal() {
       // Ne hazudjunk sikert és főleg ne indítsunk újra: az újraindítás
       // eldobná a beírt adatokat, a felhasználó pedig ugyanitt kötne ki.
       Serial.println("A beallitasok mentese SIKERTELEN.");
-      char err[160];
+      // A leghosszabb indoklás (statikus IP + gateway) a rögzített szöveggel
+      // együtt 176 bájt; a snprintf() csonkolna, ha ennél kisebb lenne.
+      char err[208];
       snprintf(err, sizeof(err),
                "A beallitasok mentese nem sikerult: %s "
                "Az eszkoz NEM indul ujra, probald meg ismet.",
@@ -1424,6 +1469,7 @@ void setup() {
 
     } else if (ssid[0] == '\0') {
       // Nincs mentett hálózat: csak a beállító portál segíthet.
+      logEvent(EV_AP_MODE, 1);
       startConfigPortal();
 
     } else {
