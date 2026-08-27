@@ -1939,6 +1939,19 @@ static void scF4() {
   g_millis += 60u * 1000;
   AsyncWebServerRequest b; g_handlers["/log#1"](&b);
   CHECK(apDeadline > second, "a /log is kitolja");
+
+  // A doksi "minden HTTP kerest" iger. A 404 is interakcio: a bongeszo
+  // magatol keri a /favicon.ico-t, es egy elgepelt cim sem jelenti azt,
+  // hogy a felhasznalo elment.
+  const uint32_t third = apDeadline;
+  g_millis += 60u * 1000;
+  AsyncWebServerRequest c; g_handlers["404"](&c);
+  CHECK(c._code == 404, "ismeretlen utvonal tovabbra is 404");
+  CHECK(apDeadline > third, "es a 404 is kitolja a hataridot");
+
+  // A kitolas ABSZOLUT: mindig uj 5 perc, nem kumulativ.
+  CHECK(apDeadline == g_millis + 5u * 60 * 1000,
+        "a hatarido pontosan 5 perccel a keres utanra kerul");
 }
 
 // --- Tovabbi validacio ------------------------------------------------------

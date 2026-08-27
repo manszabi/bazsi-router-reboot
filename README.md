@@ -396,8 +396,9 @@ gombbal vagy áramtalanítással lehet.
 
 Két védelem gondoskodik arról, hogy a mentés ne vesszen el:
 
-- **Minden HTTP kérés újraindítja az 5 perces visszaszámlálást.** Ha az utolsó
-  pillanatban nyitod meg az oldalt, kapsz még egy teljes időablakot.
+- **Minden HTTP kérés újraindítja az 5 perces visszaszámlálást** – a 404-es
+  válasszal végződő is. A határidő abszolút: mindig pontosan 5 perccel a
+  *legutolsó* kérés utánra kerül, nem halmozódik, és felső korlát nincs.
 - **Fájlírás közben az eszköz soha nem alszik el** (`savingConfig` jelző), így
   nem maradhat félig kiírt konfiguráció.
 

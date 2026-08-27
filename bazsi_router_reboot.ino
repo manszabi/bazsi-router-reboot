@@ -1324,6 +1324,11 @@ void startConfigPortal() {
   });
 
   server.onNotFound([](AsyncWebServerRequest* request) {
+    // A 404 is interakció: valaki épp az eszközzel dolgozik. A böngésző
+    // magától kéri például a /favicon.ico-t, és egy elgépelt cím sem
+    // jelenti azt, hogy a felhasználó elment. Enélkül a "minden HTTP kérés
+    // kitolja a határidőt" szabály nem lenne igaz.
+    touchApDeadline();
     request->send(404, "text/plain", "Not found");
   });
 

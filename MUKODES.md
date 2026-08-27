@@ -228,8 +228,10 @@ Nem várunk további teszt ciklusokat: ha nincs Wi-Fi, a tesztnek nincs értelme
 
 Három védelem óvja a mentést:
 
-- **Minden HTTP kérés újraindítja az 5 perces visszaszámlálást.** Ha az utolsó
-  pillanatban nyitod meg az oldalt, kapsz még egy teljes időablakot.
+- **Minden HTTP kérés újraindítja az 5 perces visszaszámlálást** – a 404-es
+  válasszal végződő is, mert az is interakció. A határidő **abszolút**: mindig
+  pontosan 5 perccel a *legutolsó* kérés utánra kerül, nem halmozódik. Felső
+  korlát nincs: amíg nézegeted az oldalt, az eszköz ébren marad.
 - **Fájlírás közben az eszköz soha nem alszik el**, tehát nem maradhat félig
   kiírt konfiguráció.
 - **Fájlírás közben a gombok sem indítanak újra.** A mentést az aszinkron
