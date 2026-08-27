@@ -1421,6 +1421,81 @@ static void scSN2() {
   CHECK(us == 0, "és NINCS időzített ébresztés");
 }
 
+
+// Hany soros sor keletkezett a megadott szimulalt ido alatt?
+static uint32_t serialLinesPerMinute(uint32_t durMs) {
+  const size_t before = g_serialLog.size();
+  const uint32_t t0 = g_millis;
+  int guard = 0;
+  try { while (g_millis - t0 < durMs && ++guard < 3000000) loop(); }
+  catch (DeepSleepSignal&) {} catch (RestartSignal&) {}
+  const uint32_t mins = (g_millis - t0) / 60000;
+  return mins ? (uint32_t)((g_serialLog.size() - before) / mins) : 0;
+}
+
+static void scSER1() {
+  // Normal mukodes: a soros kimenet ne arassza el a konzolt
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpBody = "Microsoft Connect Test";
+  setup();
+  loop();
+  const uint32_t lpm = serialLinesPerMinute(30u * 60 * 1000);
+  printf("     [info] %u sor/perc\n", lpm);
+  CHECK(lpm <= 30, "normál működésben max ~30 sor/perc");
+  CHECK(lpm > 0, "de azért ír valamit (nem néma)");
+}
+
+static void scSER2() {
+  // Internet kiesett: a hibasorozat se generaljon aradatot
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpBody = "Rossz"; pingSim.ok = false;
+  setup();
+  loop();
+  const uint32_t lpm = serialLinesPerMinute(30u * 60 * 1000);
+  printf("     [info] %u sor/perc\n", lpm);
+  CHECK(lpm <= 30, "internet kiesésnél is max ~30 sor/perc");
+}
+
+static void scSER3() {
+  // AP mod es hibajelzo mod: a villogo ciklus ne irjon semmit
+  coldBoot(false, "", "", "", "");
+  setup();
+  const size_t before = g_serialLog.size();
+  const uint32_t t0 = g_millis;
+  try { while (g_millis - t0 < 4u*60*1000) loop(); } catch (DeepSleepSignal&) {}
+  CHECK(g_serialLog.size() == before, "AP módban a loop() egy sort sem ír");
+
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_fsMountOk = false;
+  setup();
+  const size_t before2 = g_serialLog.size();
+  const uint32_t t1 = g_millis;
+  try { while (g_millis - t1 < 4u*60*1000) loop(); } catch (DeepSleepSignal&) {}
+  CHECK(g_serialLog.size() == before2, "hibajelző módban sem ír a villogó ciklus");
+}
+
+static void scOV1() {
+  // A szamlalok nem csordulnak tul: az internet tartos kieseseben a
+  // failedCount / cycleIndex korlatos marad, mert a router reset nullazza oket.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpBody = "Rossz"; pingSim.ok = false;
+  setup();
+  loop();
+  int guard = 0;
+  uint32_t resets = 0;
+  try {
+    while (++guard < 400000) {
+      const size_t before = g_log.size();
+      loop(); g_millis += 10;
+      for (size_t i = before; i < g_log.size(); i++)
+        if (g_log[i] == "pin7=HIGH") resets++;
+      if (resets >= 3) break;
+    }
+  } catch (DeepSleepSignal&) {}
+  CHECK(resets >= 3, "több router reset ciklus lefutott");
+  CHECK(guard < 400000, "nem ragadt be végtelen ciklusba");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -1514,6 +1589,10 @@ static const Scenario kScenarios[] = {
   { "SB2: beragadt wifireset gomb -> ugyanaz", scSB2 },
   { "SB3: a LED-ek FELVÁLTVA villognak elalvás előtt", scSB3 },
   { "SB4: a beragadt gomb naplózva", scSB4 },
+  { "SER1: normál működés soros terhelése", scSER1 },
+  { "SER2: internet kiesés soros terhelése", scSER2 },
+  { "SER3: AP és hibajelző mód néma", scSER3 },
+  { "OV1: több reset ciklus, számlálók korlátosak", scOV1 },
 };
 
 
