@@ -2261,6 +2261,20 @@ static void scKA4() {
           "a tartalek urlapon ott a naplo link is"); }
 }
 
+
+static void scKA5() {
+  // Az AP jelszo hossza WPA2-kotott. A core rovid jelszonal csak annyit tesz,
+  // hogy "passphrase too short!" es return false (AP.cpp) - a softAP()
+  // visszateresi erteket viszont nem nezzuk, tehat az AP NEM jonne letre, az
+  // eszkoz elerhetetlen lenne, es 5 perc mulva elaludna. A sketch ezt
+  // static_assert-tel fogja meg, ez a teszt a futasidoben latszo reszt orzi.
+  coldBoot(false, "", "", "", "");
+  setup();
+  CHECK(wifiSim.softApCount == 1, "az AP elindult");
+  CHECK(wifiSim.apPass.size() >= 8 && wifiSim.apPass.size() <= 63,
+        "az AP jelszo a WPA2 tartomanyban van (8-63 karakter)");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -2378,6 +2392,7 @@ static const Scenario kScenarios[] = {
   { "KA2: nyitva tartott lap mellett nem alszik el", scKA2 },
   { "KA3: a lap bezárása után az utolsó pingtől számít 5 percet", scKA3 },
   { "KA4: keep-alive mindkét űrlapon és a naplóoldalon", scKA4 },
+  { "KA5: az AP jelszó a WPA2 hossztartományban van", scKA5 },
   { "P14: a halasztott újraindítás a türelmi idő UTÁN fut le", scP14 },
   { "L6: minden eseménykód olvasható címkét kap a /log oldalon", scL6 },
   { "L7: üres napló esetén nincs üres táblázat", scL7 },

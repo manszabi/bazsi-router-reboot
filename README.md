@@ -40,7 +40,7 @@ ESP32-C3 alapú automatikus router újraindító rendszer. Az eszköz folyamatos
 Ha nincs mentett Wi-Fi adat (vagy a Wi-Fi reset gombot megnyomtad):
 
 1. Az ESP **Access Point módba** lép
-2. Az AP neve: `ESP-<chipmodel>`, jelszó: `bazsi1234`
+2. Az AP neve: `ESP-<chipmodel>`, jelszó: `12345678`
 3. Csatlakozz az AP-hez, majd nyisd meg a böngészőben: `192.168.4.1`
 4. Töltsd ki az űrlapot:
    - **SSID** – a Wi-Fi hálózat neve (max. 32 karakter)
@@ -475,7 +475,7 @@ beírt adatok sem vesznek el.
   `/gateway.txt`) **nem érhetők el a webszerveren keresztül** – a beállító
   portál csak a `/`, `/style.css` és `/favicon.png` útvonalakat szolgálja ki.
 - A jelszó soha nem kerül ki nyílt szövegként a soros portra, csak a hossza.
-- Az AP jelszava (`bazsi1234`) a forráskódban van; éles használat előtt
+- Az AP jelszava (`12345678`) a forráskódban van; éles használat előtt
   érdemes lecserélni az `AP_PASSWORD` konstansban.
 
 ## 📄 Licenc

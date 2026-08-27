@@ -59,8 +59,14 @@ const char FALLBACK_FORM[] =
   KEEPALIVE_JS_LIT
   "</body></html>";
 
-// AP password (WPA2: min. 8 karakter)
-const char AP_PASSWORD[] = "bazsi1234";
+// AP password (WPA2: min. 8, max. 63 karakter)
+const char AP_PASSWORD[] = "12345678";
+// A WiFi.softAP() visszateresi erteket nem nezzuk, a core pedig rovid jelszonal
+// csak annyit tesz, hogy "passphrase too short!" es return false (AP.cpp) - az
+// AP letre sem jonne, az eszkoz elerhetetlen lenne, es 5 perc mulva elaludna.
+// Ezt fordítási idoben fogjuk meg, hogy egy kesobbi atiras ne tudja elrontani.
+static_assert(sizeof(AP_PASSWORD) - 1 >= 8, "AP jelszo: legalabb 8 karakter (WPA2)");
+static_assert(sizeof(AP_PASSWORD) - 1 <= 63, "AP jelszo: legfeljebb 63 karakter (WPA2)");
 
 // A HTML űrlapról érkező értékek. Fix méretű bufferek: nincs heap-töredezettség,
 // és a szabvány szerinti maximumok egyben validációt is jelentenek.

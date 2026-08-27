@@ -12,7 +12,7 @@ Az eszköz mindig pontosan egy üzemmódban van.
 | Üzemmód | Mikor | Mit csinál |
 |---|---|---|
 | `MODE_MONITOR` | Van Wi-Fi kapcsolat, vagy épp épül | Internetet tesztel, szükség esetén routert indít újra |
-| `MODE_CONFIG` | Nincs használható Wi-Fi konfiguráció | AP beállító portál (`ESP-<chip>` / `bazsi1234`, `192.168.4.1`) |
+| `MODE_CONFIG` | Nincs használható Wi-Fi konfiguráció | AP beállító portál (`ESP-<chip>` / `12345678`, `192.168.4.1`) |
 | `MODE_FATAL` | A fájlrendszer nem használható, vagy 3 watchdog reset | Mindkét LED villog, semmi más nem fut |
 
 ---
