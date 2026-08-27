@@ -2493,6 +2493,99 @@ static void scSE10() {
   CHECK(wifiSim.lastPass == PW, "a router reset utani csatlakozas is a nyilt jelszoval megy");
 }
 
+
+// --- Elgepelt statikus IP: a gateway sem valaszol ---------------------------
+// A Wi-Fi TARSITAS sikerul (WPA2, 2. reteg), de IP szinten nincs ut. A router
+// ujrainditasa ezt sosem javitja - kap egy eselyt, aztan AP mod.
+static int gwFutas(bool gwElerheto, bool statikus, uint32_t maxKor) {
+  coldBoot(true, "TestNet", "pw",
+           statikus ? "192.168.0.200" : "", statikus ? "192.168.0.1" : "");
+  setup();
+  g_httpBody = "Rossz";                       // az internet nem megy
+  pingSim.ok = false;                         // 1.1.1.1 / 8.8.8.8 sem
+  pingSim.perTarget["192.168.0.1"] = gwElerheto;
+  loop();
+  int guard = 0, resetek = 0; bool magas = false;
+  try {
+    while ((uint32_t)++guard < maxKor && deviceMode != (DeviceMode)1) {
+      const size_t before = g_log.size();
+      loop();
+      for (size_t i = before; i < g_log.size(); i++) {
+        if (g_log[i] == "pin7=HIGH" && !magas) { magas = true; resetek++; }
+        if (g_log[i] == "pin7=LOW") magas = false;
+      }
+    }
+  } catch (...) {}
+  return resetek;
+}
+
+static void scGW1() {
+  // A gateway VALASZOL: a hiba nem helyi, marad a megszokott viselkedes.
+  const int resetek = gwFutas(true, true, 400000);
+  CHECK(deviceMode != (DeviceMode)1, "NEM megy AP modba");
+  CHECK(resetek >= 2, "tovabbra is ujraindítja a routert");
+}
+
+static void scGW2() {
+  // A gateway NEM valaszol: egy reset, aztan AP mod.
+  const int resetek = gwFutas(false, true, 400000);
+  CHECK(resetek == 1, "pontosan EGY router reset (kap egy eselyt)");
+  CHECK(deviceMode == (DeviceMode)1, "utana AP beallito mod");
+  CHECK(serialHas("Valoszinuleg rossz a statikus IP"), "meg is mondja, miert");
+
+  bool elso = false, masodik = false, apOk = false;
+  for (uint32_t i = 0; i < rtcEvNext && i < 32; i++) {
+    if (rtcEvents[i].code == 12 && rtcEvents[i].param == 1) elso = true;
+    if (rtcEvents[i].code == 12 && rtcEvents[i].param == 2) masodik = true;
+    if (rtcEvents[i].code == 6  && rtcEvents[i].param == 4) apOk = true;
+  }
+  CHECK(elso, "naplo: GW UNREACH a reset elott (param=1)");
+  CHECK(masodik, "naplo: GW UNREACH a reset utan is (param=2)");
+  CHECK(apOk, "naplo: AP MODE a gateway ok miatt (param=4)");
+}
+
+static void scGW3() {
+  // DHCP-nel NINCS mit ellenorizni: a gateway magatol a routertol jott.
+  // Ilyenkor a viselkedes valtozatlan - vegtelen ujraprobalkozas.
+  const int resetek = gwFutas(false, false, 400000);
+  CHECK(deviceMode != (DeviceMode)1, "DHCP-nel nem megy AP modba");
+  CHECK(resetek >= 2, "a megszokott modon ujraindítja a routert");
+  CHECK(!serialHas("sajat gateway"), "meg csak nem is pingeli a gateway-t");
+}
+
+
+static void scP16() {
+  // A validacio a KOZOS POST kezeloben van, tehat mindket urlapra ugyanugy
+  // ervenyes. Ez a teszt ezt rogziti, hogy senki ne tudja szetcsuszani oket.
+  struct { const char* ip; const char* gw; int varhato; } esetek[] = {
+    { "192.168.1.300", "192.168.1.1", 500 },   // 300-as oktett
+    { "192.168..1.20", "192.168.1.1", 500 },   // dupla pont
+    { "192.168.1.200", "192.168.1",   500 },   // hianyzo oktett
+    { "192.168.1.abc", "192.168.1.1", 500 },   // betu a cimben
+    { "fe80::1",       "192.168.1.1", 500 },   // IPv6
+    { "0.0.0.0",       "192.168.1.1", 500 },   // DHCP-nek szamitana
+    { "192.168.1.200", "",            500 },   // felig kitoltott paros
+    { "192.168.1.200", "192.168.1.1", 200 },   // helyes
+  };
+  for (int feltoltott = 0; feltoltott < 2; feltoltott++) {
+    bool mind = true;
+    for (auto& e : esetek) {
+      coldBoot(false, "", "", "", "");
+      if (feltoltott) g_fs["/wifimanager.html"] = "<html>x</html>";
+      setup();
+      AsyncWebServerRequest g; g_handlers["/#1"](&g);
+      const bool tartalek = g._body.find("data/ mappa nincs") != std::string::npos;
+      if (tartalek == (feltoltott != 0)) mind = false;   // rossz urlapot kaptunk
+      if (postConfig("Halozat", "jelszo123", e.ip, e.gw) != e.varhato) {
+        mind = false;
+        printf("     [info] elteres: ip='%s' gw='%s'\n", e.ip, e.gw);
+      }
+    }
+    CHECK(mind, feltoltott ? "a feltoltott urlapon minden eset egyezik"
+                           : "a tartalek urlapon minden eset egyezik");
+  }
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -2621,6 +2714,10 @@ static const Scenario kScenarios[] = {
   { "SE8: a WiFi.begin() a NYÍLT jelszót kapja, nem a kódoltat", scSE8 },
   { "SE9: kapcsolatvesztés utáni újracsatlakozás is jó jelszóval", scSE9 },
   { "SE10: router reset utáni újracsatlakozás is jó jelszóval", scSE10 },
+  { "GW1: elérhető gateway esetén a viselkedés változatlan", scGW1 },
+  { "GW2: elérhetetlen gateway -> egy reset, majd AP mód + napló", scGW2 },
+  { "GW3: DHCP-nél nincs gateway-ellenőrzés", scGW3 },
+  { "P16: a validáció mindkét űrlapon azonos", scP16 },
   { "P14: a halasztott újraindítás a türelmi idő UTÁN fut le", scP14 },
   { "L6: minden eseménykód olvasható címkét kap a /log oldalon", scL6 },
   { "L7: üres napló esetén nincs üres táblázat", scL7 },

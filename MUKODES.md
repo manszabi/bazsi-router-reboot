@@ -128,7 +128,8 @@ Minden bejegyzés uptime bélyeget, egy eseménykódot és egy paramétert tarta
 | `WIFI LOST` | `WiFi.status()` a kiesés pillanatában |
 | `TEST FAIL` | a teszt ciklus indexe (csak a hibasorozat **első** tagja) |
 | `ROUTER RESET` | hányadik reset esemény (1–4) |
-| `AP MODE` | 1 = nincs mentett SSID, 2 = hitelesítési hiba, 3 = letelt a 2 nap |
+| `AP MODE` | 1 = nincs mentett SSID, 2 = hitelesítési hiba, 3 = letelt a 2 nap, 4 = a gateway sem érhető el |
+| `GW UNREACH` | 1 = a router reset előtt, 2 = a reset után is |
 | `CONFIG SAVED` | 0 |
 | `SLEEP` | 1 = újrapróbálkozás, 2 = tartós internetkiesés, 3 = AP időtúllépés, 4 = végzetes hiba |
 | `FATAL` | 1 = LittleFS csatolás, 2 = konfiguráció olvasás, 3 = watchdog, 4 = a wifireset törlése nem sikerült |
@@ -184,6 +185,25 @@ megszólalásáig.
 | Wi-Fi újracsatlakozás: 3 próba, köztük 30 mp | max. ~2 perc |
 
 **Egy teljes reset ciklus:** 5 teszt (2,4 perc) + 90 mp + 10 perc + újracsatlakozás ≈ **14 perc**
+
+### Ha a saját gateway sem válaszol
+
+Statikus IP mellett külön eset: a Wi-Fi **társítás sikerül** (az WPA2, 2. réteg),
+de IP szinten nincs út sehová. Ez jellemzően **elgépelt statikus IP** – és ezt a
+router újraindítása soha nem javítja.
+
+Az eszköz ezért a router áramtalanítása előtt megpingeli a saját gateway-ét:
+
+| | |
+|---|---|
+| A gateway válaszol | a hiba nem helyi → **megszokott viselkedés** (reset, majd újra) |
+| Nem válaszol, **először** | a router kap **egy esélyt**: reset, majd újra ellenőrzés (`GW UNREACH` 1) |
+| A reset után **sem** válaszol | **AP beállító mód**, hogy javítható legyen (`GW UNREACH` 2, `AP MODE` 4) |
+| DHCP-nél | **nincs ellenőrzés** – a gateway magától a routertől jött |
+
+> **Ha a routered nem válaszol ICMP echóra**, ez tévesen „elérhetetlen"-t ad.
+> Épp ezért kap a router előbb egy esélyt, és csak másodszorra következik az AP
+> mód. Ilyen routernél használj DHCP-t.
 
 ### Ha az újracsatlakozás sem sikerül
 
