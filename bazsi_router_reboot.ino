@@ -311,6 +311,8 @@ bool initWiFi();
 bool reconnectWifi();
 bool writeConfigValue(fs::FS& fs, const char* path, const char* message);
 bool isUsableIPv4(const IPAddress& addr);
+bool encodeSecret(const char* plain, char* out, size_t outSize);
+void decodeSecretInPlace(char* buf);
 
 // Esemény rögzítése a körpufferbe. Nem allokál, nem blokkol.
 void logEvent(EventCode code, uint16_t param) {
@@ -342,6 +344,101 @@ const char* eventName(uint8_t code) {
     case EV_STUCK_BUTTON: return "STUCK BUTTON";
     default: return "?";
   }
+}
+
+// --- A mentett jelszó összekeverése ----------------------------------------
+//
+// Cél, pontosan körülhatárolva: egy flash dumpon futtatott `strings` NE adjon
+// használható jelszót, és egy kimásolt /pass.txt más lapkán se működjön.
+//
+// Amit NEM ad: ez nem titkosítás. Aki kódot tud futtatni az eszközön (a C3-ban
+// beépített USB Serial/JTAG-gel vagy saját sketch-csel), az a visszafejtett
+// jelszót kiolvassa a RAM-ból - a művelet ugyanis magán az eszközön történik.
+// Az egyetlen valódi védelem a flash titkosítás (eFuse-ban tárolt kulccsal).
+//
+// Formátum: "v1:" + kisbetűs hexa. Az előtag nélküli fájl régi, sima szöveges
+// mentés; azt továbbra is elfogadjuk, különben egy frissítés használhatatlanná
+// tenné a már beállított eszközöket.
+//
+// A kulcsfolyam magjában ott van az eFuse MAC is (esp_efuse_mac_get_default(),
+// Esp.cpp). Az eFuse NEM a flashben van, tehát egy önmagában kimásolt
+// flash-tartalom kevés hozzá, és a nyilvános forráskódból írt általános
+// dekóder sem elég: az adott chip is kell.
+constexpr uint32_t SECRET_SALT = 0x42415A53UL;  // "BAZS"
+constexpr char SECRET_PREFIX[] = "v1:";
+constexpr size_t SECRET_PREFIX_LEN = sizeof(SECRET_PREFIX) - 1;
+// "v1:" + 2 hexa jegy jelszó-bájtonként
+constexpr size_t SECRET_ENC_MAX = SECRET_PREFIX_LEN + 2 * PASS_MAX_LEN;
+
+uint32_t secretSeed() {
+  const uint64_t mac = ESP.getEfuseMac();  // 6 bájt, a felső 2 nulla
+  const uint32_t seed = SECRET_SALT ^ (uint32_t)mac ^ (uint32_t)(mac >> 32);
+  // A xorshift a 0 állapotból soha nem lép ki - ezt ki kell zárni.
+  return seed != 0 ? seed : SECRET_SALT;
+}
+
+// Determinisztikus kulcsfolyam. Pozíciófüggő, tehát az ismétlődő karakterek
+// sem adnak ismétlődő bájtokat a fájlban.
+uint32_t xorshift32(uint32_t& x) {
+  x ^= x << 13;
+  x ^= x >> 17;
+  x ^= x << 5;
+  return x;
+}
+
+bool encodeSecret(const char* plain, char* out, size_t outSize) {
+  const size_t len = strlen(plain);
+  if (outSize < SECRET_PREFIX_LEN + 2 * len + 1) {
+    return false;
+  }
+  memcpy(out, SECRET_PREFIX, SECRET_PREFIX_LEN);
+  uint32_t state = secretSeed();
+  static const char HEX[] = "0123456789abcdef";
+  for (size_t i = 0; i < len; i++) {
+    const uint8_t b = (uint8_t)plain[i] ^ (uint8_t)(xorshift32(state) & 0xFF);
+    out[SECRET_PREFIX_LEN + 2 * i]     = HEX[b >> 4];
+    out[SECRET_PREFIX_LEN + 2 * i + 1] = HEX[b & 0x0F];
+  }
+  out[SECRET_PREFIX_LEN + 2 * len] = '\0';
+  return true;
+}
+
+int hexVal(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  return -1;  // szándékosan csak kisbetűs: ezt írjuk ki
+}
+
+// Helyben dekódol. Ha a tartalom nem a mi formátumunk, VÁLTOZATLANUL hagyja -
+// így a régi, sima szöveges mentések is működnek, és az sem baj, ha valakinek
+// történetesen "v1:" a jelszava.
+//
+// Szándékosan NEM végzetes hiba a hibás tartalom: rossz jelszóval a Wi-Fi
+// egyszerűen nem jön össze, és az eszköz a szokásos úton AP módba kerül, ahol
+// újra beállítható. Ez öngyógyul, a villogó LED nem.
+void decodeSecretInPlace(char* buf) {
+  if (strncmp(buf, SECRET_PREFIX, SECRET_PREFIX_LEN) != 0) {
+    return;  // régi, sima szöveges mentés
+  }
+  const char* hex = buf + SECRET_PREFIX_LEN;
+  const size_t hexLen = strlen(hex);
+  if (hexLen % 2 != 0) {
+    return;
+  }
+  for (size_t i = 0; i < hexLen; i++) {
+    if (hexVal(hex[i]) < 0) {
+      return;
+    }
+  }
+  // A kiírási index (i) mindig kisebb az olvasásinál (3 + 2i), ezért a helyben
+  // dekódolás előrefelé haladva biztonságos.
+  uint32_t state = secretSeed();
+  const size_t n = hexLen / 2;
+  for (size_t i = 0; i < n; i++) {
+    const uint8_t b = (uint8_t)((hexVal(hex[2 * i]) << 4) | hexVal(hex[2 * i + 1]));
+    buf[i] = (char)(b ^ (uint8_t)(xorshift32(state) & 0xFF));
+  }
+  buf[n] = '\0';
 }
 
 // Használható-e ez a cím statikus IPv4 konfigurációnak?
@@ -1422,7 +1519,17 @@ void startConfigPortal() {
           Serial.print("Password set to: ");
           Serial.print((unsigned)strlen(pass));
           Serial.println(" chars");
-          saveOk &= writeConfigValue(LittleFS, passPath, pass);
+          // Összekeverve mentjük, hogy egy flash dumpon a `strings` ne adjon
+          // használható jelszót. A visszaolvasásos ellenőrzés érintetlen: a
+          // writeConfigValue() a kódolt formát verifikálja.
+          char enc[SECRET_ENC_MAX + 1];
+          if (encodeSecret(pass, enc, sizeof(enc))) {
+            saveOk &= writeConfigValue(LittleFS, passPath, enc);
+          } else {
+            Serial.println("- a jelszo kodolasa nem fert a pufferbe");
+            saveOk = false;
+            if (failReason == nullptr) failReason = "Belso hiba a jelszo mentesekor.";
+          }
         } else {
           Serial.println("Password too long!");
           saveOk = false;
@@ -1573,7 +1680,18 @@ void setup() {
     // Load values saved in LittleFS
     ConfigStatus st = CONFIG_OK;
     if (readConfigValue(LittleFS, ssidPath, ssid, sizeof(ssid)) == CONFIG_ERROR) st = CONFIG_ERROR;
-    if (readConfigValue(LittleFS, passPath, pass, sizeof(pass)) == CONFIG_ERROR) st = CONFIG_ERROR;
+    // A jelszó kódolva van, ezért nagyobb pufferbe olvassuk, majd helyben
+    // dekódoljuk. A puffer csak itt él, a veremben - nem globális.
+    {
+      char passRaw[SECRET_ENC_MAX + 1];
+      if (readConfigValue(LittleFS, passPath, passRaw, sizeof(passRaw)) == CONFIG_ERROR) {
+        st = CONFIG_ERROR;
+        pass[0] = '\0';
+      } else {
+        decodeSecretInPlace(passRaw);
+        strlcpy(pass, passRaw, sizeof(pass));
+      }
+    }
     if (readConfigValue(LittleFS, ipPath, ipStr, sizeof(ipStr)) == CONFIG_ERROR) st = CONFIG_ERROR;
     if (readConfigValue(LittleFS, gatewayPath, gatewayStr, sizeof(gatewayStr)) == CONFIG_ERROR) st = CONFIG_ERROR;
 

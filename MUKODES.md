@@ -225,6 +225,7 @@ Nem várunk további teszt ciklusokat: ha nincs Wi-Fi, a tesztnek nincs értelme
 | A nyitva lévő lap keep-alive-ja | **60 mp**-enként `GET /ping` (1 bájt válasz) |
 | Elfogadott IP / gateway | **csak IPv4**, nem `0.0.0.0`, és csak együtt |
 | SSID / jelszó | mentéskor a szélső szóközök levágódnak |
+| A jelszó tárolása | összekeverve (`v1:` + hexa), az eFuse MAC-hez kötve |
 | Az alvásból ébredés | **csak a reset gombbal** – időzített ébresztés nincs |
 
 Négy védelem óvja a mentést:

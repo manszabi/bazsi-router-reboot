@@ -476,7 +476,56 @@ beírt adatok sem vesznek el.
   portál csak a `/`, `/style.css` és `/favicon.png` útvonalakat szolgálja ki.
 - A jelszó soha nem kerül ki nyílt szövegként a soros portra, csak a hossza.
 - Az AP jelszava (`12345678`) a forráskódban van; éles használat előtt
-  érdemes lecserélni az `AP_PASSWORD` konstansban.
+  érdemes lecserélni az `AP_PASSWORD` konstansban. A hosszát `static_assert`
+  őrzi (WPA2: 8–63 karakter), mert a core rövidebbnél nem indítana AP-t, és a
+  `softAP()` visszatérési értékét nem nézzük.
+
+### A mentett jelszó összekeverése
+
+A `/pass.txt` nem nyílt szöveggel tárolódik:
+
+```
+v1:ef58b21d923ed7afdc03f7e8336431cc8f158ea5
+```
+
+**Amit ad:**
+
+| | |
+|---|---|
+| `strings dump.bin` a flash dumpon | nem ad használható jelszót (még 4 karakteres darabját sem) |
+| Kimásolt `/pass.txt` másik lapkán | nem működik |
+| Kész dekóder a nyilvános forrásból | önmagában nem elég – kell hozzá a konkrét chip |
+
+A kulcsfolyam magjában ott van az **eFuse MAC** is
+(`esp_efuse_mac_get_default()`, `Esp.cpp`). Az eFuse **nem a flashben van**,
+ezért egy önmagában kimásolt flash-tartalom kevés hozzá.
+
+**Amit NEM ad – ez fontos:**
+
+> Ez **nem titkosítás**. Aki kódot tud futtatni az eszközön – az ESP32-C3-ban
+> beépített USB Serial/JTAG-gel (`SOC_USB_SERIAL_JTAG_SUPPORTED`), vagy egy
+> saját sketch-csel –, az a visszafejtett jelszót kiolvassa a RAM-ból: a
+> művelet ugyanis magán az eszközön történik, az eszköz maga a visszafejtő.
+> Ez a `strings | grep` utat zárja le, nem a felkészült támadót.
+>
+> **Az egyetlen valódi védelem a flash titkosítás** (XTS-AES-128, eFuse-ban
+> tárolt kulccsal – a C3 tudja: `SOC_FLASH_ENCRYPTION_XTS_AES_128`). Ára:
+> egyirányú eFuse-égetés és körülményesebb újraflashelés.
+>
+> A legjobb ár/érték arányú lépés viszont nem szoftveres: **tedd az eszközt
+> vendég- vagy IoT-SSID-re**. Akkor egy ellopott eszközből csak a
+> mellékhálózat kulcsa nyerhető ki.
+
+**Kompatibilitás és hibatűrés:**
+
+- A formátum verziózott (`v1:`). Az előtag nélküli fájl **régi, nyílt szöveges
+  mentés** – azt továbbra is elfogadja, tehát egy frissítés nem teszi
+  használhatatlanná a már beállított eszközöket.
+- Hibás tartalom **nem** végzetes hiba: az eszköz sima szövegként kezeli, a
+  Wi-Fi nem jön össze, és a szokásos úton AP módba kerül, ahol újra
+  beállítható. Ez öngyógyul; a villogó LED nem.
+- **Lapkacsere esetén újra kell konfigurálni** – a mentés az adott chiphez
+  kötött. Ugyanezért egy LittleFS-mentés sem hordozható át másik eszközre.
 
 ## 📄 Licenc
 
