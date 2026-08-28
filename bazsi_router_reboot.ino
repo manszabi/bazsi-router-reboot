@@ -426,11 +426,14 @@ bool encodeSecret(const char* plain, char* out, size_t outSize) {
   }
   memcpy(out, SECRET_PREFIX, SECRET_PREFIX_LEN);
   uint32_t state = secretSeed();
-  static const char HEX[] = "0123456789abcdef";
+  // NEM "HEX": a Print.h-ban az egy makro (#define HEX 16), tehat abbol
+  // "static const char 16[]" lenne. A core makrói (HEX, DEC, OCT, BIN) minden
+  // sketchre ravonatkoznak - a lokalis nevek nem utkozhetnek veluk.
+  static const char kHexDigits[] = "0123456789abcdef";
   for (size_t i = 0; i < len; i++) {
     const uint8_t b = (uint8_t)plain[i] ^ (uint8_t)(xorshift32(state) & 0xFF);
-    out[SECRET_PREFIX_LEN + 2 * i]     = HEX[b >> 4];
-    out[SECRET_PREFIX_LEN + 2 * i + 1] = HEX[b & 0x0F];
+    out[SECRET_PREFIX_LEN + 2 * i]     = kHexDigits[b >> 4];
+    out[SECRET_PREFIX_LEN + 2 * i + 1] = kHexDigits[b & 0x0F];
   }
   out[SECRET_PREFIX_LEN + 2 * len] = '\0';
   return true;

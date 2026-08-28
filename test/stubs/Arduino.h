@@ -11,6 +11,15 @@
 
 #define HIGH 1
 #define LOW 0
+// A core Print.h szamkonstansai. NEM azert kellenek, mert a sketch hasznalja
+// oket, hanem hogy a harness elkapja a nevutkozest: ezek makrok, tehat egy
+// "static const char HEX[]" nevu lokalis valtozobol a valodi forditason
+// "static const char 16[]" lesz. A hoston enelkul csendben leforduljon,
+// az eszkozon meg elhasal - pontosan ezt a kulonbseget zarjuk ki.
+#define DEC 10
+#define HEX 16
+#define OCT 8
+#define BIN 2
 #define OUTPUT 1
 #define INPUT_PULLUP 2
 // A valódi XIAO_ESP32C3 variants/pins_arduino.h szerint
