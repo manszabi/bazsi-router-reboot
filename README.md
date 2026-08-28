@@ -4,7 +4,7 @@ ESP32-C3 alapú automatikus router újraindító rendszer. Az eszköz folyamatos
 
 ## 📋 Jellemzők
 
-- **Automatikus internetkapcsolat-figyelés** – HTTP és ICMP (ping) tesztek váltakozásával, két különböző publikus szerver felé
+- **Automatikus internetkapcsolat-figyelés** – öt HTTP teszt, öt különböző üzemeltető felé
 - **Automatikus router újraindítás** – relé segítségével áramtalanítja, majd visszakapcsolja a routert
 - **Wi-Fi Manager** – böngészőből konfigurálható SSID, jelszó, IP-cím és gateway
 - **LittleFS** – a beállítások áramszünet után is megmaradnak
@@ -122,22 +122,61 @@ Az eszköz három állapotban működik:
 
 #### Tesztelési módszerek (ciklikusan váltakoznak)
 
-| Ciklus index | Teszt típus |
-|:---:|---|
-| 0 | HTTP – `msftconnecttest.com/connecttest.txt` |
-| 1 | Ping – Cloudflare `1.1.1.1` (4 ping, min. 2 sikeres kell) |
-| 2 | HTTP – `msftncsi.com/ncsi.txt` |
-| 3 | Ping – Google `8.8.8.8` |
-| 4 | HTTP – `msftncsi.com/ncsi.txt` |
-| 5+ | HTTP – `msftconnecttest.com/connecttest.txt` |
+| Ciklus index | Végpont | Üzemeltető | Elvárt válasz |
+|:---:|---|---|---|
+| 0 | `msftconnecttest.com/connecttest.txt` | Microsoft | `Microsoft Connect Test` |
+| 1 | `cp.cloudflare.com/generate_204` | Cloudflare | **204 No Content** |
+| 2 | `detectportal.firefox.com/success.txt` | Mozilla | `success` |
+| 3 | `nmcheck.gnome.org/check_network_status.txt` | GNOME / NetworkManager | `NetworkManager is online` |
+| 4 | `connectivitycheck.gstatic.com/generate_204` | Google | **204 No Content** |
+| 5+ | `msftconnecttest.com/connecttest.txt` | Microsoft | `Microsoft Connect Test` |
 
-> A két ping teszt szándékosan más-más szolgáltatót céloz (Cloudflare, ill.
-> Google), így az egyikük kiesése nem tűnik internetkimaradásnak.
-> A ping teszt akkor áll le, amint az eredmény eldőlt (2 sikeres → sikeres,
-> vagy már a maradék pingekkel sem érhető el a 2 → sikertelen), így általában
-> a 4 pingnél kevesebbet futtat.
-> A HTTP teszt a válaszból legfeljebb 96 bájtot olvas be, és levágja a záró
-> sortörést az összehasonlítás előtt.
+> Az 5+ sor a gyakorlatban nem fordul elő: mivel `failedCount == cycleIndex + 1`
+> mindig igaz, a 4-es indexnél már teljesül a reset feltétele.
+
+**Nincs internet = mind az öt teszt elbukik.** Öt különböző végpont, öt
+független üzemeltető, két ellenőrzési mód. Bármelyik siker nullázza a
+számlálókat, tehát egyetlen szolgáltató kiesése soha nem látszik
+internetkimaradásnak. A küszöb szándékosan szigorúbb az iparági szokásnál
+(a Nagios `max_check_attempts` alapértelmezése 3 egymást követő bukás), mert
+egy téves reset ára ~11,5 perc kiesés, a plusz szigorúságé viszont csak
+~1 perc késleltetés.
+
+> **Ha DNS-szűrőt futtatsz a hálózaton** (Pi-hole, AdGuard Home), ellenőrizd a
+> blokklistáidat: több népszerű lista tiltja a `connectivitycheck.gstatic.com`
+> és a `detectportal.firefox.com` domaint (épp azért, hogy az OS/böngésző ne
+> „telefonáljon haza"). Egy blokkolt név `0.0.0.0`-ra oldódik vagy NXDOMAIN-t
+> ad, tehát az adott teszt **mindig elbukik**. Ez önmagában nem okoz téves
+> resetet – a 2-es indexig csak akkor jutunk el, ha a 0-s és az 1-es is
+> elbukott –, de elveszíted a redundancia egy részét. A soros naplóban a
+> `Teszt ciklus index = N` sor és a `/log` oldal `TEST FAIL` bejegyzésének
+> paramétere is megmondja, melyik végpont bukott el.
+
+#### Miért nincs ping az internettesztek között
+
+Az ICMP nem bizonyít sem névfeloldást, sem TCP-t. A leggyakoribb valós hiba
+– amikor az olcsó router DNS-továbbítója befagy – mellett a ping tökéletesen
+megy, miközben a házban egyetlen eszköz sem éri el az internetet. Mérve: a
+korábbi, pinget is tartalmazó változat **egy órán át 41 bukott HTTP teszt
+mellett nulla** router resetet indított, mert az 1-es indexen a `1.1.1.1`
+ping mindig sikerült és nullázta a számlálókat. Nem véletlen, hogy egyetlen
+nagy implementáció sem ICMP-vel validál: a NetworkManager (libcurl HTTP), a
+Firefox (`detectportal`), a Windows NCSI (DNS + HTTP) mind HTTP-t használ.
+
+A ping megmaradt, de **csak a saját gateway ellenőrzésére** (`gatewayUnreachable()`),
+ahol pont az a kérdés, hogy a 3. rétegben elérünk-e egyáltalán valamit.
+
+#### A két ellenőrzési mód
+
+A **204-es ellenőrzés** szigorúbb, mint a szöveg-egyeztetés: egy captive
+portál nem tud `204 No Content`-et adni, mert neki éppenséggel tartalmat kell
+küldenie (bejelentkező oldal vagy átirányítás). A `testInternetHTTP()` akkor
+vált erre az ágra, ha az elvárt válasz üres sztring. Ugyanezt a döntést hozza
+a NetworkManager is (`src/core/nm-connectivity.c`: 204 → „no content, as
+expected", bármi más → portál).
+
+> A szöveges ellenőrzés a válaszból legfeljebb 96 bájtot olvas be, és levágja
+> a záró sortörést az összehasonlítás előtt.
 
 #### Router reset folyamat
 
@@ -208,7 +247,7 @@ bazsi-router-reboot/
 | `AsyncTCP` | Aszinkron TCP az ESPAsyncWebServer-hez |
 | `LittleFS` | Fájlrendszer a flash memóriában |
 | `HTTPClient` | HTTP kérések az internettesztekhez |
-| `ESPping` | ICMP ping tesztek |
+| `ESPping` | ICMP ping a saját gateway ellenőrzéséhez |
 
 ## 🚀 Telepítés
 
@@ -268,7 +307,8 @@ Signal strength (RSSI): -45 dBm
 WIFI OK!
 Uptime: 0h 3m 1s
 Beginning Test.
-✅ Ping teszt sikeres.
+Microsoft Connect Test
+Igaz érték!
 Successful Test
 SUCCESS_DELAY delay start.
 ```
@@ -310,16 +350,24 @@ A watchdog ezt oldja meg: újraindítja az ESP-t, a `setup()` pedig azonnal
 
 Az ESP-IDF task watchdogja alapból fut, de önmagában **nem véd meg**:
 
-| | Alapértelmezés | Következmény |
+| | Érték a kész Arduino libekben | Következmény |
 |---|---|---|
-| `loopTaskWDTEnabled` | `false` (Arduino `main.cpp`) | a `loop()` megakadását észre sem veszi |
-| `ESP_TASK_WDT_PANIC` | `n` | timeoutkor csak figyelmeztetést ír ki, nem indít újra |
-| `ESP_TASK_WDT_TIMEOUT_S` | `5` | rövidebb, mint a firmware szándékos blokkolásai |
+| `loopTaskWDTEnabled` | `false` (Arduino `main.cpp:111`) | a `loop()` megakadását észre sem veszi |
+| `ESP_TASK_WDT_PANIC` | `y` (`defconfig.common:21`) – az IDF saját alapja `n` | jó, de nem a mi érdemünk: egy másképp fordított libnél a timeout csak figyelmeztetés lenne |
+| `ESP_TASK_WDT_TIMEOUT_S` | `5` (IDF alap, a lib-builder nem írja felül) | rövidebb, mint a firmware szándékos blokkolásai |
+
+> A „kész Arduino libek" értékei az
+> [espressif/esp32-arduino-lib-builder](https://github.com/espressif/esp32-arduino-lib-builder)
+> `configs/defconfig.common` és `configs/defconfig.esp32c3` fájljaiból valók –
+> ezekből fordulnak az `esp32-arduino-libs` előfordított könyvtárak. Ami ott
+> nem szerepel, arra az ESP-IDF Kconfig alapértelmezése érvényes.
 
 Ezért az `initWatchdog()` mindhármat kifejezetten beállítja:
 
 - **90 másodperces** timeout – a leghosszabb *nem etethető* blokkolás a
-  `http.GET()` (5 mp connect + 10 mp válasz ≈ 15 mp), erre hatszoros tartalék
+  `http.GET()`. A rossz eset nem a hallgató szerver (5 mp connect + 10 mp
+  válasz = 15 mp), hanem a **halott DNS**, mert a névfeloldás a connect
+  timeouton **kívül** esik – lásd lentebb
 - **`trigger_panic = true`** – timeoutkor valódi újraindulás
 - **`idle_core_mask = 0`** – csak a saját loop taskot figyeli. Az idle task
   figyelése itt káros lenne, mert a firmware szándékosan blokkol percekig
@@ -330,6 +378,76 @@ Ezért az `initWatchdog()` mindhármat kifejezetten beállítja:
 > 5 mp-ről 90 mp-re lazul (`CONFIG_ASYNC_TCP_USE_WDT=1`, `AsyncTCP.cpp:334`).
 > Ez a gyakorlatban nem számít: az aszinkron szerver csak AP konfigurációs
 > módban fut, és ott a `loop()` amúgy is ezredmásodpercek alatt körbeér.
+
+### Mikor élesedik
+
+A watchdog a **LittleFS csatolása után, de a Wi-Fi indítása előtt** élesedik:
+
+| Szakasz | Felügyelve? | Miért |
+|---|:---:|---|
+| soros port, gombellenőrzés, LittleFS csatolás/**formázás** | nem | a `LittleFS.begin(true)` első indításkor formáz: ~1,5 MB partíció szektoronként 30–50 ms, összesen 15–20 mp. Ezt szándékosan kihagyjuk, hogy egy első bekapcsolás soha ne fusson watchdog resetbe |
+| `WiFi.persistent()`, `initWiFi()`, AP portál indítása | **igen** | a Wi-Fi init a legvalószínűbb lefagyási pont |
+| `loop()` | **igen** | |
+
+### Mit fog el a hardver magától
+
+Az ESP32-C3 watchdogjai mind hardveresek (`SOC_WDT_SUPPORTED`):
+
+| Watchdog | Állapot az Arduino buildben | Mit fog el |
+|---|---|---|
+| **INT_WDT** (interrupt) | **bekapcsolva, 300 ms** – `CONFIG_ESP_INT_WDT_TIMEOUT_MS=300` (`defconfig.common:17`); magát a `CONFIG_ESP_INT_WDT`-t a lib-builder sehol nem tiltja le, tehát marad az IDF `default y` | ha a FreeRTOS tick megáll: letiltott megszakítás, végtelen ciklus megszakításban |
+| **TWDT** (task) | bekapcsolva (`ESP_TASK_WDT_EN`/`_INIT` IDF alap `y`), 5 mp, panic **`y`** (`defconfig.common:21`); az idle task nincs figyelve (`# CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0 is not set`, `defconfig.esp32c3:2`) | egy figyelt task nem etet – ezt konfiguráljuk 90 mp-re |
+| **RWDT** (RTC) | bootloader, 9000 ms | **csak a bootot** – az IDF `app_main()` előtt kikapcsolja (`BOOTLOADER_WDT_DISABLE_IN_USER_CODE` alapból `n`) |
+
+Az INT_WDT és a TWDT megléte **fordítási idejű** (sdkconfig) döntés: ezek a
+beállítások az előfordított `esp32-arduino-libs` könyvtárakba vannak beleégetve.
+Vázlatból nincs API, amivel az INT_WDT-t be lehetne kapcsolni – ha ki lenne
+kapcsolva, csak saját IDF-fordítás vagy az `esp32-arduino-lib-builder`
+segítene. A TWDT-ből ezzel szemben van futásidejű API (`esp_task_wdt_*`), és a
+firmware ezt használja is.
+
+#### Miért 90 mp, és nem 30
+
+A `NetworkClient::connect(host, port, timeout)` **először** névfeloldást végez,
+és az `http.setConnectTimeout()` erre **nem vonatkozik**:
+
+```cpp
+int NetworkClient::connect(const char *host, uint16_t port, int32_t timeout_ms) {
+  IPAddress srv((uint32_t)0);
+  if (!Network.hostByName(host, srv)) {   // <- nincs timeout paraméter
+    return 0;
+  }
+  return connect(srv, port, timeout_ms);
+}
+```
+
+Egy lwIP DNS lekérdezés **szerverenként ~7 mp** alatt adja fel: `DNS_MAX_RETRIES`
+= 4 (lwIP `opt.h`), `DNS_TMR_INTERVAL` = 1000 ms (`dns.h`), és a `dns_check_entry()`
+a `tmr`-t 1, 1, 2, 3 lépésekben növeli – összesen 7 tick. DHCP-től jellemzően
+2 szerver jön (a 3. slot a fallback, `LWIP_FALLBACK_DNS_SERVER_SUPPORT` alapból `n`).
+
+Ha az eszköznek van **globális IPv6 címe** (a lib-builder `CONFIG_LWIP_IPV6_AUTOCONFIG=y`),
+a `hostByName()` **kétszer** kérdez: előbb csak `AF_INET6`-ot, aztán `AF_UNSPEC`-et.
+
+Ráadásul a `lwip_getaddrinfo()` hibakódjai **pozitívak** (`netdb.h`: `EAI_NONAME`
+200 … `HOST_NOT_FOUND` 210), amit a `!Network.hostByName(...)` igaznak lát – így
+a sikertelen névfeloldás után még egy `0.0.0.0`-ra irányuló `connect()` is lefut
+a maga 5 másodpercével.
+
+| eset | egy bukott HTTP teszt |
+|---|---|
+| szerver hallgat, DNS jó | 15 mp |
+| 1 DNS szerver, nincs IPv6 | ~12 mp |
+| 2 DNS szerver, nincs IPv6 | ~19 mp |
+| 2 DNS szerver + globális IPv6 | **~33 mp** |
+
+A 90 mp tehát ~2,7-szeres tartalékot ad, nem hatszorosat. A `WD13` teszt ezt a
+33 mp-es legrosszabb esetet méri.
+
+A „kemény" megállást tehát az INT_WDT 300 ms alatt elkapja, akkor is, ha a
+task watchdog még nem élesedett. Amit **csak** a task watchdog lát, az a
+csendes, szabályosan blokkoló beragadás – amikor a rendszer tovább tickel, de
+a mi taskunk örökre vár valamire. Épp ezért kellett a Wi-Fi init elé.
 
 ### A feliratkozás ellenőrzése
 
@@ -368,9 +486,10 @@ reset gomb ébreszti**.
 - **Áramtalanítás** vagy külső reset nullázza (emberi beavatkozás → tiszta lap).
 - **1 óra hibátlan működés** szintén nullázza.
 
-Az **interrupt watchdog** (`ESP_INT_WDT`) alapból aktív, és a panic kezelő
-alapértelmezése `PRINT_REBOOT`, tehát a megszakítás-szintű megakadásokat az
-IDF már eleve kezeli.
+Az **interrupt watchdog** (`ESP_INT_WDT`) az Arduino buildben aktív
+(lásd fentebb: `defconfig.common:17`), és a panic kezelő alapértelmezése
+`PRINT_REBOOT`, tehát a megszakítás-szintű megakadásokat az IDF már eleve
+kezeli.
 
 > A hosszú várakozások `delay()`-t használnak `yield()` helyett. A `yield()`
 > csak azonos prioritású taskok között ad át vezérlést, tehát a korábbi

@@ -110,6 +110,7 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   g_gpioWakeResult = 0;
   g_gpioWakeMask = 0; g_gpioWakeMode = -1;
   g_httpCode = 200; g_httpSize = -2; g_httpBeginOk = true; g_httpBody = "Microsoft NCSI";
+  g_httpUrls.clear();
   wifiSim.reset(); pingSim = PingSim();
   wifiSim.willConnect = willConnect; wifiSim.latencyMs = latency;
   if (s && *s)  g_fs["/ssid.txt"] = s;
@@ -1698,6 +1699,115 @@ static void scH5() {
   CHECK(elapsed < 90000, "biztosan a watchdog timeout alatt marad");
 }
 
+// --- "generate_204" stilusu vegpont -----------------------------------------
+// Ures elvart valasz eseten nem szoveget egyeztetunk, hanem a 204 No Content
+// statuszkodot varjuk. Ez szigorubb: egy captive portal nem tud 204-et adni,
+// mert neki eppenseggel tartalmat kell kuldenie (bejelentkezo oldal vagy
+// atiranyitas). Ugyanezt a dontest hozza a NetworkManager is.
+static void scH6() {
+  g_httpBeginOk = true; g_httpSize = -2;
+  g_httpCode = 204; g_httpBody = "";
+  CHECK(testInternetHTTP("http://x/generate_204", ""), "204 + üres elvárás -> siker");
+
+  g_httpCode = 200; g_httpBody = "";
+  CHECK(!testInternetHTTP("http://x/generate_204", ""),
+        "üres törzsű 200 nem elég, ha 204-et várunk");
+
+  g_httpCode = 200; g_httpBody = "<html>Jelentkezzen be a WiFi hasznalatahoz</html>";
+  CHECK(!testInternetHTTP("http://x/generate_204", ""),
+        "captive portal 200 + HTML -> elbukik");
+
+  g_httpCode = 302; g_httpBody = "";
+  CHECK(!testInternetHTTP("http://x/generate_204", ""), "átirányítás -> elbukik");
+
+  g_httpCode = -1; g_httpBody = "";
+  CHECK(!testInternetHTTP("http://x/generate_204", ""), "kapcsolódási hiba -> elbukik");
+
+  // A szoveges ag nem lazul fel: ott tovabbra is 200 kell.
+  g_httpCode = 204; g_httpBody = "Microsoft Connect Test";
+  CHECK(!testInternetHTTP("http://x/", "Microsoft Connect Test"),
+        "a szöveges teszt nem fogad el 204-et");
+  g_httpCode = 200; g_httpSize = -2;
+}
+
+static void scH7() {
+  // 204-nel a torzs olvasasaba bele sem szabad kezdeni: ures streamnel a
+  // readBounded() a sajat 1,5 mp-es hataridejeig varna a semmire.
+  g_httpBeginOk = true; g_httpCode = 204; g_httpBody = ""; g_httpSize = -1;
+  const uint32_t t0 = g_millis;
+  CHECK(testInternetHTTP("http://x/generate_204", ""), "204 -> siker");
+  CHECK(g_millis - t0 < 1500,  // HTTP_READ_TIMEOUT_MS
+        "a törzset el sem kezdi olvasni, nincs 1,5 mp várakozás");
+  g_httpCode = 200; g_httpSize = -2;
+}
+
+// --- Az eszkalacio tenyleg kulonbozo vegpontokat probal ----------------------
+// Regresszio arra, hogy egyetlen uzemelteto kiesese ne dontson a router
+// ujrainditasarol: az 5 teszt 5 kulonbozo cel, 5 kulonbozo uzemelteto.
+// ICMP nincs kozottuk - lasd scH9.
+static void scH8() {
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpCode = -1; pingSim.ok = false;
+  setup();
+  g_httpUrls.clear(); pingSim.targets.clear();
+
+  int guard = 0; bool relay = false;
+  try {
+    while (++guard < 400000 && !relay) {
+      const size_t before = g_log.size();
+      loop();
+      for (size_t i = before; i < g_log.size(); i++)
+        if (g_log[i] == "pin7=HIGH") relay = true;
+    }
+  } catch (DeepSleepSignal&) {}
+
+  CHECK(relay, "az eszkaláció végén elindul a router reset");
+  CHECK(g_httpUrls.size() == 5, "mind az 5 teszt HTTP volt");
+  if (g_httpUrls.size() == 5) {
+    CHECK(g_httpUrls[0] == "http://www.msftconnecttest.com/connecttest.txt",
+          "0: Microsoft");
+    CHECK(g_httpUrls[1] == "http://cp.cloudflare.com/generate_204",
+          "1: Cloudflare");
+    CHECK(g_httpUrls[2] == "http://detectportal.firefox.com/success.txt",
+          "2: Mozilla");
+    CHECK(g_httpUrls[3] == "http://nmcheck.gnome.org/check_network_status.txt",
+          "3: GNOME / NetworkManager");
+    CHECK(g_httpUrls[4] == "http://connectivitycheck.gstatic.com/generate_204",
+          "4: Google");
+    std::set<std::string> uniq(g_httpUrls.begin(), g_httpUrls.end());
+    CHECK(uniq.size() == 5, "öt különböző végpont, egyik sem ismétlődik");
+  }
+  CHECK(pingSim.targets.empty(),
+        "az internetteszt egyetlen pinget sem küld (a ping csak a gateway-hez való)");
+}
+
+// --- Befagyott router-DNS: HTTP semmi, ICMP tokeletes -----------------------
+// Ez a leggyakoribb "csatlakozva, de nincs internet" hiba olcso routereken
+// (a dnsmasq beragad). Amig a ping is szavazhatott, az eszkoz orakon at
+// tetlen maradt: 41 bukott HTTP teszt mellett 0 router reset. Mostantol
+// mind az ot teszt nevfeloldast igenyel, tehat ezt eszreveszi.
+static void scH9() {
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpCode = -1;      // egyetlen nev sem oldodik fel
+  pingSim.ok = true;    // de az IP szintu utvonal hibatlan
+  setup();
+
+  int guard = 0, relays = 0;
+  const uint32_t t0 = g_millis;
+  size_t before = g_log.size();
+  try {
+    while (++guard < 400000 && g_millis - t0 < 30u * 60 * 1000 && relays == 0) {
+      loop();
+      for (size_t i = before; i < g_log.size(); i++)
+        if (g_log[i] == "pin7=HIGH") relays++;
+      before = g_log.size();
+    }
+  } catch (DeepSleepSignal&) {}
+  CHECK(relays == 1, "a befagyott DNS-t router resettel kezeli");
+  CHECK(g_millis - t0 < 5u * 60 * 1000, "5 percen belül, nem órákon át tétlenül");
+  CHECK(pingSim.targets.empty(), "a sikeres ping nem menti meg a hibás állapotot");
+}
+
 
 // --- Csak IPv4 hasznalhato --------------------------------------------------
 // Az IPAddress::fromString() az IPv4 utan IPv6-ot is megprobal, ezert a "::1"
@@ -2659,6 +2769,190 @@ static void scWR3() {
   savingConfig = false;
 }
 
+
+// --- millis() korbefordulas (49,7 naponta) ---------------------------------
+// A stub millis()-e SZANDEKOSAN uint32_t: a hoston az `unsigned long` 64 bites
+// lenne, es akkor a "millis() - start" idiomak maskepp viselkednenek, mint az
+// ESP32-C3-on. Enelkul ezek a tesztek ertelmetlenek lennenek.
+static uint32_t mw_pulzus = 0;
+static bool     mw_magas = false;
+static uint32_t mw_start = 0;
+static int      mw_wrapok = 0;
+static uint32_t mw_elozo = 0;
+static void mwFigyelo() {
+  if (g_millis < mw_elozo) mw_wrapok++;
+  mw_elozo = g_millis;
+  const bool m = (g_pinState[7] == HIGH);
+  if (m && !mw_magas) { mw_magas = true; mw_start = g_millis; }
+  if (!m && mw_magas) { mw_magas = false; mw_pulzus = g_millis - mw_start; }
+}
+static void wrapFutas(uint32_t kezdo) {
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  g_httpBody = "Microsoft Connect Test";
+  loop(); loop();
+  g_millis = kezdo;
+  loop(); loop();
+  wifiSim.begun = false; wifiSim.willConnect = false;
+  wifiSim.failStatus = WL_NO_SSID_AVAIL;
+  mw_pulzus = 0; mw_magas = false; mw_wrapok = 0; mw_elozo = g_millis;
+  g_onDelay = mwFigyelo;
+  try { int g = 0; while (++g < 3000000 && deviceMode != (DeviceMode)1) loop(); }
+  catch (...) {}
+  g_onDelay = nullptr;
+}
+
+static void scMW1() {
+  // A rele pulzus a projekt legkritikusabb idozitese - az eredeti fo hiba is
+  // itt volt. Ha a wrap EPP a pulzus alatt tortenik, akkor is 90 mp legyen.
+  wrapFutas(0xFFFFFFFFu - 240000u);
+  CHECK(mw_wrapok == 1, "a millis() tenyleg korbefordult kozben");
+  CHECK(mw_pulzus >= 89000 && mw_pulzus <= 92000,
+        "a rele pulzus a korbefordulas alatt is 90 mp");
+}
+
+static void scMW2() {
+  // Wrap a 10 perces RESET_DELAY alatt, illetve a hibakezeles kozepen.
+  wrapFutas(0xFFFFFFFFu - 700000u);
+  CHECK(mw_wrapok == 1, "korbefordult a RESET_DELAY alatt");
+  CHECK(mw_pulzus >= 89000 && mw_pulzus <= 92000, "a pulzus akkor is 90 mp");
+  CHECK(g_wakeupUs == 3600000000ULL, "a vegen ugyanugy 1 ora alvas");
+
+  wrapFutas(0xFFFFFFFFu - 180000u);
+  CHECK(mw_wrapok == 1, "korbefordult a hibakezeles kozepen");
+  CHECK(mw_pulzus >= 89000 && mw_pulzus <= 92000, "a pulzus akkor is 90 mp");
+}
+
+static void scMW3() {
+  // 169 nap = 3 teljes korbefordulas mogotte. A viselkedes valtozatlan.
+  wrapFutas(1716698112u);                    // 169 nap % 2^32
+  CHECK(mw_wrapok == 0, "ebben a szakaszban nincs wrap");
+  CHECK(mw_pulzus >= 89000 && mw_pulzus <= 92000, "90 mp-es pulzus 169 nap utan is");
+  CHECK(rtcRetryRounds == 1, "a szamlalo normalisan lep");
+  CHECK(g_wakeupUs == 3600000000ULL, "1 ora alvas");
+}
+
+
+// --- Watchdog: a leghosszabb etetes nelkuli szakasz -------------------------
+// A valodi loopTask (main.cpp:79-82) MINDEN loop() elott etet, ha a loop task
+// fel van iratkozva - ezt modellezzuk. A stub ping/HTTP mostmar a valodi
+// timeoutig "blokkol", kulonben ez a meres semmit nem erne.
+static void wdLepes() { if (g_wdtEnabled) feedLoopWDT(); loop(); }
+static uint32_t wdMeres(uint32_t futasMs) {
+  g_wdtTrack = true; g_wdtLastFeed = g_millis; g_wdtMaxFeedGap = 0;
+  const uint32_t t0 = g_millis;
+  try { int g = 0; while (++g < 3000000 && g_millis - t0 < futasMs) wdLepes(); }
+  catch (...) {}
+  g_wdtTrack = false;
+  return g_wdtMaxFeedGap;
+}
+
+static void scWD7() {
+  // A legrosszabb eset: minden HTTP keres TIMEOUTBA fut. A http.GET() ilyenkor
+  // a connect (5 mp) + valasz (10 mp) timeoutig blokkol, etetes nelkul - a
+  // 90 mp-es watchdog timeout epp erre volt meretezve.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  g_httpCode = -1; pingSim.ok = false;
+  loop();
+  const uint32_t gap = wdMeres(60u * 60 * 1000);
+  printf("     [info] leghosszabb etetes nelkuli szakasz: %.1f mp\n", gap/1000.0);
+  CHECK(gap >= 14000, "a HTTP timeout tenyleg blokkol (a meres ervenyes)");
+  CHECK(gap < 90000, "es a 90 mp-es watchdog timeout alatt marad");
+}
+
+// A DNS a connect timeouton KIVUL esik, ezert a halott nevszerver rosszabb,
+// mint a hallgato szerver. Realis legrosszabb eset (2 DNS szerver + globalis
+// IPv6, tehat ketszeres getaddrinfo, plusz a 0.0.0.0-ra iranyulo connect):
+//   2 x (2 x 7 mp) + 5 mp = 33 mp egyetlen bukott HTTP tesztre.
+// Epp ez az uj eszkalacio alapesete: mind az ot teszt nevfeloldast igenyel.
+static void scWD13() {
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  g_httpCode = -1;
+  g_httpFailMs = 33000;   // halott DNS, nem hallgato szerver
+  loop();
+  const uint32_t gap = wdMeres(60u * 60 * 1000);
+  g_httpFailMs = 15000;
+  printf("     [info] halott DNS mellett a leghosszabb szakasz: %.1f mp\n", gap/1000.0);
+  CHECK(gap >= 32000, "a 33 mp-es DNS blokkolas tenyleg beleszamit (a meres ervenyes)");
+  CHECK(gap < 90000, "es meg igy is a 90 mp-es watchdog timeout alatt marad");
+}
+
+static void scWD8() {
+  // Elgepelt statikus IP: a gateway pingje is beleszamit a szakaszba.
+  coldBoot(true, "TestNet", "pw", "192.168.0.9", "192.168.0.1");
+  setup();
+  g_httpCode = -1; pingSim.ok = false;
+  pingSim.perTarget["192.168.0.1"] = false;
+  loop();
+  const uint32_t gap = wdMeres(40u * 60 * 1000);
+  printf("     [info] leghosszabb etetes nelkuli szakasz: %.1f mp\n", gap/1000.0);
+  CHECK(gap < 90000, "gateway-ellenorzessel egyutt is 90 mp alatt");
+}
+
+static void scWD9() {
+  // A tobbi uzemmod: AP portal, vegzetes hiba, first start varakozas.
+  coldBoot(false, "", "", "", "");
+  setup();
+  CHECK(wdMeres(5u * 60 * 1000) < 90000, "AP konfig modban is 90 mp alatt");
+
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_fsMountOk = false;
+  setup();
+  CHECK(wdMeres(5u * 60 * 1000) < 90000, "vegzetes hibanal is 90 mp alatt");
+
+  coldBoot(false, "TestNet", "pw", "", "");
+  wifiSim.availableFrom = 25u * 60 * 1000;
+  setup();
+  CHECK(wdMeres(25u * 60 * 1000) < 90000, "first start varakozas alatt is 90 mp alatt");
+}
+
+
+static void scWD10() {
+  // A watchdog mar a Wi-Fi indulasa ELOTT el, nem csak a setup() vegen.
+  // Egy beragadt WiFi.begin() korabban orokre megallitotta volna az eszkozt.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_wdtEnabled = false;
+  // A LittleFS csatolasa utan, de a Wi-Fi elott kell elesednie: ezt ugy
+  // merjuk, hogy a WiFi.begin() pillanataban mar aktivnak kell lennie.
+  setup();
+  const int iWdt   = logIndex("enableLoopWDT");
+  const int iBegin = logIndex("WiFi.begin(");
+  const int iFs    = logIndex("wdt_reconfigure");
+  CHECK(iWdt >= 0, "a watchdog feliratkozas megtortent");
+  CHECK(iBegin >= 0, "a WiFi.begin() lefutott");
+  CHECK(iWdt < iBegin, "a watchdog ELOBB elesedik, mint a WiFi.begin()");
+  CHECK(iFs >= 0, "es konfiguralva is lett");
+}
+
+static void scWD11() {
+  // A LittleFS formazasa (elso indulas) szandekosan a felugyeleten KIVUL van:
+  // egy lassu formazas soha ne futhasson watchdog resetbe.
+  coldBoot(false, "", "", "", "");
+  g_wdtEnabled = false;
+  g_wdtFeedNotSubscribed = 0;
+  setup();
+  CHECK(g_wdtFeedNotSubscribed == 0, "a felelesztes elott nem etetunk");
+  CHECK(g_wdtEnabled, "a setup() vegere aktiv a watchdog");
+  CHECK(g_wdtTimeoutMs == 90000 && g_wdtPanic, "90 mp, panic bekapcsolva");
+}
+
+static void scWD12() {
+  // Az elesedes utan a setup() hatralevo resze sem lephet 90 mp fole.
+  // A leghosszabb ott az initWiFi() 20 mp-es varakozasa, ami etet.
+  coldBoot(false, "TestNet", "pw", "", "");   // nem tud csatlakozni -> 20 mp
+  setup();
+  g_wdtTrack = true; g_wdtLastFeed = g_millis; g_wdtMaxFeedGap = 0;
+  coldBoot(false, "TestNet", "pw", "", "");
+  g_wdtTrack = true; g_wdtLastFeed = g_millis; g_wdtMaxFeedGap = 0;
+  setup();
+  g_wdtTrack = false;
+  printf("     [info] setup() leghosszabb etetes nelkuli szakasza: %.1f mp\n",
+         g_wdtMaxFeedGap/1000.0);
+  CHECK(g_wdtMaxFeedGap < 90000, "a setup() is 90 mp alatt marad");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -2764,6 +3058,10 @@ static const Scenario kScenarios[] = {
   { "P8: statikus IP gateway nélkül nem fogadható el sikerként", scP8 },
   { "P9: a hosszú hibaindoklás nem csonkolódik", scP9 },
   { "H5: beragadt szervernél a saját olvasási határidő tart", scH5 },
+  { "H6: üres elvárásnál 204-et követel, a captive portált elutasítja", scH6 },
+  { "H7: 204-nél a törzs olvasásába bele sem kezd", scH7 },
+  { "H8: az eszkaláció 5 különböző célpontot próbál végig", scH8 },
+  { "H9: befagyott router-DNS (HTTP néma, ICMP jó) -> router reset", scH9 },
   { "IP1: a stub ugyanúgy viselkedik, mint a core IPAddress-e", scIP1 },
   { "IP2: IPv6 és 0.0.0.0 cím nem fogadható el a portálon", scIP2 },
   { "IP3: mentett IPv6 gateway esetén DHCP, nem csonka statikus konfig", scIP3 },
@@ -2794,6 +3092,16 @@ static const Scenario kScenarios[] = {
   { "WR1: fájlírás közben nem indul újra (halasztott újraindítás)", scWR1 },
   { "WR2: fájlírás közben nem alszik el", scWR2 },
   { "WR3: a várakozás korlátos, beragadt jelző nem fagyaszt le", scWR3 },
+  { "MW1: a relé pulzus a millis() körbefordulása alatt is 90 mp", scMW1 },
+  { "MW2: körbefordulás a RESET_DELAY alatt és a hibakezelés közepén", scMW2 },
+  { "MW3: 169 nap (3 körbefordulás) után változatlan viselkedés", scMW3 },
+  { "WD7: HTTP timeoutok mellett is 90 mp alatt marad az etetési köz", scWD7 },
+  { "WD8: gateway-ellenőrzéssel együtt is 90 mp alatt", scWD8 },
+  { "WD9: AP mód, végzetes hiba, first start - mind 90 mp alatt", scWD9 },
+  { "WD10: a watchdog a WiFi.begin() ELŐTT élesedik", scWD10 },
+  { "WD11: a LittleFS formázás szándékosan a felügyeleten kívül", scWD11 },
+  { "WD12: a setup() hátralévő része sem lép 90 mp fölé", scWD12 },
+  { "WD13: halott DNS (33 mp/kérés) mellett is 90 mp alatt marad", scWD13 },
   { "P14: a halasztott újraindítás a türelmi idő UTÁN fut le", scP14 },
   { "L6: minden eseménykód olvasható címkét kap a /log oldalon", scL6 },
   { "L7: üres napló esetén nincs üres táblázat", scL7 },

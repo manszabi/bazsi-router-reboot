@@ -41,8 +41,14 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
   **ESP32 Arduino 3.3.11** (beágyazott ESP-IDF `release_v5.5`) forrásából
   származnak – pl. `typedef NetworkClient WiFiClient`, `size_t File::read(uint8_t*, size_t)`,
   `HTTPClient::setTimeout(uint16_t)`, `Ping.ping(IPAddress, int16_t)`.
+- A `Ping.ping()` és a `http.GET()` a **valódi timeoutjukig "blokkol"** a szimulált
+  időben (1 mp, illetve 15 mp), etetés nélkül – enélkül a watchdog etetési
+  közének mérése semmit nem érne.
 - A pin-számok a valódi `variants/XIAO_ESP32C3/pins_arduino.h`-ból jönnek
   (`D0`=GPIO2, `D1`=GPIO3, `D3`=GPIO5, `D4`=GPIO6, `D5`=GPIO7).
+- A stub `millis()`-e **`uint32_t`**, nem `unsigned long`: a hoston az utóbbi 64 bites
+  lenne, és akkor a `millis() - start` körbefordulás-biztos idiómák másképp
+  viselkednének, mint az ESP32-C3-on (ahol `unsigned long` = 32 bit).
 - Az idő szimulált: minden `yield()` 10 ms-ot léptet, így a percekben mérhető
   időzítések ezredmásodpercek alatt tesztelhetők.
 - `ESP.restart()` és `esp_deep_sleep_start()` C++ kivételt dob, így a
@@ -53,15 +59,15 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 
 ## Lefedett esetek
 
-**131 forgatókönyv, 421 ellenőrzés. Sorlefedettség: 98,47%.**
+**167 forgatókönyv, 540 ellenőrzés. Sorlefedettség: 98,14%.**
 
 | | |
 |---|---|
 | `W1`–`W9` | Wi-Fi: konfig portál, DHCP vs. statikus IP, DNS, timeout, újracsatlakozás, netif-elvesztés |
 | `S1`–`S4` | Deep sleep: beragadt gomb, kimenetek állapota alvás előtt, ébresztőforrások, RTC-láb megkötés |
 | `RL1`–`RL2` | Relé: a 90 másodperces reset pulzus hossza, elalvás N reset után |
-| `H1`–`H5` | HTTP teszt: CR/LF vágás, hibás státusz, captive portal, chunked válasz, beragadt szerver |
-| `PG1`–`PG2` | Ping teszt: 2-a-4-ből szabály és korai kilépés |
+| `H1`–`H9` | HTTP teszt: CR/LF vágás, hibás státusz, captive portal, chunked válasz, beragadt szerver, **204-es ellenőrzés**, az eszkaláció végpont-sorrendje, **befagyott router-DNS** |
+| `PG1`–`PG2` | Ping (csak a gateway-ellenőrzéshez): 2-a-4-ből szabály és korai kilépés |
 | `C1` | Konfig fájlok írása/olvasása, csonkítás, hiányzó fájl |
 | `B1` | Gomb debounce: zajtüske vs. tartós nyomás |
 | `F1`–`F4` | Webszerver: tartalék űrlap **feltöltetlen `data/` mellett**, feltöltött `data/`, hiányzó fájlok, 404, AP-határidő kitolása |
@@ -70,7 +76,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 | `FS1`–`FS10` | LittleFS hibák: csatolás, írásvédettség, megtelt tár, **néma írási hiba**, csonka olvasás, törlés tartalék útvonala |
 | `FT1`–`FT8` | Végzetes hiba: betölthetetlen konfig vs. „nincs még konfig", LED-villogás, gombok |
 | `WF1`–`WF6` | Csatlakozási hiba: újrapróbálkozás vs. AP portál, RTC-számláló |
-| `WD1`–`WD6` | Ismétlődő watchdog újraindulás: számlálás, végzetes leállás, nullázási feltételek |
+| `WD1`–`WD13` | Ismétlődő watchdog újraindulás; a leghosszabb etetés nélküli szakasz minden üzemmódban, a **halott DNS** legrosszabb esetét is beleértve |
 | `E1`–`E6` | Végponttól végpontig: egészséges ciklus, router reset, AP mód, gombok, visszatérő WiFi |
 | `P1`–`P15` | Beállító portál mentése: validáció, írási hiba, jelszó-szivárgás, határidő, IP+gateway páros, whitespace, mentés közbeni gombnyomás, halasztott újraindítás |
 | `CPU1`–`CPU2` | A loop() nem pörgeti a CPU-t a várakozó állapotokban |

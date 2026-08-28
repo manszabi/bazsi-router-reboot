@@ -34,6 +34,9 @@ std::string g_httpBody = "Microsoft NCSI";
 int g_httpSize = -2;
 bool g_httpBeginOk = true;
 bool g_httpStall = false;
+std::vector<std::string> g_httpUrls;
+uint32_t g_httpOkMs = 200;
+uint32_t g_httpFailMs = 15000;   // 5 mp connect + 10 mp valasz
 bool     g_wdtEnabled = false;
 uint32_t g_wdtTimeoutMs = 0;
 uint32_t g_wdtIdleMask = 0xFFFFFFFF;
@@ -127,7 +130,7 @@ void Print::flushLine() {
   buf_.clear();
 }
 
-unsigned long millis() { return g_millis; }
+uint32_t millis() { return g_millis; }   // lasd a megjegyzest az Arduino.h-ban
 void pinMode(uint8_t p, uint8_t m) { (void)m; g_pinState[p] = -1; }
 void digitalWrite(uint8_t p, uint8_t v) {
   if (g_pinState[p] != v) simLog("pin" + std::to_string(p) + "=" + (v ? "HIGH" : "LOW"));

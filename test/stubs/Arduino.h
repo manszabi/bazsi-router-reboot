@@ -31,7 +31,12 @@ void simLog(const std::string& s);
 struct RestartSignal { };
 struct DeepSleepSignal { uint64_t us; };
 
-unsigned long millis();
+// FONTOS: az ESP32-C3 32 bites, ott az `unsigned long` = 32 bit, tehat a
+// millis() uint32_t-t ad. A hoston viszont az `unsigned long` 64 BITES - ha a
+// stub is azt adna vissza, a "millis() - start" korbefordulas-biztos idiomak
+// MASKEPP viselkednenek, mint a celhardveren, es a wrap koruli viselkedes
+// tesztelese ertelmetlen lenne. Ezert itt kifejezetten uint32_t.
+uint32_t millis();
 void pinMode(uint8_t, uint8_t);
 void digitalWrite(uint8_t, uint8_t);
 int digitalRead(uint8_t);

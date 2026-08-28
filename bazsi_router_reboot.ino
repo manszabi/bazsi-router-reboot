@@ -141,8 +141,21 @@ constexpr uint32_t FATAL_SLEEP_AFTER_MS = 5 * 60 * 1000;
 // lehessen különböztetni a végzetes hibától, ahol EGYÜTT villognak.
 constexpr uint32_t STUCK_BLINK_MS = 3000;
 // Watchdog timeout. Nagyobb kell, mint a leghosszabb olyan blokkolás, amit NEM
-// tudunk etetni: a http.GET() a connect (5 mp) + válasz (10 mp) timeouttal
-// együtt ~15 mp-ig tarthat. 90 mp így hatszoros tartalékot ad.
+// tudunk etetni - ez a http.GET(). A rossz eset NEM a szerver hallgatasa
+// (5 mp connect + 10 mp valasz = 15 mp), hanem a HALOTT DNS, mert a
+// nevfeloldas a connect timeouton KIVUL esik:
+//   NetworkClient::connect(host,...) eloszor Network.hostByName()-t hiv, es
+//   annak nincs timeout parametere (NetworkClient.cpp:310-315).
+//   Egy lwIP DNS lekerdezes szervereenkent ~7 mp alatt adja fel
+//   (DNS_MAX_RETRIES=4, DNS_TMR_INTERVAL=1000 ms, a tmr 1,1,2,3 lepesekben nő
+//   -> 7 tick), DHCP-tol jellemzoen 2 szerver jon.
+//   Ha van globalis IPv6 cim, a hostByName KETSZER kerdez (eloszor csak
+//   AF_INET6-ot, aztan AF_UNSPEC-et; NetworkManager.cpp) -> 2 x 14 mp.
+//   A lwip_getaddrinfo hibaja pozitiv EAI_* kod (netdb.h: 200-210), amit a
+//   NetworkClient::connect igazkent lat, ezert meg egy 0.0.0.0-ra iranyulo
+//   connect is lefut a maga 5 mp-evel.
+// Realis legrosszabb eset: 2 x (2 x 7) + 5 = 33 mp. A 90 mp igy ~2,7-szeres
+// tartalekot ad. (Meresi keretben: WD13.)
 constexpr uint32_t WDT_TIMEOUT_MS = 90 * 1000;
 // Ennyi watchdog/panic miatti újraindulás után az eszközt instabilnak
 // tekintjük, és ugyanúgy leállunk, mint a többi végzetes hibánál.
@@ -1301,7 +1314,20 @@ bool testInternetHTTP(const char* url, const char* expectedResponse) {
   const int httpCode = http.GET();
   bool result = false;
 
-  if (httpCode == HTTP_CODE_OK) {
+  if (expectedResponse[0] == '\0') {
+    // "generate_204" stilusu vegpont: nincs torzs, csak a statuszkod szamit.
+    // Ez SZIGORUBB, mint a szoveg-egyeztetes: egy captive portal nem tud 204-et
+    // adni, mert neki eppenseggel HTML-t vagy atiranyitast KELL kuldenie.
+    // Ugyanezt a dontest hozza a NetworkManager is (nm-connectivity.c: 204 ->
+    // "no content, as expected"; barmi mas -> portal).
+    result = (httpCode == HTTP_CODE_NO_CONTENT);
+    if (result) {
+      Serial.println("204 No Content - Igaz érték!");
+    } else {
+      Serial.print("Error on HTTP request, code: ");
+      Serial.println(httpCode);
+    }
+  } else if (httpCode == HTTP_CODE_OK) {
     const int len = http.getSize();
     if (len > (int)HTTP_MAX_PAYLOAD) {
       // Ekkora választ nem a várt endpoint küld (pl. captive portal)
@@ -1776,6 +1802,22 @@ void setup() {
   Serial.println(ipStr);
   Serial.println(gatewayStr);
 
+  // Innentől figyeli a watchdog a programot.
+  //
+  // MIÉRT ITT? A LittleFS csatolása UTÁN, de a Wi-Fi indítása ELŐTT.
+  //   - A LittleFS.begin(true) első indításkor FORMÁZ. Egy ~1,5 MB-os partíció
+  //     törlése szektoronként 30-50 ms, összesen 15-20 mp, etetés nélkül -
+  //     ezt szándékosan kihagyjuk a felügyeletből, hogy egy első bekapcsolás
+  //     soha ne futhasson watchdog resetbe.
+  //   - Az utána következő Wi-Fi init viszont a legvalószínűbb lefagyási pont,
+  //     és korábban semmi nem védte: az initWatchdog() a setup() legvégén volt,
+  //     tehát egy WiFi.begin() beragadás örökre megállította volna az eszközt.
+  //
+  // A hardveres interrupt watchdog (ESP_INT_WDT, 300 ms) végig aktív, de az
+  // csak a "kemény" megállást fogja meg (letiltott megszakítás, megállt tick).
+  // A csendes, szabályosan blokkoló beragadást csak ez a task watchdog látja.
+  initWatchdog();
+
   // Ne írjuk a hitelesítő adatokat minden WiFi.begin()-nél az NVS-be (flash kímélés)
   WiFi.persistent(false);
 
@@ -1805,9 +1847,6 @@ void setup() {
     }
   }
 
-  // Utolsó lépés: innentől figyeli a watchdog a loop()-ot. A setup() saját
-  // blokkolásai (soros port, initWiFi) így nem tudnak téves újraindítást okozni.
-  initWatchdog();
 }
 
 void loop() {
@@ -1916,13 +1955,22 @@ void loop() {
       Serial.print(" | Hibák száma = ");
       Serial.println(testState.failedCount);
 
+      // Mind az ot teszt HTTP, mert az ICMP nem bizonyit sem nevfeloldast, sem
+      // TCP-t: egy befagyott router-DNS mellett a ping tokeletesen megy, kozben
+      // egyetlen eszkoz sem eri el az internetet. Nem veletlen, hogy egyetlen
+      // nagy implementacio sem ICMP-vel validal (NetworkManager, Firefox,
+      // Windows NCSI: mind HTTP). Ot kulonbozo uzemelteto, ket ellenorzesi mod.
+      // Ures elvart valasz = 204-es ellenorzes, lasd testInternetHTTP().
       bool testResult;
       if (testState.cycleIndex == 1) {
-        testResult = testInternetPing(IPAddress(1, 1, 1, 1), "Cloudflare");
+        testResult = testInternetHTTP("http://cp.cloudflare.com/generate_204", "");
+      } else if (testState.cycleIndex == 2) {
+        testResult = testInternetHTTP("http://detectportal.firefox.com/success.txt", "success");
       } else if (testState.cycleIndex == 3) {
-        testResult = testInternetPing(IPAddress(8, 8, 8, 8), "Google");
-      } else if (testState.cycleIndex == 2 || testState.cycleIndex == 4) {
-        testResult = testInternetHTTP("http://www.msftncsi.com/ncsi.txt", "Microsoft NCSI");
+        testResult = testInternetHTTP("http://nmcheck.gnome.org/check_network_status.txt",
+                                      "NetworkManager is online");
+      } else if (testState.cycleIndex == 4) {
+        testResult = testInternetHTTP("http://connectivitycheck.gstatic.com/generate_204", "");
       } else {
         testResult = testInternetHTTP("http://www.msftconnecttest.com/connecttest.txt", "Microsoft Connect Test");
       }

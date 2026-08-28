@@ -1,23 +1,39 @@
 #pragma once
 #include <Arduino.h>
 #include <WiFi.h>
+#include <vector>
+#include <string>
 #define HTTP_CODE_OK 200
+#define HTTP_CODE_NO_CONTENT 204
 // Scriptelhető HTTP válasz a tesztekhez
 extern int         g_httpCode;
 extern std::string g_httpBody;
 extern int         g_httpSize;   // -1 = ismeretlen (chunked), egyébként Content-Length
 extern bool        g_httpBeginOk;
+// A valodi http.GET() a connect (5 mp) es a valasz (10 mp) timeoutjaig BLOKKOL,
+// es kozben senki nem eteti a watchdogot. A sketch epp erre meretezte a 90 mp-es
+// timeoutot, tehat a harnessnek modelleznie kell.
+extern uint32_t    g_httpOkMs;      // sikeres keres ideje
+extern uint32_t    g_httpFailMs;    // sikertelen: connect + valasz timeout
+// A lekert URL-ek sorrendje: enelkul nem lehetne regresszioval vedeni,
+// hogy az eszkalacio tenyleg tobb kulonbozo vegpontot probal vegig.
+extern std::vector<std::string> g_httpUrls;
 
 class HTTPClient {
 public:
   // core 3.3.11: bool begin(NetworkClient &client, String url); WiFiClient == NetworkClient
   bool begin(WiFiClient& c, const char* url) {
-    (void)url;
+    g_httpUrls.push_back(url ? url : "");
     if (!g_httpBeginOk) return false;
     c.setData(g_httpBody);
     return true;
   }
-  int GET() { return g_httpCode; }
+  int GET() {
+    // Minden 2xx valasz ugyanolyan gyorsan erkezik; a lassu eset a timeout.
+    const bool ok = (g_httpCode >= 200 && g_httpCode < 300);
+    g_millis += ok ? g_httpOkMs : g_httpFailMs;
+    return g_httpCode;
+  }
   int getSize() { return g_httpSize >= -1 ? g_httpSize : (int)g_httpBody.size(); }
   void end() {}
   void setTimeout(uint16_t) {}       // core: uint16_t
