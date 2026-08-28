@@ -1776,6 +1776,22 @@ void setup() {
   Serial.println(ipStr);
   Serial.println(gatewayStr);
 
+  // Innentől figyeli a watchdog a programot.
+  //
+  // MIÉRT ITT? A LittleFS csatolása UTÁN, de a Wi-Fi indítása ELŐTT.
+  //   - A LittleFS.begin(true) első indításkor FORMÁZ. Egy ~1,5 MB-os partíció
+  //     törlése szektoronként 30-50 ms, összesen 15-20 mp, etetés nélkül -
+  //     ezt szándékosan kihagyjuk a felügyeletből, hogy egy első bekapcsolás
+  //     soha ne futhasson watchdog resetbe.
+  //   - Az utána következő Wi-Fi init viszont a legvalószínűbb lefagyási pont,
+  //     és korábban semmi nem védte: az initWatchdog() a setup() legvégén volt,
+  //     tehát egy WiFi.begin() beragadás örökre megállította volna az eszközt.
+  //
+  // A hardveres interrupt watchdog (ESP_INT_WDT, 300 ms) végig aktív, de az
+  // csak a "kemény" megállást fogja meg (letiltott megszakítás, megállt tick).
+  // A csendes, szabályosan blokkoló beragadást csak ez a task watchdog látja.
+  initWatchdog();
+
   // Ne írjuk a hitelesítő adatokat minden WiFi.begin()-nél az NVS-be (flash kímélés)
   WiFi.persistent(false);
 
@@ -1805,9 +1821,6 @@ void setup() {
     }
   }
 
-  // Utolsó lépés: innentől figyeli a watchdog a loop()-ot. A setup() saját
-  // blokkolásai (soros port, initWiFi) így nem tudnak téves újraindítást okozni.
-  initWatchdog();
 }
 
 void loop() {

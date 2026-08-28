@@ -320,6 +320,8 @@ történik, és soha nem tér vissza. Kívülről nézve a viselkedés azonos.
 | Paraméter | Érték |
 |---|---|
 | Timeout | **90 mp** |
+| Élesedés | a LittleFS csatolása után, a Wi-Fi indítása **előtt** |
+| Leghosszabb etetés nélküli szakasz (mérve) | **15 mp** (egy timeoutba futó HTTP kérés) |
 | Etetés a hosszú várakozások alatt | ~10 ms-onként |
 | Timeoutkor | panic → újraindulás |
 | 3 rendellenes újraindulás után | `MODE_FATAL` |

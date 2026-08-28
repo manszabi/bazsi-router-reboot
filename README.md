@@ -331,6 +331,31 @@ Ezért az `initWatchdog()` mindhármat kifejezetten beállítja:
 > Ez a gyakorlatban nem számít: az aszinkron szerver csak AP konfigurációs
 > módban fut, és ott a `loop()` amúgy is ezredmásodpercek alatt körbeér.
 
+### Mikor élesedik
+
+A watchdog a **LittleFS csatolása után, de a Wi-Fi indítása előtt** élesedik:
+
+| Szakasz | Felügyelve? | Miért |
+|---|:---:|---|
+| soros port, gombellenőrzés, LittleFS csatolás/**formázás** | nem | a `LittleFS.begin(true)` első indításkor formáz: ~1,5 MB partíció szektoronként 30–50 ms, összesen 15–20 mp. Ezt szándékosan kihagyjuk, hogy egy első bekapcsolás soha ne fusson watchdog resetbe |
+| `WiFi.persistent()`, `initWiFi()`, AP portál indítása | **igen** | a Wi-Fi init a legvalószínűbb lefagyási pont |
+| `loop()` | **igen** | |
+
+### Mit fog el a hardver magától
+
+Az ESP32-C3 watchdogjai mind hardveresek (`SOC_WDT_SUPPORTED`):
+
+| Watchdog | Alapállapot | Mit fog el |
+|---|---|---|
+| **INT_WDT** (interrupt) | `default y`, **300 ms** | ha a FreeRTOS tick megáll: letiltott megszakítás, végtelen ciklus megszakításban |
+| **TWDT** (task) | `default y`, 5 mp, panic `n` | egy figyelt task nem etet – ezt konfiguráljuk 90 mp-re, panickal |
+| **RWDT** (RTC) | bootloader, 9000 ms | **csak a bootot** – az IDF `app_main()` előtt kikapcsolja (`BOOTLOADER_WDT_DISABLE_IN_USER_CODE` alapból `n`) |
+
+A „kemény" megállást tehát az INT_WDT 300 ms alatt elkapja, akkor is, ha a
+task watchdog még nem élesedett. Amit **csak** a task watchdog lát, az a
+csendes, szabályosan blokkoló beragadás – amikor a rendszer tovább tickel, de
+a mi taskunk örökre vár valamire. Épp ezért kellett a Wi-Fi init elé.
+
 ### A feliratkozás ellenőrzése
 
 Az `enableLoopWDT()` a core-ban **`void`** (`esp32-hal-misc.c`): ha az

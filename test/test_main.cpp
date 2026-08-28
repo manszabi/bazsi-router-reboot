@@ -2780,6 +2780,51 @@ static void scWD9() {
   CHECK(wdMeres(25u * 60 * 1000) < 90000, "first start varakozas alatt is 90 mp alatt");
 }
 
+
+static void scWD10() {
+  // A watchdog mar a Wi-Fi indulasa ELOTT el, nem csak a setup() vegen.
+  // Egy beragadt WiFi.begin() korabban orokre megallitotta volna az eszkozt.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_wdtEnabled = false;
+  // A LittleFS csatolasa utan, de a Wi-Fi elott kell elesednie: ezt ugy
+  // merjuk, hogy a WiFi.begin() pillanataban mar aktivnak kell lennie.
+  setup();
+  const int iWdt   = logIndex("enableLoopWDT");
+  const int iBegin = logIndex("WiFi.begin(");
+  const int iFs    = logIndex("wdt_reconfigure");
+  CHECK(iWdt >= 0, "a watchdog feliratkozas megtortent");
+  CHECK(iBegin >= 0, "a WiFi.begin() lefutott");
+  CHECK(iWdt < iBegin, "a watchdog ELOBB elesedik, mint a WiFi.begin()");
+  CHECK(iFs >= 0, "es konfiguralva is lett");
+}
+
+static void scWD11() {
+  // A LittleFS formazasa (elso indulas) szandekosan a felugyeleten KIVUL van:
+  // egy lassu formazas soha ne futhasson watchdog resetbe.
+  coldBoot(false, "", "", "", "");
+  g_wdtEnabled = false;
+  g_wdtFeedNotSubscribed = 0;
+  setup();
+  CHECK(g_wdtFeedNotSubscribed == 0, "a felelesztes elott nem etetunk");
+  CHECK(g_wdtEnabled, "a setup() vegere aktiv a watchdog");
+  CHECK(g_wdtTimeoutMs == 90000 && g_wdtPanic, "90 mp, panic bekapcsolva");
+}
+
+static void scWD12() {
+  // Az elesedes utan a setup() hatralevo resze sem lephet 90 mp fole.
+  // A leghosszabb ott az initWiFi() 20 mp-es varakozasa, ami etet.
+  coldBoot(false, "TestNet", "pw", "", "");   // nem tud csatlakozni -> 20 mp
+  setup();
+  g_wdtTrack = true; g_wdtLastFeed = g_millis; g_wdtMaxFeedGap = 0;
+  coldBoot(false, "TestNet", "pw", "", "");
+  g_wdtTrack = true; g_wdtLastFeed = g_millis; g_wdtMaxFeedGap = 0;
+  setup();
+  g_wdtTrack = false;
+  printf("     [info] setup() leghosszabb etetes nelkuli szakasza: %.1f mp\n",
+         g_wdtMaxFeedGap/1000.0);
+  CHECK(g_wdtMaxFeedGap < 90000, "a setup() is 90 mp alatt marad");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -2921,6 +2966,9 @@ static const Scenario kScenarios[] = {
   { "WD7: HTTP timeoutok mellett is 90 mp alatt marad az etetési köz", scWD7 },
   { "WD8: gateway-ellenőrzéssel együtt is 90 mp alatt", scWD8 },
   { "WD9: AP mód, végzetes hiba, first start - mind 90 mp alatt", scWD9 },
+  { "WD10: a watchdog a WiFi.begin() ELŐTT élesedik", scWD10 },
+  { "WD11: a LittleFS formázás szándékosan a felügyeleten kívül", scWD11 },
+  { "WD12: a setup() hátralévő része sem lép 90 mp fölé", scWD12 },
   { "P14: a halasztott újraindítás a türelmi idő UTÁN fut le", scP14 },
   { "L6: minden eseménykód olvasható címkét kap a /log oldalon", scL6 },
   { "L7: üres napló esetén nincs üres táblázat", scL7 },
