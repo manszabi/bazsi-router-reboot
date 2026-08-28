@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <strings.h>  // strcasecmp - a String::equalsIgnoreCase mogott
 #include <cctype>
 #include <cstdlib>
 #include <string>
@@ -89,6 +90,11 @@ public:
   const char* c_str() const { return s_.c_str(); }
   size_t length() const { return s_.size(); }
   bool equals(const char* o) const { return s_ == o; }
+  // core: String::equalsIgnoreCase(const String&) - a fejlecek erteke tetszoleges
+  // kis/nagybetus lehet, a HTTP fejlecek ertekei nem case-sensitive-ek.
+  bool equalsIgnoreCase(const char* o) const {
+    return strcasecmp(s_.c_str(), o ? o : "") == 0;
+  }
   void trim() {}
   String& operator+=(const char* o) { s_ += o; return *this; }
   String& operator+=(const String& o) { s_ += o.s_; return *this; }

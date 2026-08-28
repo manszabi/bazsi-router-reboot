@@ -182,6 +182,38 @@ expected", bármi más → portál).
 > A szöveges ellenőrzés a válaszból legfeljebb 96 bájtot olvas be, és levágja
 > a záró sortörést az összehasonlítás előtt.
 
+#### Miért bontja a firmware maga a chunked keretezést
+
+A `HTTPClient` a `Transfer-Encoding: chunked` darabhatárait **csak** a
+`getString()` és a `writeToStream()` útján bontja le (`HTTPClient.cpp`:
+`_transferEncoding == HTTPC_TE_CHUNKED`). Egyiket sem használjuk: mindkettő
+korlátlanul foglal vagy ír, egy captive portál többszáz kilobájtos válaszán
+pedig épp ezt akarjuk elkerülni – ezért olvassuk a `begin()`-nek átadott
+`WiFiClient`-et közvetlenül, fix méretű pufferbe.
+
+Csakhogy a nyers streamben a keretbájtok is ott vannak. Egy chunked `success`
+válasz így néz ki a dróton:
+
+```
+7\r\nsuccess\r\n0\r\n\r\n
+```
+
+A `strcmp()` ezt nem látná `success`-nek, tehát a **tökéletesen működő végpont
+is bukott tesztnek számítana**. Öt ilyen egymás után = fölösleges router
+újraindítás. A `readChunked()` ezért lebontja a keretezést:
+
+- hexa méret sor, opcionális `;kiterjesztés`-sel, kis- és nagybetűvel egyaránt;
+- a 96 bájtos puffer határán megáll – nem olvas végig egy darabokban érkező
+  captive portált sem;
+- túlcsorduló méretnél és nem hexa méret sornál feladja, és a teszt elbukik.
+  Nem találgatunk: egy szabálytalanul keretező köztes doboz **soha** ne
+  számítson sikeres internettesztnek.
+
+A ma használt öt végpont mind `Content-Length`-et küld, tehát ez a kód
+gyakorlatban nem fut le – de egy közbeiktatott proxy bármikor átkeretezheti a
+választ, és ez a hiba némán, a redundancia elvesztésével jelentkezne. A
+`CH1`–`CH5` forgatókönyvek fedik.
+
 #### Router reset folyamat
 
 1. Ha **3+ sikertelen teszt** és **cycleIndex > 3**:

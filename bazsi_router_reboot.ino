@@ -175,6 +175,11 @@ constexpr size_t HTTP_MAX_PAYLOAD = 96;  // a várt válaszok < 32 bájt
 constexpr uint32_t HTTP_CONNECT_TIMEOUT_MS = 5000;
 constexpr uint32_t HTTP_RESPONSE_TIMEOUT_MS = 10000;
 constexpr uint32_t HTTP_READ_TIMEOUT_MS = 1500;
+// Chunked valasznal hany darabot vagyunk hajlandok vegigolvasni. Minden nem
+// lezaro darab legalabb 1 bajtot ad, es a puffer hataran ugyis megallunk, tehat
+// ennyi kort elmeletileg sem lehet tullepni - ez csak egy vegso kapaszkodo,
+// nehogy egy szabalytalan keretezes vegtelen ciklusba vigyen.
+constexpr uint16_t HTTP_MAX_CHUNKS = HTTP_MAX_PAYLOAD + 2;
 constexpr uint8_t MAX_CYCLE_INDEX = 10;
 constexpr uint8_t RESET_TRIGGER_FAILURES = 3;
 constexpr uint8_t RESET_TRIGGER_CYCLE = 3;
@@ -1266,35 +1271,104 @@ bool reconnectWifi() {
   return false;
 }
 
-// Korlátozott méretű, időzáras olvasás: nem allokál, és nem tud "elszállni"
-// egy captive portal többszáz kilobájtos válaszán.
-size_t readBounded(WiFiClient& stream, char* buf, size_t maxLen, uint32_t timeoutMs) {
-  size_t n = 0;
-  uint32_t lastByte = millis();
-  while (n < maxLen && (millis() - lastByte) < timeoutMs) {
+// Egy bájt, legfeljebb timeoutMs várakozással. -1: lejárt a határidő, vagy a
+// szerver lezárta a kapcsolatot. Ez a kettő az egyetlen kilépési ok - a hívó
+// mindkettőt "nincs több adat"-ként kezeli.
+int readByteBounded(WiFiClient& stream, uint32_t timeoutMs) {
+  const uint32_t start = millis();
+  while ((millis() - start) < timeoutMs) {
     // Csak akkor olvasunk, ha VAN mit: a read() a socket saját fogadási
     // timeoutját használja, ami nem a mienk. Ha vakon hívnánk, egyetlen
     // olvasás túlléphetné a timeoutMs határidőt - így viszont a határidő
     // valóban a miénk, és nem függ a core beállításaitól.
-    if (stream.available() <= 0) {
-      // A szerver lezárta és nincs több adat: nincs értelme a timeoutot kivárni
-      if (!stream.connected()) {
-        break;
-      }
-      resetbutton();
-      wifiresetbutton();
-      feedWatchdog();
-      // delay() és nem yield(): a yield() csak azonos prioritású taskok között
-      // ad át vezérlést, tehát üresen pörgetné a CPU-t a válaszra várva.
-      delay(BUTTON_POLL_MS);
-      continue;
+    if (stream.available() > 0) {
+      return stream.read();  // <0 is lehet: available() ígért, de elszállt
     }
-    const int c = stream.read();
+    // A szerver lezárta és nincs több adat: nincs értelme a timeoutot kivárni
+    if (!stream.connected()) {
+      return -1;
+    }
+    resetbutton();
+    wifiresetbutton();
+    feedWatchdog();
+    // delay() és nem yield(): a yield() csak azonos prioritású taskok között
+    // ad át vezérlést, tehát üresen pörgetné a CPU-t a válaszra várva.
+    delay(BUTTON_POLL_MS);
+  }
+  return -1;
+}
+
+// Korlátozott méretű, időzáras olvasás: nem allokál, és nem tud "elszállni"
+// egy captive portal többszáz kilobájtos válaszán. A timeoutMs bájtok KÖZÖTTI
+// határidő, tehát egy lassan csordogáló válasz is végigolvasható, egy néma
+// kapcsolat viszont nem tart fel tovább egy timeoutnál.
+size_t readBounded(WiFiClient& stream, char* buf, size_t maxLen, uint32_t timeoutMs) {
+  size_t n = 0;
+  while (n < maxLen) {
+    const int c = readByteBounded(stream, timeoutMs);
     if (c < 0) {
-      break;  // available() adatot ígért, mégsem jött: a kapcsolat elszállt
+      break;
     }
     buf[n++] = (char)c;
-    lastByte = millis();
+  }
+  return n;
+}
+
+// Egy hexa számjegy értéke, vagy -1.
+int hexValue(int c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+// Ugyanaz, mint a readBounded(), de lebontja a chunked keretezést.
+//
+// MIÉRT KELL: a HTTPClient a darabhatárokat CSAK a getString() /
+// writeToStream() útján bontja le - azokat viszont nem használjuk, mert
+// korlátlanul foglalnának. A nyers streamben tehát benne maradnak a
+// keretbájtok ("7\r\nsuccess\r\n0\r\n\r\n"), és a strcmp() a tökéletesen
+// működő végpontot is bukottnak látná. Content-Length-et küldő végpontnál ez
+// sosem jön elő, de egy közbeiktatott proxy bármikor átkeretezheti a választ.
+size_t readChunked(WiFiClient& stream, char* buf, size_t maxLen, uint32_t timeoutMs) {
+  size_t n = 0;
+  for (uint16_t chunk = 0; chunk < HTTP_MAX_CHUNKS; chunk++) {
+    // Méret sor: hexa szám, opcionális ";kiterjesztés", CRLF.
+    uint32_t size = 0;
+    bool sawDigit = false;
+    bool inExt = false;
+    for (;;) {
+      const int c = readByteBounded(stream, timeoutMs);
+      if (c < 0) return n;
+      if (c == '\n') break;
+      if (c == '\r' || inExt) continue;
+      if (c == ';') { inExt = true; continue; }
+      const int d = hexValue(c);
+      // Nem hexa a méret helyén: ez nem chunked keret. Nem találgatunk,
+      // a teszt elbukik - ez a biztonságos irány.
+      if (d < 0) return n;
+      if (size > (0xFFFFFFFFu - (uint32_t)d) / 16u) return n;  // túlcsordulás
+      size = size * 16u + (uint32_t)d;
+      sawDigit = true;
+    }
+    if (!sawDigit || size == 0) {
+      return n;  // üres méret sor, vagy a lezáró 0-s darab
+    }
+    for (uint32_t i = 0; i < size; i++) {
+      if (n >= maxLen) {
+        return n;  // ekkora választ nem a várt végpont küld - nem olvassuk végig
+      }
+      const int c = readByteBounded(stream, timeoutMs);
+      if (c < 0) return n;
+      buf[n++] = (char)c;
+    }
+    // A darabot lezáró CRLF: elnyeljük, de nem kötjük meg magunkat a pontos
+    // alakjában - a következő kör úgyis hexát vár.
+    for (uint8_t i = 0; i < 2; i++) {
+      const int c = readByteBounded(stream, timeoutMs);
+      if (c < 0) return n;
+      if (c == '\n') break;
+    }
   }
   return n;
 }
@@ -1310,6 +1384,12 @@ bool testInternetHTTP(const char* url, const char* expectedResponse) {
     Serial.println("Error: HTTP begin failed");
     return false;
   }
+
+  // A _transferEncoding privat, a nyers fejlec viszont igy elkerheto. Ez a
+  // hivas a VALASZ fejleceire vonatkozik (a HTTPClient.h kommentje felrevezeto,
+  // a handleHeaderResponse() tolti fel oket).
+  static const char* kCollectHeaders[] = { "Transfer-Encoding" };
+  http.collectHeaders(kCollectHeaders, 1);
 
   const int httpCode = http.GET();
   bool result = false;
@@ -1328,6 +1408,9 @@ bool testInternetHTTP(const char* url, const char* expectedResponse) {
       Serial.println(httpCode);
     }
   } else if (httpCode == HTTP_CODE_OK) {
+    // Chunked valasznal a getSize() -1, es a nyers streamben ott vannak a
+    // keretbajtok is - azokat le kell bontani, kulonben a jo valasz is bukik.
+    const bool chunked = http.header("Transfer-Encoding").equalsIgnoreCase("chunked");
     const int len = http.getSize();
     if (len > (int)HTTP_MAX_PAYLOAD) {
       // Ekkora választ nem a várt endpoint küld (pl. captive portal)
@@ -1338,7 +1421,9 @@ bool testInternetHTTP(const char* url, const char* expectedResponse) {
       char payload[HTTP_MAX_PAYLOAD + 1];
       // Ugyanaz a stream, amit a http.begin() kapott — nem függünk a
       // getStream() core-verziónként eltérő visszatérési típusától.
-      const size_t n = readBounded(client, payload, want, HTTP_READ_TIMEOUT_MS);
+      const size_t n = chunked
+                         ? readChunked(client, payload, HTTP_MAX_PAYLOAD, HTTP_READ_TIMEOUT_MS)
+                         : readBounded(client, payload, want, HTTP_READ_TIMEOUT_MS);
       payload[n] = '\0';
       trimInPlace(payload);  // a záró CR/LF ne buktassa el az egyezést
       Serial.println(payload);
