@@ -69,10 +69,13 @@ indulás → 10,0 perc  firstStartDelay várakozás
 |---|---|
 | Egy kör | **85,5 perc** (ebből 25,5 perc ébren) |
 | Körök száma | `MAX_RETRY_ROUNDS = 33` |
-| Összesen | 33 × 85,5 = 2821,5 perc = **47,0 óra** |
+| Összesen | 33 × 25,5 + 32 × 60 = 2761,5 perc = **46,0 óra** |
 
-34 kör már 48,5 óra lenne, tehát 33 az utolsó, ami két napon belül marad.
-Két nap alatt így legfeljebb **33 router-újraindítás** történik.
+Az utolsó kör **nem alszik egyet**: a `wifiGiveUp()` előbb növeli a számlálót,
+aztán ellenőrzi, tehát a 33.-nál már AP módba megy. Ezért 33 × 85,5 helyett
+33 × 25,5 + 32 × 60 a helyes összeg. Két napon belül marad, tartalékkal is:
+34 kör is csak 47,5 óra lenne. Két nap alatt legfeljebb **33
+router-újraindítás** történik. Az `R8` teszt végigjátssza mind a 33 kört.
 
 > **Rossz jelszó esetén nincs router reset.** Ha a `WiFi.status()`
 > `WL_CONNECT_FAILED`-et ad, az eszköz azonnal AP módba megy – a router
@@ -98,11 +101,11 @@ Teszttel kimérve (`PO1`–`PO3`):
 | 11 perc | Az első kör első próbálkozási ablakában elkapja |
 | 20 perc | A router reset utáni második ablak elkapja – **még az első körben** |
 | ennél tovább | Óránként új kör, mindegyikben egy router újraindítással |
-| **~47 óránál tovább** | Feladja: AP mód, majd 5 perc után alvás |
+| **~46 óránál tovább** | Feladja: AP mód, majd 5 perc után alvás |
 
 Egy kör két próbálkozási ablakot ad (a router reset előtt és után), így az első
 kör önmagában ~25 percet fed le. Ami ebből kimarad, azt a következő körök
-kapják el. A tényleges határ **~47 óra**.
+kapják el. A tényleges határ **46,0 óra** (mérve: `R8`).
 
 ## 12. Diagnosztikai napló
 

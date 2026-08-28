@@ -9,16 +9,83 @@
 #include <vector>
 #include <map>
 
-#define HIGH 1
-#define LOW 0
-#define OUTPUT 1
-#define INPUT_PULLUP 2
-// A valódi XIAO_ESP32C3 variants/pins_arduino.h szerint
-#define D0 2
-#define D1 3
-#define D3 5
-#define D4 6
-#define D5 7
+// ---------------------------------------------------------------------------
+// A core makroi. NEM azert vannak itt, mert a sketch mind hasznalja, hanem
+// hogy a harness elkapja a NEVUTKOZESEKET. Ezek makrok, tehat barmely azonos
+// nevu lokalis valtozobol vagy fuggvenybol a valodi forditason szemet lesz -
+// pl. "static const char HEX[]" -> "static const char 16[]". A hoston enelkul
+// csendben lefordul, az eszkozon meg elhasal; pontosan ezt a kulonbseget
+// zarjuk ki. Az ertekek a 3.3.11 fejleceibol szo szerint valok.
+//
+// esp32-hal-gpio.h
+#define LOW               0x0
+#define HIGH              0x1
+#define INPUT             0x01
+#define OUTPUT            0x03
+#define PULLUP            0x04
+#define INPUT_PULLUP      0x05
+#define PULLDOWN          0x08
+#define INPUT_PULLDOWN    0x09
+#define OPEN_DRAIN        0x10
+#define OUTPUT_OPEN_DRAIN 0x13
+#define ANALOG            0xC0
+#define DISABLED          0x00
+// Megszakitas modok (Arduino.h / esp32-hal-gpio.h)
+#define RISING   0x01
+#define FALLING  0x02
+#define CHANGE   0x03
+#define ONLOW    0x04
+#define ONHIGH   0x05
+// Print.h szamrendszerek
+#define DEC 10
+#define HEX 16
+#define OCT 8
+#define BIN 2
+// Arduino.h konstansok
+#define PI         3.1415926535897932384626433832795
+#define HALF_PI    1.5707963267948966192313216916398
+#define TWO_PI     6.283185307179586476925286766559
+#define EULER      2.718281828459045235360287471352
+#define DEG_TO_RAD 0.017453292519943295769236907684886
+#define RAD_TO_DEG 57.295779513082320876798154814105
+#define LSBFIRST 0
+#define MSBFIRST 1
+#define DEFAULT  1
+#define EXTERNAL 0
+#define SERIAL   0x0
+#define DISPLAY  0x1
+#define NOT_A_PIN        -1
+#define NOT_A_PORT       -1
+#define NOT_AN_INTERRUPT -1
+#define NOT_ON_TIMER     0
+// ---------------------------------------------------------------------------
+// A valodi variants/XIAO_ESP32C3/pins_arduino.h szo szerint. Ott ezek NEM
+// makrok, hanem static const uint8_t-k - itt is azok, hogy a tipusuk is
+// egyezzen (a #define int-et adna). Mind a 11 lab szerepel, nem csak az
+// altalunk hasznaltak: igy egy kesobbi D2/D6... hasznalat is a valos szamot
+// kapja, es egy azonos nevu sajat valtozo itt is utkozne.
+static const uint8_t TX = 21;
+static const uint8_t RX = 20;
+static const uint8_t SDA = 6;
+static const uint8_t SCL = 7;
+static const uint8_t SS = 20;
+static const uint8_t MOSI = 10;
+static const uint8_t MISO = 9;
+static const uint8_t SCK = 8;
+static const uint8_t A0 = 2;
+static const uint8_t A1 = 3;
+static const uint8_t A2 = 4;
+static const uint8_t D0 = 2;
+static const uint8_t D1 = 3;
+static const uint8_t D2 = 4;
+static const uint8_t D3 = 5;
+static const uint8_t D4 = 6;
+static const uint8_t D5 = 7;
+static const uint8_t D6 = 21;
+static const uint8_t D7 = 20;
+static const uint8_t D8 = 8;
+static const uint8_t D9 = 9;
+static const uint8_t D10 = 10;
 
 // --- szimulált idő / naplózás ---
 extern uint32_t g_millis;

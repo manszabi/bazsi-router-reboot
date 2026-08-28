@@ -34,6 +34,14 @@ struct WifiSim {
   // Mit adjon vissza a status() amikor nincs kapcsolat (WL_CONNECT_FAILED-del
   // modellezheto a rossz jelszo).
   int failStatus = WL_DISCONNECTED;
+  // Rossz jelszo. NEM egyszeruen failStatus = WL_CONNECT_FAILED, mert a core
+  // az ELSO disconnect esemenyt meg nem minositi hitelesitesi hibanak:
+  // STA.cpp:148 szerint a feltetel "(reason == WIFI_REASON_AUTH_FAIL) &&
+  // !first_connect", a first_connect (STA.cpp:117) pedig csak az elso
+  // disconnect utan valt false-ra - es sosem all vissza true-ra. Addig a
+  // status WL_DISCONNECTED marad, vagyis EGYETLEN probalkozasbol a rossz
+  // jelszo lathatatlan lenne.
+  bool authFail = false;
   uint32_t latencyMs = 500;      // mennyi idő alatt jön létre
   bool begun = false;            // fut-e a begin() óta kapcsolódás
   uint32_t beginAt = 0;
@@ -69,13 +77,20 @@ public:
     wifiSim.beginCount++;
     simLog(std::string("WiFi.begin(") + (s ? s : "") + ")");
   }
+  // A sikertelen csatlakozas statusza. Az authFail agat lasd a WifiSim-nel.
+  wl_status_t failNow() {
+    if (wifiSim.authFail) {
+      return wifiSim.beginCount >= 2 ? WL_CONNECT_FAILED : WL_DISCONNECTED;
+    }
+    return (wl_status_t)wifiSim.failStatus;
+  }
   wl_status_t status() {
-    if (!wifiSim.begun || !wifiSim.willConnect) return wifiSim.failStatus;
-    if (g_millis < wifiSim.availableFrom) return wifiSim.failStatus;
+    if (!wifiSim.begun || !wifiSim.willConnect) return failNow();
+    if (g_millis < wifiSim.availableFrom) return failNow();
     // a társítás a begin() vagy a hálózat megjelenése közül a későbbitől indul
     const uint32_t from = wifiSim.beginAt > wifiSim.availableFrom
                           ? wifiSim.beginAt : wifiSim.availableFrom;
-    return (g_millis - from) >= wifiSim.latencyMs ? WL_CONNECTED : wifiSim.failStatus;
+    return (g_millis - from) >= wifiSim.latencyMs ? WL_CONNECTED : failNow();
   }
   String SSID() { return String("TestNet"); }
   IPAddress localIP() { return wifiSim.staticApplied ? wifiSim.cfgIp : IPAddress(192,168,1,77); }

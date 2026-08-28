@@ -108,7 +108,9 @@ constexpr uint32_t PROBE_DELAY = 12 * 1000;
 constexpr uint32_t RESET_DELAY = 10 * 60 * 1000;
 constexpr uint32_t RESET_PULSE = 90 * 1000;
 constexpr uint32_t firstStartDelay = 10 * 60 * 1000;
-constexpr uint8_t maxfailureEvents = 5;  // failure sleep
+// A reset ESEMÉNY számláló határa. A számláló még a reset ELŐTT nő, ezért
+// 4 tényleges router újraindítás után következik az egy órás alvás.
+constexpr uint8_t maxfailureEvents = 5;
 // Egységes Wi-Fi újrapróbálkozási politika MINDEN ágon: 3 próba, köztük 30 mp.
 constexpr uint8_t wifi_maxRetries = 3;
 constexpr uint32_t wifiInterval = 30 * 1000;
@@ -123,10 +125,13 @@ constexpr uint32_t AP_TIMEOUT_MS = 5 * 60 * 1000;
 //  + 10,0 perc  várakozás a router bootolására (RESET_DELAY)
 //   + 2,0 perc  újabb 3 csatlakozási próba
 //  + 60,0 perc  deep sleep
-//  = 85,5 perc
-// 2 nap = 2880 perc; 2880 / 85,5 = 33,7 -> 33 kör = 2821,5 perc = 47,0 óra,
-// tehát még két napon belül. Ha ennyi idő alatt sem jön vissza a net, az már
-// nem az eszköz dolga.
+//  = 85,5 perc  (de csak akkor, ha a kör alvással ZÁRUL)
+// Az UTOLSO kör nem alszik: a wifiGiveUp() előbb növel, aztán ellenőriz, tehát
+// a 33.-nál már AP módba megy. A tényleges türelem ezért
+//   33 x 25,5 + 32 x 60 = 2761,5 perc = 46,0 óra,
+// nem 33 x 85,5. Két napon belül marad, sőt tartalékkal: 34 kör is csak
+// 47,5 óra lenne. Ha ennyi idő alatt sem jön vissza a net, az már nem az
+// eszköz dolga. Mérve: R8.
 constexpr uint32_t MAX_RETRY_ROUNDS = 33;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 50;
 // Gombok mintavételi köze. 10 ms bőven elég az 50 ms-os debounce-hoz, viszont
@@ -189,9 +194,9 @@ constexpr uint8_t MAX_CYCLE_INDEX = 4;
 constexpr uint8_t RESET_TRIGGER_CYCLE = 3;
 
 struct TestState {
-  uint8_t cycleIndex = 0;   // volt: i
-  uint8_t failedCount = 0;  // volt: failedTestsCount
-  uint8_t resetEvents = 0;  // volt: Nreset_events
+  uint8_t cycleIndex = 0;   // melyik végpont jön; 0..MAX_CYCLE_INDEX
+  uint8_t failedCount = 0;  // egymás utáni sikertelen tesztek
+  uint8_t resetEvents = 0;  // hány router újraindítás volt ebben a sorozatban
   uint8_t resetStep = 0;    // 0 = tétlen, 1 = fut a reset pulzus
 };
 
@@ -206,10 +211,12 @@ struct TimingState {
 };
 
 struct UIFlags {
-  bool successPrinted = false;     // volt: successfulTestPrinted
-  bool resetPrinted = false;       // volt: beginResetPrinted
-  bool firstStartPrinted = false;  // volt: firstStartPrinted
-  bool firstStart = true;          // volt: firstStart
+  // "Printed" jelzők: a loop() másodpercenként sokszor fut, ezek gondoskodnak
+  // róla, hogy egy állapotváltás üzenete csak EGYSZER menjen ki a soros portra.
+  bool successPrinted = false;
+  bool resetPrinted = false;
+  bool firstStartPrinted = false;
+  bool firstStart = true;          // tart-e még az indulás utáni türelmi idő
   bool blinkOn = false;            // hibajelző LED állapot
 };
 
@@ -426,11 +433,14 @@ bool encodeSecret(const char* plain, char* out, size_t outSize) {
   }
   memcpy(out, SECRET_PREFIX, SECRET_PREFIX_LEN);
   uint32_t state = secretSeed();
-  static const char HEX[] = "0123456789abcdef";
+  // NEM "HEX": a Print.h-ban az egy makro (#define HEX 16), tehat abbol
+  // "static const char 16[]" lenne. A core makrói (HEX, DEC, OCT, BIN) minden
+  // sketchre ravonatkoznak - a lokalis nevek nem utkozhetnek veluk.
+  static const char kHexDigits[] = "0123456789abcdef";
   for (size_t i = 0; i < len; i++) {
     const uint8_t b = (uint8_t)plain[i] ^ (uint8_t)(xorshift32(state) & 0xFF);
-    out[SECRET_PREFIX_LEN + 2 * i]     = HEX[b >> 4];
-    out[SECRET_PREFIX_LEN + 2 * i + 1] = HEX[b & 0x0F];
+    out[SECRET_PREFIX_LEN + 2 * i]     = kHexDigits[b >> 4];
+    out[SECRET_PREFIX_LEN + 2 * i + 1] = kHexDigits[b & 0x0F];
   }
   out[SECRET_PREFIX_LEN + 2 * len] = '\0';
   return true;
@@ -478,9 +488,10 @@ void decodeSecretInPlace(char* buf) {
 //
 // Az IPAddress::fromString() az IPv4 után IPv6-ot is megpróbál (IPAddress.cpp),
 // ezért a "::1" vagy a "fe80::1" is érvényesnek látszik - és mindkettő befér a
-// 15 karakteres mezőbe. Az eszköz viszont végig IPv4-en dolgozik (ping 1.1.1.1
-// és 8.8.8.8, HTTP, /24-es maszk), a WiFi.config() pedig az IPAddress uint32_t
-// konverzióját használja (NetworkInterface.cpp:390), ami IPv6-ra 0-t ad
+// 15 karakteres mezőbe. Az eszköz viszont végig IPv4-en dolgozik (a gateway
+// pingje, a HTTP tesztek, az 1.1.1.1-es tartalék DNS, a /24-es maszk), a
+// WiFi.config() pedig az IPAddress uint32_t konverzióját használja
+// (NetworkInterface.cpp:390), ami IPv6-ra 0-t ad
 // (IPAddress.h:83). Vagyis egy IPv6 cím csendben DHCP-t vagy - ami rosszabb -
 // egy 0.0.0.0-s gateway-t és DNS-t eredményezne. A 0.0.0.0 ugyanezt jelenti,
 // ezért az sem fogadható el.
@@ -693,8 +704,10 @@ void checkWatchdogResets() {
 // okból nem véd meg minket:
 //   1. az Arduino loop taskja nincs ráiratkozva (main.cpp: loopTaskWDTEnabled
 //      = false), tehát a loop() megakadását észre sem veszi;
-//   2. az ESP_TASK_WDT_PANIC alapértéke 'n', azaz timeoutkor csak kiír egy
-//      figyelmeztetést a soros portra, nem indít újra.
+//   2. a panic beállítás forrásfüggő: az IDF Kconfig alapértéke 'n' (timeoutkor
+//      csak kiír egy figyelmeztetést, nem indít újra), a kész Arduino libek
+//      viszont bekapcsolják (CONFIG_ESP_TASK_WDT_PANIC=y, a lib-builder
+//      defconfig.common:21 sora). Nem hagyatkozunk egyikre sem.
 // Ezért kifejezetten beállítjuk mindkettőt.
 //
 // idle_core_mask = 0: csak a saját loop taskunkat figyeltetjük. Az idle task
@@ -738,7 +751,8 @@ void initWatchdog() {
   if (!watchdogEnabled || cfgErr != ESP_OK) {
     // MINDEN hibaág ide fut be, egyetlen, jól kereshető figyelmeztetéssel.
     // Ne hazudjunk védelmet. Egy 5 mp-es alapértelmezett timeout ráadásul
-    // rosszabb lenne a semminél: a 15 mp-ig tartó HTTP teszt alatt újraindítana.
+    // rosszabb lenne a semminél: a 15-33 mp-ig tartó HTTP teszt alatt
+    // újraindítana (a 33 mp-es esetet lásd a WDT_TIMEOUT_MS-nél).
     Serial.print("FIGYELEM: a watchdog NEM vedi a loop()-ot (feliratkozas ");
     Serial.print(watchdogEnabled ? "OK" : "SIKERTELEN");
     Serial.print(", hibakod ");
@@ -986,7 +1000,7 @@ void enterDeepSleep(uint64_t timerUs) {
   // Egyetlen torlópont MINDEN alvásra (apSleep, internetFailSleep,
   // retrySleep, fatalSleep): fájlírás közben nem alszunk el.
   waitForConfigWrite();
-  digitalWrite(ledPin, LOW);  //led gnd, led off
+  digitalWrite(ledPin, LOW);
   digitalWrite(relayPin, LOW);
   digitalWrite(wifiledPin, LOW);
   WiFi.disconnect(true);
@@ -1078,10 +1092,18 @@ void retrySleep() {
 // Nem sikerult csatlakozni a 3 probaval sem. Itt dol el, hogy tovabb varunk-e
 // vagy beallito modba megyunk.
 //
-// A core meg tudja kulonboztetni a ket esetet (STA.cpp): WIFI_REASON_NO_AP_FOUND
-// -> WL_NO_SSID_AVAIL (a halozat nem is latszik), WIFI_REASON_AUTH_FAIL ->
-// WL_CONNECT_FAILED (rossz jelszo). Konzervativan dontunk: CSAK az explicit
-// hitelesitesi hiba kuld AP modba. Minden mas esetben ujraprobalkozunk, mert
+// A core meg tudja kulonboztetni a ket esetet (STA.cpp:146-148):
+// WIFI_REASON_NO_AP_FOUND -> WL_NO_SSID_AVAIL (a halozat nem is latszik),
+// WIFI_REASON_AUTH_FAIL -> WL_CONNECT_FAILED (rossz jelszo).
+//
+// FONTOS: az AUTH_FAIL agnak van egy "&& !first_connect" feltetele is, es a
+// first_connect (STA.cpp:117) fuggveny-szintu static, ami csak az ELSO
+// disconnect utan valt false-ra. Az elso sikertelen tarsitas tehat meg
+// WL_DISCONNECTED-et ad. Ezert nem eleg egyetlen probalkozas: a setup() egy
+// probaja utan a handleFirstStart() meg harmat tesz, es a dontes csak azutan
+// szuletik meg. Regresszio: R1 (a probalkozasok szamat is meri) es R5.
+//
+// Konzervativan dontunk: CSAK az explicit hitelesitesi hiba kuld AP modba. Minden mas esetben ujraprobalkozunk, mert
 // egy teves "varjunk tovabb" ara kesleltetett ujrakonfiguralas, a teves
 // "menjunk AP modba" ara viszont egy halott eszkoz.
 void wifiGiveUp() {
@@ -1481,6 +1503,10 @@ bool testInternetPing(const IPAddress& target, const char* targetName) {
     }
   }
 
+  // Ide nem lehet eljutni: 4 probaval es 2-es kuszobbel a ciklus mindig a ket
+  // korai return valamelyiken lep ki (a j=2 koron a 0 sikeres mar elbukott, a
+  // j=3-on a 2. siker mar visszateres). A fordito viszont megkoveteli, ezert
+  // ez a sor a lefedettsegben mindig fehér marad.
   return successCount >= PING_MIN_SUCCESS;
 }
 
@@ -1500,6 +1526,10 @@ bool gatewayUnreachable() {
     return false;  // nincs mit ellenőrizni
   }
   IPAddress gw;
+  // Vedelmi ag, amit a gyakorlatban nem lehet elerni: a staticConfigActive csak
+  // akkor igaz, ha az initWiFi()-ben a gatewayStr mar sikeresen ertelmezodott,
+  // es azt csak a POST kezelo irja at - az viszont ujraindit. Emiatt ez a sor
+  // sem szerepel a lefedettsegben.
   if (!gw.fromString(gatewayStr) || !isUsableIPv4(gw)) {
     return false;
   }
@@ -1695,9 +1725,18 @@ void startConfigPortal() {
       } else if (name == PARAM_PASS) {
         if (val.length() <= PASS_MAX_LEN) {
           strlcpy(pass, val.c_str(), sizeof(pass));
-          trimInPlace(pass);  // ugyanaz a szabály, mint az SSID-nél
-          // (itt a hossz már ellenőrzött, tehát a globálist csak érvényes
-          // bemenettel írjuk felül)
+          // Itt a hossz mar ellenorzott, tehat a globalist csak ervenyes
+          // bemenettel irjuk felul.
+          //
+          // TUDATOS KORLAT: a vagas a masolas-beillesztessel bekerult szokozok
+          // ellen szol, es a WPA2 szabvany szerint egy jelszo ELEJEN vagy VEGEN
+          // allo szokoz onmagaban ervenyes volna. Ilyen jelszo ezzel az
+          // eszkozzel NEM allithato be - a mentett ertek a vagott valtozat lesz.
+          // Nem a tarolas kenyszeriti ki: a jelszo "v1:" + hexa alakban megy a
+          // fajlba, abban nincs szokoz, tehat a kodolas/dekodolas a szokozt
+          // hibatlanul visszaadna (ellentetben az SSID-vel, ami sima szovegkent
+          // tarolodik, es amit a readConfigValue() beolvasaskor ugyis vag).
+          trimInPlace(pass);
           Serial.print("Password set to: ");
           Serial.print((unsigned)strlen(pass));
           Serial.println(" chars");
@@ -2119,7 +2158,7 @@ void loop() {
           Serial.println("Reset is done in FAILURE_STATE.");
           Serial.println("RESET_DELAY start in FAILURE_STATE.");
           timing.stateStart = millis();
-          uiFlags.resetPrinted = true;  // Set the flag after printing
+          uiFlags.resetPrinted = true;
           break;                        // a RESET_DELAY a következő körökben telik
         }
 
@@ -2182,7 +2221,7 @@ void loop() {
         Serial.println("Successful Test");
         Serial.println();
         Serial.println("SUCCESS_DELAY delay start.");
-        uiFlags.successPrinted = true;  // Set the flag to true after printing
+        uiFlags.successPrinted = true;
       }
 
       if (currentMillis - timing.stateStart >= SUCCESS_DELAY) {

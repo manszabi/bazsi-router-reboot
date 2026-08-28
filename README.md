@@ -71,7 +71,10 @@ Ha nincs mentett Wi-Fi adat (vagy a Wi-Fi reset gombot megnyomtad):
 > **Az SSID és a jelszó elejéről/végéről a szóközök levágódnak**, már mentéskor.
 > Így az elmentett érték pontosan az, amivel az eszköz csatlakozni fog, és a
 > portál visszajelzése is ezt mutatja. (Következmény: olyan SSID vagy jelszó
-> nem használható, aminek szándékosan szóköz van a szélén.)
+> nem használható, aminek szándékosan szóköz van a szélén. Az SSID-nél ez a
+> tárolásból is következik – sima szövegként megy a fájlba, és beolvasáskor
+> úgyis levágódna –, a jelszónál viszont tudatos döntés a másolás-beillesztéssel
+> bekerülő szóközök ellen: a `v1:` + hexa alak a szóközt hibátlanul visszaadná.)
 >
 > Az AP mód **5 perc tétlenség** után elalszik (minden HTTP kérés újraindítja a
 > visszaszámlálást), és utána már csak a reset gomb vagy az áramtalanítás
@@ -325,7 +328,7 @@ board_build.filesystem = littlefs
 | `maxfailureEvents` | 5 | A reset esemény számláló határa → **4** tényleges router újraindítás után deep sleep |
 | `wifi_maxRetries` | 3 | Wi-Fi újracsatlakozási próbálkozások |
 | `wifiInterval` | 30s | Szünet a próbálkozások között |
-| `MAX_RETRY_ROUNDS` | 33 | 33 × 85,5 perc = **47 óra** türelem, körönként egy router újraindítással |
+| `MAX_RETRY_ROUNDS` | 33 | 33 × 25,5 perc + 32 × 60 perc = **46 óra** türelem, körönként egy router újraindítással (az utolsó kör már nem alszik) |
 | `AP_TIMEOUT_MS` | 5 perc | AP mód tétlenség után alvás |
 
 ## 📊 Soros monitor
