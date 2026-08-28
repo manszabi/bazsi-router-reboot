@@ -310,11 +310,17 @@ A watchdog ezt oldja meg: újraindítja az ESP-t, a `setup()` pedig azonnal
 
 Az ESP-IDF task watchdogja alapból fut, de önmagában **nem véd meg**:
 
-| | Alapértelmezés | Következmény |
+| | Érték a kész Arduino libekben | Következmény |
 |---|---|---|
-| `loopTaskWDTEnabled` | `false` (Arduino `main.cpp`) | a `loop()` megakadását észre sem veszi |
-| `ESP_TASK_WDT_PANIC` | `n` | timeoutkor csak figyelmeztetést ír ki, nem indít újra |
-| `ESP_TASK_WDT_TIMEOUT_S` | `5` | rövidebb, mint a firmware szándékos blokkolásai |
+| `loopTaskWDTEnabled` | `false` (Arduino `main.cpp:111`) | a `loop()` megakadását észre sem veszi |
+| `ESP_TASK_WDT_PANIC` | `y` (`defconfig.common:21`) – az IDF saját alapja `n` | jó, de nem a mi érdemünk: egy másképp fordított libnél a timeout csak figyelmeztetés lenne |
+| `ESP_TASK_WDT_TIMEOUT_S` | `5` (IDF alap, a lib-builder nem írja felül) | rövidebb, mint a firmware szándékos blokkolásai |
+
+> A „kész Arduino libek" értékei az
+> [espressif/esp32-arduino-lib-builder](https://github.com/espressif/esp32-arduino-lib-builder)
+> `configs/defconfig.common` és `configs/defconfig.esp32c3` fájljaiból valók –
+> ezekből fordulnak az `esp32-arduino-libs` előfordított könyvtárak. Ami ott
+> nem szerepel, arra az ESP-IDF Kconfig alapértelmezése érvényes.
 
 Ezért az `initWatchdog()` mindhármat kifejezetten beállítja:
 
@@ -345,11 +351,18 @@ A watchdog a **LittleFS csatolása után, de a Wi-Fi indítása előtt** élesed
 
 Az ESP32-C3 watchdogjai mind hardveresek (`SOC_WDT_SUPPORTED`):
 
-| Watchdog | Alapállapot | Mit fog el |
+| Watchdog | Állapot az Arduino buildben | Mit fog el |
 |---|---|---|
-| **INT_WDT** (interrupt) | `default y`, **300 ms** | ha a FreeRTOS tick megáll: letiltott megszakítás, végtelen ciklus megszakításban |
-| **TWDT** (task) | `default y`, 5 mp, panic `n` | egy figyelt task nem etet – ezt konfiguráljuk 90 mp-re, panickal |
+| **INT_WDT** (interrupt) | **bekapcsolva, 300 ms** – `CONFIG_ESP_INT_WDT_TIMEOUT_MS=300` (`defconfig.common:17`); magát a `CONFIG_ESP_INT_WDT`-t a lib-builder sehol nem tiltja le, tehát marad az IDF `default y` | ha a FreeRTOS tick megáll: letiltott megszakítás, végtelen ciklus megszakításban |
+| **TWDT** (task) | bekapcsolva (`ESP_TASK_WDT_EN`/`_INIT` IDF alap `y`), 5 mp, panic **`y`** (`defconfig.common:21`); az idle task nincs figyelve (`# CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0 is not set`, `defconfig.esp32c3:2`) | egy figyelt task nem etet – ezt konfiguráljuk 90 mp-re |
 | **RWDT** (RTC) | bootloader, 9000 ms | **csak a bootot** – az IDF `app_main()` előtt kikapcsolja (`BOOTLOADER_WDT_DISABLE_IN_USER_CODE` alapból `n`) |
+
+Az INT_WDT és a TWDT megléte **fordítási idejű** (sdkconfig) döntés: ezek a
+beállítások az előfordított `esp32-arduino-libs` könyvtárakba vannak beleégetve.
+Vázlatból nincs API, amivel az INT_WDT-t be lehetne kapcsolni – ha ki lenne
+kapcsolva, csak saját IDF-fordítás vagy az `esp32-arduino-lib-builder`
+segítene. A TWDT-ből ezzel szemben van futásidejű API (`esp_task_wdt_*`), és a
+firmware ezt használja is.
 
 A „kemény" megállást tehát az INT_WDT 300 ms alatt elkapja, akkor is, ha a
 task watchdog még nem élesedett. Amit **csak** a task watchdog lát, az a
@@ -393,9 +406,10 @@ reset gomb ébreszti**.
 - **Áramtalanítás** vagy külső reset nullázza (emberi beavatkozás → tiszta lap).
 - **1 óra hibátlan működés** szintén nullázza.
 
-Az **interrupt watchdog** (`ESP_INT_WDT`) alapból aktív, és a panic kezelő
-alapértelmezése `PRINT_REBOOT`, tehát a megszakítás-szintű megakadásokat az
-IDF már eleve kezeli.
+Az **interrupt watchdog** (`ESP_INT_WDT`) az Arduino buildben aktív
+(lásd fentebb: `defconfig.common:17`), és a panic kezelő alapértelmezése
+`PRINT_REBOOT`, tehát a megszakítás-szintű megakadásokat az IDF már eleve
+kezeli.
 
 > A hosszú várakozások `delay()`-t használnak `yield()` helyett. A `yield()`
 > csak azonos prioritású taskok között ad át vezérlést, tehát a korábbi
