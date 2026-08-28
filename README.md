@@ -142,6 +142,16 @@ internetkimaradásnak. A küszöb szándékosan szigorúbb az iparági szokásn�
 egy téves reset ára ~11,5 perc kiesés, a plusz szigorúságé viszont csak
 ~1 perc késleltetés.
 
+> **Ha DNS-szűrőt futtatsz a hálózaton** (Pi-hole, AdGuard Home), ellenőrizd a
+> blokklistáidat: több népszerű lista tiltja a `connectivitycheck.gstatic.com`
+> és a `detectportal.firefox.com` domaint (épp azért, hogy az OS/böngésző ne
+> „telefonáljon haza"). Egy blokkolt név `0.0.0.0`-ra oldódik vagy NXDOMAIN-t
+> ad, tehát az adott teszt **mindig elbukik**. Ez önmagában nem okoz téves
+> resetet – a 2-es indexig csak akkor jutunk el, ha a 0-s és az 1-es is
+> elbukott –, de elveszíted a redundancia egy részét. A soros naplóban a
+> `Teszt ciklus index = N` sor és a `/log` oldal `TEST FAIL` bejegyzésének
+> paramétere is megmondja, melyik végpont bukott el.
+
 #### Miért nincs ping az internettesztek között
 
 Az ICMP nem bizonyít sem névfeloldást, sem TCP-t. A leggyakoribb valós hiba
@@ -355,7 +365,9 @@ Az ESP-IDF task watchdogja alapból fut, de önmagában **nem véd meg**:
 Ezért az `initWatchdog()` mindhármat kifejezetten beállítja:
 
 - **90 másodperces** timeout – a leghosszabb *nem etethető* blokkolás a
-  `http.GET()` (5 mp connect + 10 mp válasz ≈ 15 mp), erre hatszoros tartalék
+  `http.GET()`. A rossz eset nem a hallgató szerver (5 mp connect + 10 mp
+  válasz = 15 mp), hanem a **halott DNS**, mert a névfeloldás a connect
+  timeouton **kívül** esik – lásd lentebb
 - **`trigger_panic = true`** – timeoutkor valódi újraindulás
 - **`idle_core_mask = 0`** – csak a saját loop taskot figyeli. Az idle task
   figyelése itt káros lenne, mert a firmware szándékosan blokkol percekig
@@ -393,6 +405,44 @@ Vázlatból nincs API, amivel az INT_WDT-t be lehetne kapcsolni – ha ki lenne
 kapcsolva, csak saját IDF-fordítás vagy az `esp32-arduino-lib-builder`
 segítene. A TWDT-ből ezzel szemben van futásidejű API (`esp_task_wdt_*`), és a
 firmware ezt használja is.
+
+#### Miért 90 mp, és nem 30
+
+A `NetworkClient::connect(host, port, timeout)` **először** névfeloldást végez,
+és az `http.setConnectTimeout()` erre **nem vonatkozik**:
+
+```cpp
+int NetworkClient::connect(const char *host, uint16_t port, int32_t timeout_ms) {
+  IPAddress srv((uint32_t)0);
+  if (!Network.hostByName(host, srv)) {   // <- nincs timeout paraméter
+    return 0;
+  }
+  return connect(srv, port, timeout_ms);
+}
+```
+
+Egy lwIP DNS lekérdezés **szerverenként ~7 mp** alatt adja fel: `DNS_MAX_RETRIES`
+= 4 (lwIP `opt.h`), `DNS_TMR_INTERVAL` = 1000 ms (`dns.h`), és a `dns_check_entry()`
+a `tmr`-t 1, 1, 2, 3 lépésekben növeli – összesen 7 tick. DHCP-től jellemzően
+2 szerver jön (a 3. slot a fallback, `LWIP_FALLBACK_DNS_SERVER_SUPPORT` alapból `n`).
+
+Ha az eszköznek van **globális IPv6 címe** (a lib-builder `CONFIG_LWIP_IPV6_AUTOCONFIG=y`),
+a `hostByName()` **kétszer** kérdez: előbb csak `AF_INET6`-ot, aztán `AF_UNSPEC`-et.
+
+Ráadásul a `lwip_getaddrinfo()` hibakódjai **pozitívak** (`netdb.h`: `EAI_NONAME`
+200 … `HOST_NOT_FOUND` 210), amit a `!Network.hostByName(...)` igaznak lát – így
+a sikertelen névfeloldás után még egy `0.0.0.0`-ra irányuló `connect()` is lefut
+a maga 5 másodpercével.
+
+| eset | egy bukott HTTP teszt |
+|---|---|
+| szerver hallgat, DNS jó | 15 mp |
+| 1 DNS szerver, nincs IPv6 | ~12 mp |
+| 2 DNS szerver, nincs IPv6 | ~19 mp |
+| 2 DNS szerver + globális IPv6 | **~33 mp** |
+
+A 90 mp tehát ~2,7-szeres tartalékot ad, nem hatszorosat. A `WD13` teszt ezt a
+33 mp-es legrosszabb esetet méri.
 
 A „kemény" megállást tehát az INT_WDT 300 ms alatt elkapja, akkor is, ha a
 task watchdog még nem élesedett. Amit **csak** a task watchdog lát, az a

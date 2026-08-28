@@ -2861,6 +2861,24 @@ static void scWD7() {
   CHECK(gap < 90000, "es a 90 mp-es watchdog timeout alatt marad");
 }
 
+// A DNS a connect timeouton KIVUL esik, ezert a halott nevszerver rosszabb,
+// mint a hallgato szerver. Realis legrosszabb eset (2 DNS szerver + globalis
+// IPv6, tehat ketszeres getaddrinfo, plusz a 0.0.0.0-ra iranyulo connect):
+//   2 x (2 x 7 mp) + 5 mp = 33 mp egyetlen bukott HTTP tesztre.
+// Epp ez az uj eszkalacio alapesete: mind az ot teszt nevfeloldast igenyel.
+static void scWD13() {
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  g_httpCode = -1;
+  g_httpFailMs = 33000;   // halott DNS, nem hallgato szerver
+  loop();
+  const uint32_t gap = wdMeres(60u * 60 * 1000);
+  g_httpFailMs = 15000;
+  printf("     [info] halott DNS mellett a leghosszabb szakasz: %.1f mp\n", gap/1000.0);
+  CHECK(gap >= 32000, "a 33 mp-es DNS blokkolas tenyleg beleszamit (a meres ervenyes)");
+  CHECK(gap < 90000, "es meg igy is a 90 mp-es watchdog timeout alatt marad");
+}
+
 static void scWD8() {
   // Elgepelt statikus IP: a gateway pingje is beleszamit a szakaszba.
   coldBoot(true, "TestNet", "pw", "192.168.0.9", "192.168.0.1");
@@ -3083,6 +3101,7 @@ static const Scenario kScenarios[] = {
   { "WD10: a watchdog a WiFi.begin() ELŐTT élesedik", scWD10 },
   { "WD11: a LittleFS formázás szándékosan a felügyeleten kívül", scWD11 },
   { "WD12: a setup() hátralévő része sem lép 90 mp fölé", scWD12 },
+  { "WD13: halott DNS (33 mp/kérés) mellett is 90 mp alatt marad", scWD13 },
   { "P14: a halasztott újraindítás a türelmi idő UTÁN fut le", scP14 },
   { "L6: minden eseménykód olvasható címkét kap a /log oldalon", scL6 },
   { "L7: üres napló esetén nincs üres táblázat", scL7 },

@@ -141,8 +141,21 @@ constexpr uint32_t FATAL_SLEEP_AFTER_MS = 5 * 60 * 1000;
 // lehessen különböztetni a végzetes hibától, ahol EGYÜTT villognak.
 constexpr uint32_t STUCK_BLINK_MS = 3000;
 // Watchdog timeout. Nagyobb kell, mint a leghosszabb olyan blokkolás, amit NEM
-// tudunk etetni: a http.GET() a connect (5 mp) + válasz (10 mp) timeouttal
-// együtt ~15 mp-ig tarthat. 90 mp így hatszoros tartalékot ad.
+// tudunk etetni - ez a http.GET(). A rossz eset NEM a szerver hallgatasa
+// (5 mp connect + 10 mp valasz = 15 mp), hanem a HALOTT DNS, mert a
+// nevfeloldas a connect timeouton KIVUL esik:
+//   NetworkClient::connect(host,...) eloszor Network.hostByName()-t hiv, es
+//   annak nincs timeout parametere (NetworkClient.cpp:310-315).
+//   Egy lwIP DNS lekerdezes szervereenkent ~7 mp alatt adja fel
+//   (DNS_MAX_RETRIES=4, DNS_TMR_INTERVAL=1000 ms, a tmr 1,1,2,3 lepesekben nő
+//   -> 7 tick), DHCP-tol jellemzoen 2 szerver jon.
+//   Ha van globalis IPv6 cim, a hostByName KETSZER kerdez (eloszor csak
+//   AF_INET6-ot, aztan AF_UNSPEC-et; NetworkManager.cpp) -> 2 x 14 mp.
+//   A lwip_getaddrinfo hibaja pozitiv EAI_* kod (netdb.h: 200-210), amit a
+//   NetworkClient::connect igazkent lat, ezert meg egy 0.0.0.0-ra iranyulo
+//   connect is lefut a maga 5 mp-evel.
+// Realis legrosszabb eset: 2 x (2 x 7) + 5 = 33 mp. A 90 mp igy ~2,7-szeres
+// tartalekot ad. (Meresi keretben: WD13.)
 constexpr uint32_t WDT_TIMEOUT_MS = 90 * 1000;
 // Ennyi watchdog/panic miatti újraindulás után az eszközt instabilnak
 // tekintjük, és ugyanúgy leállunk, mint a többi végzetes hibánál.
