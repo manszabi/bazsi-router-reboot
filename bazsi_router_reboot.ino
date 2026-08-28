@@ -125,10 +125,13 @@ constexpr uint32_t AP_TIMEOUT_MS = 5 * 60 * 1000;
 //  + 10,0 perc  várakozás a router bootolására (RESET_DELAY)
 //   + 2,0 perc  újabb 3 csatlakozási próba
 //  + 60,0 perc  deep sleep
-//  = 85,5 perc
-// 2 nap = 2880 perc; 2880 / 85,5 = 33,7 -> 33 kör = 2821,5 perc = 47,0 óra,
-// tehát még két napon belül. Ha ennyi idő alatt sem jön vissza a net, az már
-// nem az eszköz dolga.
+//  = 85,5 perc  (de csak akkor, ha a kör alvással ZÁRUL)
+// Az UTOLSO kör nem alszik: a wifiGiveUp() előbb növel, aztán ellenőriz, tehát
+// a 33.-nál már AP módba megy. A tényleges türelem ezért
+//   33 x 25,5 + 32 x 60 = 2761,5 perc = 46,0 óra,
+// nem 33 x 85,5. Két napon belül marad, sőt tartalékkal: 34 kör is csak
+// 47,5 óra lenne. Ha ennyi idő alatt sem jön vissza a net, az már nem az
+// eszköz dolga. Mérve: R8.
 constexpr uint32_t MAX_RETRY_ROUNDS = 33;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 50;
 // Gombok mintavételi köze. 10 ms bőven elég az 50 ms-os debounce-hoz, viszont
@@ -701,8 +704,10 @@ void checkWatchdogResets() {
 // okból nem véd meg minket:
 //   1. az Arduino loop taskja nincs ráiratkozva (main.cpp: loopTaskWDTEnabled
 //      = false), tehát a loop() megakadását észre sem veszi;
-//   2. az ESP_TASK_WDT_PANIC alapértéke 'n', azaz timeoutkor csak kiír egy
-//      figyelmeztetést a soros portra, nem indít újra.
+//   2. a panic beállítás forrásfüggő: az IDF Kconfig alapértéke 'n' (timeoutkor
+//      csak kiír egy figyelmeztetést, nem indít újra), a kész Arduino libek
+//      viszont bekapcsolják (CONFIG_ESP_TASK_WDT_PANIC=y, a lib-builder
+//      defconfig.common:21 sora). Nem hagyatkozunk egyikre sem.
 // Ezért kifejezetten beállítjuk mindkettőt.
 //
 // idle_core_mask = 0: csak a saját loop taskunkat figyeltetjük. Az idle task
@@ -1498,6 +1503,10 @@ bool testInternetPing(const IPAddress& target, const char* targetName) {
     }
   }
 
+  // Ide nem lehet eljutni: 4 probaval es 2-es kuszobbel a ciklus mindig a ket
+  // korai return valamelyiken lep ki (a j=2 koron a 0 sikeres mar elbukott, a
+  // j=3-on a 2. siker mar visszateres). A fordito viszont megkoveteli, ezert
+  // ez a sor a lefedettsegben mindig fehér marad.
   return successCount >= PING_MIN_SUCCESS;
 }
 
@@ -1517,6 +1526,10 @@ bool gatewayUnreachable() {
     return false;  // nincs mit ellenőrizni
   }
   IPAddress gw;
+  // Vedelmi ag, amit a gyakorlatban nem lehet elerni: a staticConfigActive csak
+  // akkor igaz, ha az initWiFi()-ben a gatewayStr mar sikeresen ertelmezodott,
+  // es azt csak a POST kezelo irja at - az viszont ujraindit. Emiatt ez a sor
+  // sem szerepel a lefedettsegben.
   if (!gw.fromString(gatewayStr) || !isUsableIPv4(gw)) {
     return false;
   }

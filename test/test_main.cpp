@@ -46,6 +46,25 @@ extern uint32_t rtcEvNext;
 enum EventCode : uint8_t;
 struct EventEntry { uint32_t uptimeSec; uint16_t param; uint8_t code; uint8_t pad; };
 extern EventEntry rtcEvents[];
+// A sketch allapot-structjai. Sima globalisok, tehat egy valodi ujraindulas
+// (a deep sleepbol ebredes is) nullazza oket - a coldBoot()-nak ugyanezt kell
+// tennie. FIGYELEM: az alapertelmezett tagertekeknek egyeznie KELL a sketchbeli
+// definicioval, kulonben a coldBoot() mas allapotbol indul, mint a valodi boot.
+// Kulonosen a firstStart = true: enelkul a firstStart fazis kimaradna.
+struct TestState { uint8_t cycleIndex = 0; uint8_t failedCount = 0;
+                   uint8_t resetEvents = 0; uint8_t resetStep = 0; };
+struct TimingState { uint32_t stateStart = 0; uint32_t resetPulseStart = 0;
+                     uint32_t startMillis = 0; uint32_t resetBtnDownSince = 0;
+                     uint32_t wifiResetBtnDownSince = 0; uint32_t blinkLast = 0;
+                     uint32_t fatalStart = 0; };
+struct UIFlags { bool successPrinted = false; bool resetPrinted = false;
+                 bool firstStartPrinted = false; bool firstStart = true;
+                 bool blinkOn = false; };
+extern TestState testState;
+extern TimingState timing;
+extern UIFlags uiFlags;
+extern bool staticConfigActive;
+extern bool watchdogEnabled;
 void logEvent(EventCode code, uint16_t param);
 constexpr uint8_t EV_TEST_FAIL_C = 4;
 constexpr uint8_t EV_FATAL_C = 9;
@@ -92,21 +111,35 @@ static int logIndex(const char* frag) {
   return -1;
 }
 
-// Teljes újraindítás szimulálása (deep sleep ébredés is így viselkedik)
-// deepSleepWake = true: a deep sleep utáni ébredést modellezi, ahol az RTC
-// memória tartalma (rtcConnectRounds) megmarad.
+// Teljes újraindítás szimulálása.
+// deepSleepWake = false: valódi bekapcsolás. A reset ok ESP_RST_POWERON, és az
+//   RTC_DATA_ATTR rtcRetryRounds nullázódik, ahogy áramtalanításkor is.
+// deepSleepWake = true: deep sleep utáni ébredés. A reset ok ESP_RST_DEEPSLEEP,
+//   és az RTC memória megmarad - enélkül a több körön át tartó viselkedés
+//   (MAX_RETRY_ROUNDS) egyáltalán nem lenne tesztelhető.
 static void coldBoot(bool willConnect, const char* s, const char* p,
                      const char* ip, const char* gw, uint32_t latency = 500,
                      bool deepSleepWake = false) {
   g_millis = 1; g_log.clear(); g_serialLog.clear(); g_pinState.clear(); g_pinRead.clear();
   g_fs.clear(); g_fsMountOk = true; g_wakeupUs = 0;
   g_fsWritable = true; g_fsCapacity = 0; g_fsRemoveOk = true; g_fsReadable = true;
-  g_resetReason = ESP_RST_POWERON;
-  rtcRetryRounds = 0;
+  g_resetReason = deepSleepWake ? ESP_RST_DEEPSLEEP : ESP_RST_POWERON;
+  if (!deepSleepWake) {
+    rtcRetryRounds = 0;
+  }
   // Egy valodi hidegindulas ezeket is nullazza (sima globalisok). Enelkul egy
   // korabbi mentes utan beallitott halasztott ujrainditas atszivarogna a
   // "reboot" utanra, es kesobb, a scenario kozepen inditana ujra az eszkozt.
   restartPending = false; restartAt = 0; savingConfig = false;
+  // A sketch sima globalisai: egy valodi ujraindulas (a deep sleepbol ebredes
+  // is) ezeket nullazza, mert nem RTC memoriaban vannak. Enelkul egy tobb
+  // bootot vegigjatszo forgatokonyvben a resetEvents atszivarogna, es a
+  // masodik kortol mar az internetFailSleep() futna a wifiGiveUp() helyett.
+  testState = TestState();
+  timing = TimingState();
+  uiFlags = UIFlags();
+  staticConfigActive = false;
+  watchdogEnabled = false;
   g_gpioWakeResult = 0;
   g_gpioWakeMask = 0; g_gpioWakeMode = -1;
   g_httpCode = 200; g_httpSize = -2; g_httpBeginOk = true; g_httpBody = "Microsoft NCSI";
@@ -1362,6 +1395,32 @@ static void scR7() {
   const int halott = merd(33000);
   printf("     [info] halott DNS: %d mp\n", halott);
   CHECK(halott >= 211 && halott <= 215, "halott DNS mellett 213 mp");
+}
+
+// Hany teljes kort var ki az eszkoz, mielott feladja? A doksi 33 kort ir es
+// ebbol 47 orat szamol - de a wifiGiveUp() ELOSZOR novel, AZTAN ellenoriz,
+// tehat az UTOLSO kor mar nem alszik egyet. Ezt vegigjatsszuk.
+static void scR8() {
+  int alvasok = 0, korok = 0;
+  bool apMod = false;
+  for (int i = 0; i < 40 && !apMod; i++) {
+    coldBoot(false, "MyNetwork", "titok123", "", "", 500, i > 0);
+    korok++;
+    bool slept = false;
+    try { setup(); while (g_millis < 3u*60*60*1000 && deviceMode == (DeviceMode)0) loop(); }
+    catch (DeepSleepSignal&) { slept = true; }
+    if (slept) alvasok++;
+    if (deviceMode == (DeviceMode)1) apMod = true;
+  }
+  printf("     [info] %d kor, ebbol %d alvassal; AP mod: %s\n",
+         korok, alvasok, apMod ? "igen" : "nem");
+  const double oraban = (korok * 25.5 + alvasok * 60.0) / 60.0;
+  printf("     [info] osszes turelem: %d x 25,5 perc + %d x 60 perc = %.1f ora\n",
+         korok, alvasok, oraban);
+  CHECK(apMod, "vegul AP beallito modba ment");
+  CHECK(korok == 33, "pontosan 33 kort probalt");
+  CHECK(alvasok == 32, "de csak 32-szer aludt: az utolso kor mar nem alszik");
+  CHECK(oraban > 45.5 && oraban < 46.5, "a tenyleges turelem ~46 ora, nem 47");
 }
 
 static void scR2() {
@@ -3280,6 +3339,7 @@ static const Scenario kScenarios[] = {
   { "R5: a rossz jelszó csak a 2. próbálkozástól látszik (STA.cpp)", scR5 },
   { "R6: egy újrapróbálkozási kör ébren töltött ideje 25,5 perc", scR6 },
   { "R7: a felismerési idő 123 mp élő és 213 mp halott DNS mellett", scR7 },
+  { "R8: 33 kör, 32 alvás - a tényleges türelem ~46 óra", scR8 },
   { "CH1: a chunked válasz keretbájtjai nem buktatják el a tesztet", scCH1 },
   { "CH2: több darabra vágott választ is összefűz", scCH2 },
   { "CH3: darab-kiterjesztés és nagybetűs hexa", scCH3 },

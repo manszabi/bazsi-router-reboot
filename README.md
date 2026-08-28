@@ -325,7 +325,7 @@ board_build.filesystem = littlefs
 | `maxfailureEvents` | 5 | A reset esemény számláló határa → **4** tényleges router újraindítás után deep sleep |
 | `wifi_maxRetries` | 3 | Wi-Fi újracsatlakozási próbálkozások |
 | `wifiInterval` | 30s | Szünet a próbálkozások között |
-| `MAX_RETRY_ROUNDS` | 33 | 33 × 85,5 perc = **47 óra** türelem, körönként egy router újraindítással |
+| `MAX_RETRY_ROUNDS` | 33 | 33 × 25,5 perc + 32 × 60 perc = **46 óra** türelem, körönként egy router újraindítással (az utolsó kör már nem alszik) |
 | `AP_TIMEOUT_MS` | 5 perc | AP mód tétlenség után alvás |
 
 ## 📊 Soros monitor
