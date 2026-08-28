@@ -1301,7 +1301,20 @@ bool testInternetHTTP(const char* url, const char* expectedResponse) {
   const int httpCode = http.GET();
   bool result = false;
 
-  if (httpCode == HTTP_CODE_OK) {
+  if (expectedResponse[0] == '\0') {
+    // "generate_204" stilusu vegpont: nincs torzs, csak a statuszkod szamit.
+    // Ez SZIGORUBB, mint a szoveg-egyeztetes: egy captive portal nem tud 204-et
+    // adni, mert neki eppenseggel HTML-t vagy atiranyitast KELL kuldenie.
+    // Ugyanezt a dontest hozza a NetworkManager is (nm-connectivity.c: 204 ->
+    // "no content, as expected"; barmi mas -> portal).
+    result = (httpCode == HTTP_CODE_NO_CONTENT);
+    if (result) {
+      Serial.println("204 No Content - Igaz érték!");
+    } else {
+      Serial.print("Error on HTTP request, code: ");
+      Serial.println(httpCode);
+    }
+  } else if (httpCode == HTTP_CODE_OK) {
     const int len = http.getSize();
     if (len > (int)HTTP_MAX_PAYLOAD) {
       // Ekkora választ nem a várt endpoint küld (pl. captive portal)
@@ -1934,8 +1947,11 @@ void loop() {
         testResult = testInternetPing(IPAddress(1, 1, 1, 1), "Cloudflare");
       } else if (testState.cycleIndex == 3) {
         testResult = testInternetPing(IPAddress(8, 8, 8, 8), "Google");
-      } else if (testState.cycleIndex == 2 || testState.cycleIndex == 4) {
-        testResult = testInternetHTTP("http://www.msftncsi.com/ncsi.txt", "Microsoft NCSI");
+      } else if (testState.cycleIndex == 2) {
+        testResult = testInternetHTTP("http://detectportal.firefox.com/success.txt", "success");
+      } else if (testState.cycleIndex == 4) {
+        // Ures elvart valasz = 204-es ellenorzes, lasd testInternetHTTP().
+        testResult = testInternetHTTP("http://connectivitycheck.gstatic.com/generate_204", "");
       } else {
         testResult = testInternetHTTP("http://www.msftconnecttest.com/connecttest.txt", "Microsoft Connect Test");
       }

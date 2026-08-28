@@ -153,14 +153,18 @@ A `/log` oldal az aktuális állapotot is mutatja: reset ok, watchdog számlál�
 
 ### A tesztek ciklikusan váltakoznak
 
-| Ciklus | Teszt | Maximális időtartam |
-|:---:|---|---|
-| 0 | HTTP – `msftconnecttest.com` | ~15 mp (5 mp connect + 10 mp válasz) |
-| 1 | Ping – Cloudflare `1.1.1.1` | ~5 mp (max. 3 ping × 1 mp + szünetek) |
-| 2 | HTTP – `msftncsi.com` | ~15 mp |
-| 3 | Ping – Google `8.8.8.8` | ~5 mp |
-| 4 | HTTP – `msftncsi.com` | ~15 mp |
-| 5+ | HTTP – `msftconnecttest.com` | ~15 mp |
+| Ciklus | Teszt | Üzemeltető | Maximális időtartam |
+|:---:|---|---|---|
+| 0 | HTTP – `msftconnecttest.com/connecttest.txt` | Microsoft | ~15 mp (5 mp connect + 10 mp válasz) |
+| 1 | Ping – `1.1.1.1` | Cloudflare | ~5 mp (max. 3 ping × 1 mp + szünetek) |
+| 2 | HTTP – `detectportal.firefox.com/success.txt` | Mozilla | ~15 mp |
+| 3 | Ping – `8.8.8.8` | Google | ~5 mp |
+| 4 | HTTP – `connectivitycheck.gstatic.com/generate_204` | Google | ~15 mp |
+| 5+ | HTTP – `msftconnecttest.com/connecttest.txt` | Microsoft | ~15 mp |
+
+A 4-es index **204 No Content**-et vár, nem szöveget: egy captive portál ezt
+nem tudja utánozni, mert neki bejelentkező oldalt vagy átirányítást kell
+küldenie.
 
 Sikeres teszt → minden számláló nullázódik, a ciklus 0-ról indul.
 

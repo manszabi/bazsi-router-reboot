@@ -122,17 +122,29 @@ Az eszköz három állapotban működik:
 
 #### Tesztelési módszerek (ciklikusan váltakoznak)
 
-| Ciklus index | Teszt típus |
-|:---:|---|
-| 0 | HTTP – `msftconnecttest.com/connecttest.txt` |
-| 1 | Ping – Cloudflare `1.1.1.1` (4 ping, min. 2 sikeres kell) |
-| 2 | HTTP – `msftncsi.com/ncsi.txt` |
-| 3 | Ping – Google `8.8.8.8` |
-| 4 | HTTP – `msftncsi.com/ncsi.txt` |
-| 5+ | HTTP – `msftconnecttest.com/connecttest.txt` |
+| Ciklus index | Teszt típus | Üzemeltető | Elvárt válasz |
+|:---:|---|---|---|
+| 0 | HTTP – `msftconnecttest.com/connecttest.txt` | Microsoft | `Microsoft Connect Test` |
+| 1 | Ping – `1.1.1.1` (4 ping, min. 2 sikeres kell) | Cloudflare | – |
+| 2 | HTTP – `detectportal.firefox.com/success.txt` | Mozilla | `success` |
+| 3 | Ping – `8.8.8.8` | Google | – |
+| 4 | HTTP – `connectivitycheck.gstatic.com/generate_204` | Google | **204 No Content** |
+| 5+ | HTTP – `msftconnecttest.com/connecttest.txt` | Microsoft | `Microsoft Connect Test` |
 
-> A két ping teszt szándékosan más-más szolgáltatót céloz (Cloudflare, ill.
-> Google), így az egyikük kiesése nem tűnik internetkimaradásnak.
+> Az 5+ sor a gyakorlatban nem fordul elő: mivel `failedCount == cycleIndex + 1`
+> mindig igaz, a 4-es indexnél már teljesül a reset feltétele.
+
+Az öt teszt **öt különböző célpont, négy üzemeltető és két protokoll** – így
+egyetlen szolgáltató kiesése sem látszik internetkimaradásnak. A tesztek
+sorrendje is véd: a 2-es indexig csak úgy jutunk el, ha előtte a Microsoft
+végpont **és** a Cloudflare ping is elbukott.
+
+A **204-es ellenőrzés** szigorúbb, mint a szöveg-egyeztetés: egy captive
+portál nem tud `204 No Content`-et adni, mert neki éppenséggel tartalmat kell
+küldenie (bejelentkező oldal vagy átirányítás). A `testInternetHTTP()` akkor
+vált erre az ágra, ha az elvárt válasz üres sztring. Ugyanezt a döntést hozza
+a NetworkManager is (`src/core/nm-connectivity.c`: 204 → „no content, as
+expected", bármi más → portál).
 > A ping teszt akkor áll le, amint az eredmény eldőlt (2 sikeres → sikeres,
 > vagy már a maradék pingekkel sem érhető el a 2 → sikertelen), így általában
 > a 4 pingnél kevesebbet futtat.

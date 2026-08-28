@@ -110,6 +110,7 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   g_gpioWakeResult = 0;
   g_gpioWakeMask = 0; g_gpioWakeMode = -1;
   g_httpCode = 200; g_httpSize = -2; g_httpBeginOk = true; g_httpBody = "Microsoft NCSI";
+  g_httpUrls.clear();
   wifiSim.reset(); pingSim = PingSim();
   wifiSim.willConnect = willConnect; wifiSim.latencyMs = latency;
   if (s && *s)  g_fs["/ssid.txt"] = s;
@@ -1698,6 +1699,85 @@ static void scH5() {
   CHECK(elapsed < 90000, "biztosan a watchdog timeout alatt marad");
 }
 
+// --- "generate_204" stilusu vegpont -----------------------------------------
+// Ures elvart valasz eseten nem szoveget egyeztetunk, hanem a 204 No Content
+// statuszkodot varjuk. Ez szigorubb: egy captive portal nem tud 204-et adni,
+// mert neki eppenseggel tartalmat kell kuldenie (bejelentkezo oldal vagy
+// atiranyitas). Ugyanezt a dontest hozza a NetworkManager is.
+static void scH6() {
+  g_httpBeginOk = true; g_httpSize = -2;
+  g_httpCode = 204; g_httpBody = "";
+  CHECK(testInternetHTTP("http://x/generate_204", ""), "204 + üres elvárás -> siker");
+
+  g_httpCode = 200; g_httpBody = "";
+  CHECK(!testInternetHTTP("http://x/generate_204", ""),
+        "üres törzsű 200 nem elég, ha 204-et várunk");
+
+  g_httpCode = 200; g_httpBody = "<html>Jelentkezzen be a WiFi hasznalatahoz</html>";
+  CHECK(!testInternetHTTP("http://x/generate_204", ""),
+        "captive portal 200 + HTML -> elbukik");
+
+  g_httpCode = 302; g_httpBody = "";
+  CHECK(!testInternetHTTP("http://x/generate_204", ""), "átirányítás -> elbukik");
+
+  g_httpCode = -1; g_httpBody = "";
+  CHECK(!testInternetHTTP("http://x/generate_204", ""), "kapcsolódási hiba -> elbukik");
+
+  // A szoveges ag nem lazul fel: ott tovabbra is 200 kell.
+  g_httpCode = 204; g_httpBody = "Microsoft Connect Test";
+  CHECK(!testInternetHTTP("http://x/", "Microsoft Connect Test"),
+        "a szöveges teszt nem fogad el 204-et");
+  g_httpCode = 200; g_httpSize = -2;
+}
+
+static void scH7() {
+  // 204-nel a torzs olvasasaba bele sem szabad kezdeni: ures streamnel a
+  // readBounded() a sajat 1,5 mp-es hataridejeig varna a semmire.
+  g_httpBeginOk = true; g_httpCode = 204; g_httpBody = ""; g_httpSize = -1;
+  const uint32_t t0 = g_millis;
+  CHECK(testInternetHTTP("http://x/generate_204", ""), "204 -> siker");
+  CHECK(g_millis - t0 < 1500,  // HTTP_READ_TIMEOUT_MS
+        "a törzset el sem kezdi olvasni, nincs 1,5 mp várakozás");
+  g_httpCode = 200; g_httpSize = -2;
+}
+
+// --- Az eszkalacio tenyleg kulonbozo vegpontokat probal ----------------------
+// Regresszio arra, hogy egyetlen uzemelteto kiesese ne dontsön a router
+// ujrainditasarol: az 5 teszt 5 kulonbozo cel, 2 protokoll.
+static void scH8() {
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpCode = -1; pingSim.ok = false;
+  setup();
+  g_httpUrls.clear(); pingSim.targets.clear();
+
+  int guard = 0; bool relay = false;
+  try {
+    while (++guard < 400000 && !relay) {
+      const size_t before = g_log.size();
+      loop();
+      for (size_t i = before; i < g_log.size(); i++)
+        if (g_log[i] == "pin7=HIGH") relay = true;
+    }
+  } catch (DeepSleepSignal&) {}
+
+  CHECK(relay, "az eszkaláció végén elindul a router reset");
+  CHECK(g_httpUrls.size() == 3, "3 HTTP teszt futott le a reset előtt");
+  if (g_httpUrls.size() == 3) {
+    CHECK(g_httpUrls[0] == "http://www.msftconnecttest.com/connecttest.txt",
+          "0. index: Microsoft Connect Test");
+    CHECK(g_httpUrls[1] == "http://detectportal.firefox.com/success.txt",
+          "2. index: Mozilla detectportal");
+    CHECK(g_httpUrls[2] == "http://connectivitycheck.gstatic.com/generate_204",
+          "4. index: Google generate_204");
+    std::set<std::string> uniq(g_httpUrls.begin(), g_httpUrls.end());
+    CHECK(uniq.size() == 3, "egyik HTTP végpont sem ismétlődik");
+  }
+  std::set<std::string> pingUniq(pingSim.targets.begin(), pingSim.targets.end());
+  CHECK(pingUniq.size() == 2, "két különböző ping célpont");
+  CHECK(pingUniq.count("1.1.1.1") == 1 && pingUniq.count("8.8.8.8") == 1,
+        "1.1.1.1 (Cloudflare) és 8.8.8.8 (Google)");
+}
+
 
 // --- Csak IPv4 hasznalhato --------------------------------------------------
 // Az IPAddress::fromString() az IPv4 utan IPv6-ot is megprobal, ezert a "::1"
@@ -2930,6 +3010,9 @@ static const Scenario kScenarios[] = {
   { "P8: statikus IP gateway nélkül nem fogadható el sikerként", scP8 },
   { "P9: a hosszú hibaindoklás nem csonkolódik", scP9 },
   { "H5: beragadt szervernél a saját olvasási határidő tart", scH5 },
+  { "H6: üres elvárásnál 204-et követel, a captive portált elutasítja", scH6 },
+  { "H7: 204-nél a törzs olvasásába bele sem kezd", scH7 },
+  { "H8: az eszkaláció 5 különböző célpontot próbál végig", scH8 },
   { "IP1: a stub ugyanúgy viselkedik, mint a core IPAddress-e", scIP1 },
   { "IP2: IPv6 és 0.0.0.0 cím nem fogadható el a portálon", scIP2 },
   { "IP3: mentett IPv6 gateway esetén DHCP, nem csonka statikus konfig", scIP3 },

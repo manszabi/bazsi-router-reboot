@@ -34,6 +34,7 @@ std::string g_httpBody = "Microsoft NCSI";
 int g_httpSize = -2;
 bool g_httpBeginOk = true;
 bool g_httpStall = false;
+std::vector<std::string> g_httpUrls;
 uint32_t g_httpOkMs = 200;
 uint32_t g_httpFailMs = 15000;   // 5 mp connect + 10 mp valasz
 bool     g_wdtEnabled = false;

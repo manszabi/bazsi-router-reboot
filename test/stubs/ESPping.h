@@ -1,6 +1,7 @@
 #pragma once
 #include <Arduino.h>
 #include <map>
+#include <vector>
 #include <string>
 
 // Cimenkent allithato elerhetoseg: enelkul nem lehetne megkulonboztetni azt,
@@ -9,6 +10,7 @@ struct PingSim {
   bool ok = true;                            // alapertelmezes minden cimre
   int calls = 0;
   std::string lastTarget;
+  std::vector<std::string> targets;   // a pingelt cimek sorrendje
   std::map<std::string, bool> perTarget;     // cim -> elerheto-e
   // A valodi ping a valaszig vagy a timeoutig BLOKKOL, es kozben senki nem
   // eteti a watchdogot. Enelkul a harness nem tudna kimutatni egy tul hosszu
@@ -25,6 +27,7 @@ public:
     (void)n;
     pingSim.calls++;
     pingSim.lastTarget = t.str();
+    pingSim.targets.push_back(pingSim.lastTarget);
     auto it = pingSim.perTarget.find(pingSim.lastTarget);
     const bool ok = it != pingSim.perTarget.end() ? it->second : pingSim.ok;
     g_millis += ok ? pingSim.okMs : pingSim.failMs;   // blokkol, etetes nelkul
