@@ -41,6 +41,9 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
   **ESP32 Arduino 3.3.11** (beágyazott ESP-IDF `release_v5.5`) forrásából
   származnak – pl. `typedef NetworkClient WiFiClient`, `size_t File::read(uint8_t*, size_t)`,
   `HTTPClient::setTimeout(uint16_t)`, `Ping.ping(IPAddress, int16_t)`.
+- A `Ping.ping()` és a `http.GET()` a **valódi timeoutjukig "blokkol"** a szimulált
+  időben (1 mp, illetve 15 mp), etetés nélkül – enélkül a watchdog etetési
+  közének mérése semmit nem érne.
 - A pin-számok a valódi `variants/XIAO_ESP32C3/pins_arduino.h`-ból jönnek
   (`D0`=GPIO2, `D1`=GPIO3, `D3`=GPIO5, `D4`=GPIO6, `D5`=GPIO7).
 - A stub `millis()`-e **`uint32_t`**, nem `unsigned long`: a hoston az utóbbi 64 bites
@@ -73,7 +76,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 | `FS1`–`FS10` | LittleFS hibák: csatolás, írásvédettség, megtelt tár, **néma írási hiba**, csonka olvasás, törlés tartalék útvonala |
 | `FT1`–`FT8` | Végzetes hiba: betölthetetlen konfig vs. „nincs még konfig", LED-villogás, gombok |
 | `WF1`–`WF6` | Csatlakozási hiba: újrapróbálkozás vs. AP portál, RTC-számláló |
-| `WD1`–`WD6` | Ismétlődő watchdog újraindulás: számlálás, végzetes leállás, nullázási feltételek |
+| `WD1`–`WD9` | Ismétlődő watchdog újraindulás; és a leghosszabb etetés nélküli szakasz minden üzemmódban |
 | `E1`–`E6` | Végponttól végpontig: egészséges ciklus, router reset, AP mód, gombok, visszatérő WiFi |
 | `P1`–`P15` | Beállító portál mentése: validáció, írási hiba, jelszó-szivárgás, határidő, IP+gateway páros, whitespace, mentés közbeni gombnyomás, halasztott újraindítás |
 | `CPU1`–`CPU2` | A loop() nem pörgeti a CPU-t a várakozó állapotokban |

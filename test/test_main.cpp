@@ -2722,6 +2722,64 @@ static void scMW3() {
   CHECK(g_wakeupUs == 3600000000ULL, "1 ora alvas");
 }
 
+
+// --- Watchdog: a leghosszabb etetes nelkuli szakasz -------------------------
+// A valodi loopTask (main.cpp:79-82) MINDEN loop() elott etet, ha a loop task
+// fel van iratkozva - ezt modellezzuk. A stub ping/HTTP mostmar a valodi
+// timeoutig "blokkol", kulonben ez a meres semmit nem erne.
+static void wdLepes() { if (g_wdtEnabled) feedLoopWDT(); loop(); }
+static uint32_t wdMeres(uint32_t futasMs) {
+  g_wdtTrack = true; g_wdtLastFeed = g_millis; g_wdtMaxFeedGap = 0;
+  const uint32_t t0 = g_millis;
+  try { int g = 0; while (++g < 3000000 && g_millis - t0 < futasMs) wdLepes(); }
+  catch (...) {}
+  g_wdtTrack = false;
+  return g_wdtMaxFeedGap;
+}
+
+static void scWD7() {
+  // A legrosszabb eset: minden HTTP keres TIMEOUTBA fut. A http.GET() ilyenkor
+  // a connect (5 mp) + valasz (10 mp) timeoutig blokkol, etetes nelkul - a
+  // 90 mp-es watchdog timeout epp erre volt meretezve.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  g_httpCode = -1; pingSim.ok = false;
+  loop();
+  const uint32_t gap = wdMeres(60u * 60 * 1000);
+  printf("     [info] leghosszabb etetes nelkuli szakasz: %.1f mp\n", gap/1000.0);
+  CHECK(gap >= 14000, "a HTTP timeout tenyleg blokkol (a meres ervenyes)");
+  CHECK(gap < 90000, "es a 90 mp-es watchdog timeout alatt marad");
+}
+
+static void scWD8() {
+  // Elgepelt statikus IP: a gateway pingje is beleszamit a szakaszba.
+  coldBoot(true, "TestNet", "pw", "192.168.0.9", "192.168.0.1");
+  setup();
+  g_httpCode = -1; pingSim.ok = false;
+  pingSim.perTarget["192.168.0.1"] = false;
+  loop();
+  const uint32_t gap = wdMeres(40u * 60 * 1000);
+  printf("     [info] leghosszabb etetes nelkuli szakasz: %.1f mp\n", gap/1000.0);
+  CHECK(gap < 90000, "gateway-ellenorzessel egyutt is 90 mp alatt");
+}
+
+static void scWD9() {
+  // A tobbi uzemmod: AP portal, vegzetes hiba, first start varakozas.
+  coldBoot(false, "", "", "", "");
+  setup();
+  CHECK(wdMeres(5u * 60 * 1000) < 90000, "AP konfig modban is 90 mp alatt");
+
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_fsMountOk = false;
+  setup();
+  CHECK(wdMeres(5u * 60 * 1000) < 90000, "vegzetes hibanal is 90 mp alatt");
+
+  coldBoot(false, "TestNet", "pw", "", "");
+  wifiSim.availableFrom = 25u * 60 * 1000;
+  setup();
+  CHECK(wdMeres(25u * 60 * 1000) < 90000, "first start varakozas alatt is 90 mp alatt");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -2860,6 +2918,9 @@ static const Scenario kScenarios[] = {
   { "MW1: a relé pulzus a millis() körbefordulása alatt is 90 mp", scMW1 },
   { "MW2: körbefordulás a RESET_DELAY alatt és a hibakezelés közepén", scMW2 },
   { "MW3: 169 nap (3 körbefordulás) után változatlan viselkedés", scMW3 },
+  { "WD7: HTTP timeoutok mellett is 90 mp alatt marad az etetési köz", scWD7 },
+  { "WD8: gateway-ellenőrzéssel együtt is 90 mp alatt", scWD8 },
+  { "WD9: AP mód, végzetes hiba, first start - mind 90 mp alatt", scWD9 },
   { "P14: a halasztott újraindítás a türelmi idő UTÁN fut le", scP14 },
   { "L6: minden eseménykód olvasható címkét kap a /log oldalon", scL6 },
   { "L7: üres napló esetén nincs üres táblázat", scL7 },
