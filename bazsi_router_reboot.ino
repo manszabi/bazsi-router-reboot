@@ -108,7 +108,9 @@ constexpr uint32_t PROBE_DELAY = 12 * 1000;
 constexpr uint32_t RESET_DELAY = 10 * 60 * 1000;
 constexpr uint32_t RESET_PULSE = 90 * 1000;
 constexpr uint32_t firstStartDelay = 10 * 60 * 1000;
-constexpr uint8_t maxfailureEvents = 5;  // failure sleep
+// A reset ESEMÉNY számláló határa. A számláló még a reset ELŐTT nő, ezért
+// 4 tényleges router újraindítás után következik az egy órás alvás.
+constexpr uint8_t maxfailureEvents = 5;
 // Egységes Wi-Fi újrapróbálkozási politika MINDEN ágon: 3 próba, köztük 30 mp.
 constexpr uint8_t wifi_maxRetries = 3;
 constexpr uint32_t wifiInterval = 30 * 1000;
@@ -189,9 +191,9 @@ constexpr uint8_t MAX_CYCLE_INDEX = 4;
 constexpr uint8_t RESET_TRIGGER_CYCLE = 3;
 
 struct TestState {
-  uint8_t cycleIndex = 0;   // volt: i
-  uint8_t failedCount = 0;  // volt: failedTestsCount
-  uint8_t resetEvents = 0;  // volt: Nreset_events
+  uint8_t cycleIndex = 0;   // melyik végpont jön; 0..MAX_CYCLE_INDEX
+  uint8_t failedCount = 0;  // egymás utáni sikertelen tesztek
+  uint8_t resetEvents = 0;  // hány router újraindítás volt ebben a sorozatban
   uint8_t resetStep = 0;    // 0 = tétlen, 1 = fut a reset pulzus
 };
 
@@ -206,10 +208,12 @@ struct TimingState {
 };
 
 struct UIFlags {
-  bool successPrinted = false;     // volt: successfulTestPrinted
-  bool resetPrinted = false;       // volt: beginResetPrinted
-  bool firstStartPrinted = false;  // volt: firstStartPrinted
-  bool firstStart = true;          // volt: firstStart
+  // "Printed" jelzők: a loop() másodpercenként sokszor fut, ezek gondoskodnak
+  // róla, hogy egy állapotváltás üzenete csak EGYSZER menjen ki a soros portra.
+  bool successPrinted = false;
+  bool resetPrinted = false;
+  bool firstStartPrinted = false;
+  bool firstStart = true;          // tart-e még az indulás utáni türelmi idő
   bool blinkOn = false;            // hibajelző LED állapot
 };
 
@@ -481,9 +485,10 @@ void decodeSecretInPlace(char* buf) {
 //
 // Az IPAddress::fromString() az IPv4 után IPv6-ot is megpróbál (IPAddress.cpp),
 // ezért a "::1" vagy a "fe80::1" is érvényesnek látszik - és mindkettő befér a
-// 15 karakteres mezőbe. Az eszköz viszont végig IPv4-en dolgozik (ping 1.1.1.1
-// és 8.8.8.8, HTTP, /24-es maszk), a WiFi.config() pedig az IPAddress uint32_t
-// konverzióját használja (NetworkInterface.cpp:390), ami IPv6-ra 0-t ad
+// 15 karakteres mezőbe. Az eszköz viszont végig IPv4-en dolgozik (a gateway
+// pingje, a HTTP tesztek, az 1.1.1.1-es tartalék DNS, a /24-es maszk), a
+// WiFi.config() pedig az IPAddress uint32_t konverzióját használja
+// (NetworkInterface.cpp:390), ami IPv6-ra 0-t ad
 // (IPAddress.h:83). Vagyis egy IPv6 cím csendben DHCP-t vagy - ami rosszabb -
 // egy 0.0.0.0-s gateway-t és DNS-t eredményezne. A 0.0.0.0 ugyanezt jelenti,
 // ezért az sem fogadható el.
@@ -741,7 +746,8 @@ void initWatchdog() {
   if (!watchdogEnabled || cfgErr != ESP_OK) {
     // MINDEN hibaág ide fut be, egyetlen, jól kereshető figyelmeztetéssel.
     // Ne hazudjunk védelmet. Egy 5 mp-es alapértelmezett timeout ráadásul
-    // rosszabb lenne a semminél: a 15 mp-ig tartó HTTP teszt alatt újraindítana.
+    // rosszabb lenne a semminél: a 15-33 mp-ig tartó HTTP teszt alatt
+    // újraindítana (a 33 mp-es esetet lásd a WDT_TIMEOUT_MS-nél).
     Serial.print("FIGYELEM: a watchdog NEM vedi a loop()-ot (feliratkozas ");
     Serial.print(watchdogEnabled ? "OK" : "SIKERTELEN");
     Serial.print(", hibakod ");
@@ -989,7 +995,7 @@ void enterDeepSleep(uint64_t timerUs) {
   // Egyetlen torlópont MINDEN alvásra (apSleep, internetFailSleep,
   // retrySleep, fatalSleep): fájlírás közben nem alszunk el.
   waitForConfigWrite();
-  digitalWrite(ledPin, LOW);  //led gnd, led off
+  digitalWrite(ledPin, LOW);
   digitalWrite(relayPin, LOW);
   digitalWrite(wifiledPin, LOW);
   WiFi.disconnect(true);
@@ -2130,7 +2136,7 @@ void loop() {
           Serial.println("Reset is done in FAILURE_STATE.");
           Serial.println("RESET_DELAY start in FAILURE_STATE.");
           timing.stateStart = millis();
-          uiFlags.resetPrinted = true;  // Set the flag after printing
+          uiFlags.resetPrinted = true;
           break;                        // a RESET_DELAY a következő körökben telik
         }
 
@@ -2193,7 +2199,7 @@ void loop() {
         Serial.println("Successful Test");
         Serial.println();
         Serial.println("SUCCESS_DELAY delay start.");
-        uiFlags.successPrinted = true;  // Set the flag to true after printing
+        uiFlags.successPrinted = true;
       }
 
       if (currentMillis - timing.stateStart >= SUCCESS_DELAY) {
