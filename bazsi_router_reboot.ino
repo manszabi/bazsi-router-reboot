@@ -1081,10 +1081,18 @@ void retrySleep() {
 // Nem sikerult csatlakozni a 3 probaval sem. Itt dol el, hogy tovabb varunk-e
 // vagy beallito modba megyunk.
 //
-// A core meg tudja kulonboztetni a ket esetet (STA.cpp): WIFI_REASON_NO_AP_FOUND
-// -> WL_NO_SSID_AVAIL (a halozat nem is latszik), WIFI_REASON_AUTH_FAIL ->
-// WL_CONNECT_FAILED (rossz jelszo). Konzervativan dontunk: CSAK az explicit
-// hitelesitesi hiba kuld AP modba. Minden mas esetben ujraprobalkozunk, mert
+// A core meg tudja kulonboztetni a ket esetet (STA.cpp:146-148):
+// WIFI_REASON_NO_AP_FOUND -> WL_NO_SSID_AVAIL (a halozat nem is latszik),
+// WIFI_REASON_AUTH_FAIL -> WL_CONNECT_FAILED (rossz jelszo).
+//
+// FONTOS: az AUTH_FAIL agnak van egy "&& !first_connect" feltetele is, es a
+// first_connect (STA.cpp:117) fuggveny-szintu static, ami csak az ELSO
+// disconnect utan valt false-ra. Az elso sikertelen tarsitas tehat meg
+// WL_DISCONNECTED-et ad. Ezert nem eleg egyetlen probalkozas: a setup() egy
+// probaja utan a handleFirstStart() meg harmat tesz, es a dontes csak azutan
+// szuletik meg. Regresszio: R1 (a probalkozasok szamat is meri) es R5.
+//
+// Konzervativan dontunk: CSAK az explicit hitelesitesi hiba kuld AP modba. Minden mas esetben ujraprobalkozunk, mert
 // egy teves "varjunk tovabb" ara kesleltetett ujrakonfiguralas, a teves
 // "menjunk AP modba" ara viszont egy halott eszkoz.
 void wifiGiveUp() {

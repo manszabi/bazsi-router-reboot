@@ -1261,9 +1261,11 @@ static void scPO3() {
 
 
 static void scR1() {
-  // Rossz jelszó (hitelesítési hiba) -> AZONNAL AP mód, nem 2 nap várakozás
+  // Rossz jelszó (hitelesítési hiba) -> AZONNAL AP mód, nem 2 nap várakozás.
+  // authFail, nem failStatus: a core az elso disconnect-nel meg nem ad
+  // WL_CONNECT_FAILED-et (STA.cpp:148), tehat a hu modell szigorubb.
   coldBoot(false, "MyNetwork", "rosszjelszo", "", "");
-  wifiSim.failStatus = WL_CONNECT_FAILED;
+  wifiSim.authFail = true;
   setup();
   g_log.clear();
   bool slept = false;
@@ -1274,6 +1276,28 @@ static void scR1() {
   CHECK(deviceMode == (DeviceMode)1, "AP beállító módba ment");
   CHECK(rtcRetryRounds == 0, "nem számolt újrapróbálkozási kört");
   CHECK(logIndex("pin7=HIGH") < 0, "rossz jelszónál NEM indítja újra a routert");
+  // A setup() egyetlen probat tesz; a dontes csak a handleFirstStart() utani
+  // 3 probat kovetoen szuletik meg. Ez nem veletlen: a core az elso disconnect
+  // esemenynel meg WL_DISCONNECTED-et ad (STA.cpp:148), tehat EGYETLEN
+  // probalkozasbol a rossz jelszo felismerhetetlen lenne.
+  printf("     [info] csatlakozasi probalkozasok az AP modig: %d\n", wifiSim.beginCount);
+  CHECK(wifiSim.beginCount >= 2, "egynel tobb probalkozas kellett a felismereshez");
+}
+
+// A rossz jelszo felismerese a core egy nem dokumentalt reszletetol fugg:
+// az ELSO disconnect esemenynel a status meg WL_DISCONNECTED (STA.cpp:148,
+// "AUTH_FAIL && !first_connect"), es csak a masodiktol WL_CONNECT_FAILED.
+// Ezert nem eleg egyetlen probalkozas - ezt a fuggest rogziti ez az eset,
+// hogy egy kesobbi "eleg egy proba is" egyszerusites ne csuszhasson at.
+static void scR5() {
+  coldBoot(false, "MyNetwork", "rosszjelszo", "", "");
+  wifiSim.authFail = true;
+  WiFi.begin("MyNetwork", "rosszjelszo");
+  CHECK(WiFi.status() != WL_CONNECT_FAILED,
+        "egyetlen probalkozas utan a rossz jelszo meg lathatatlan");
+  WiFi.begin("MyNetwork", "rosszjelszo");
+  CHECK(WiFi.status() == WL_CONNECT_FAILED,
+        "a masodik probalkozastol viszont megkulonboztetheto");
 }
 
 static void scR2() {
@@ -3189,6 +3213,7 @@ static const Scenario kScenarios[] = {
   { "FS8: néma írási hiba a portálon sem jelent sikert", scFS8 },
   { "FS9: csonka olvasás -> végzetes hiba, nem csonka konfig", scFS9 },
   { "FS10: a fileMatches() minden elbukási módja", scFS10 },
+  { "R5: a rossz jelszó csak a 2. próbálkozástól látszik (STA.cpp)", scR5 },
   { "CH1: a chunked válasz keretbájtjai nem buktatják el a tesztet", scCH1 },
   { "CH2: több darabra vágott választ is összefűz", scCH2 },
   { "CH3: darab-kiterjesztés és nagybetűs hexa", scCH3 },
