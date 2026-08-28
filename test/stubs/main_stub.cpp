@@ -127,7 +127,7 @@ void Print::flushLine() {
   buf_.clear();
 }
 
-unsigned long millis() { return g_millis; }
+uint32_t millis() { return g_millis; }   // lasd a megjegyzest az Arduino.h-ban
 void pinMode(uint8_t p, uint8_t m) { (void)m; g_pinState[p] = -1; }
 void digitalWrite(uint8_t p, uint8_t v) {
   if (g_pinState[p] != v) simLog("pin" + std::to_string(p) + "=" + (v ? "HIGH" : "LOW"));

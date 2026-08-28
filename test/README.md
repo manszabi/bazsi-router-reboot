@@ -43,6 +43,9 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
   `HTTPClient::setTimeout(uint16_t)`, `Ping.ping(IPAddress, int16_t)`.
 - A pin-számok a valódi `variants/XIAO_ESP32C3/pins_arduino.h`-ból jönnek
   (`D0`=GPIO2, `D1`=GPIO3, `D3`=GPIO5, `D4`=GPIO6, `D5`=GPIO7).
+- A stub `millis()`-e **`uint32_t`**, nem `unsigned long`: a hoston az utóbbi 64 bites
+  lenne, és akkor a `millis() - start` körbefordulás-biztos idiómák másképp
+  viselkednének, mint az ESP32-C3-on (ahol `unsigned long` = 32 bit).
 - Az idő szimulált: minden `yield()` 10 ms-ot léptet, így a percekben mérhető
   időzítések ezredmásodpercek alatt tesztelhetők.
 - `ESP.restart()` és `esp_deep_sleep_start()` C++ kivételt dob, így a

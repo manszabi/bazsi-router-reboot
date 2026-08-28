@@ -2659,6 +2659,69 @@ static void scWR3() {
   savingConfig = false;
 }
 
+
+// --- millis() korbefordulas (49,7 naponta) ---------------------------------
+// A stub millis()-e SZANDEKOSAN uint32_t: a hoston az `unsigned long` 64 bites
+// lenne, es akkor a "millis() - start" idiomak maskepp viselkednenek, mint az
+// ESP32-C3-on. Enelkul ezek a tesztek ertelmetlenek lennenek.
+static uint32_t mw_pulzus = 0;
+static bool     mw_magas = false;
+static uint32_t mw_start = 0;
+static int      mw_wrapok = 0;
+static uint32_t mw_elozo = 0;
+static void mwFigyelo() {
+  if (g_millis < mw_elozo) mw_wrapok++;
+  mw_elozo = g_millis;
+  const bool m = (g_pinState[7] == HIGH);
+  if (m && !mw_magas) { mw_magas = true; mw_start = g_millis; }
+  if (!m && mw_magas) { mw_magas = false; mw_pulzus = g_millis - mw_start; }
+}
+static void wrapFutas(uint32_t kezdo) {
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  g_httpBody = "Microsoft Connect Test";
+  loop(); loop();
+  g_millis = kezdo;
+  loop(); loop();
+  wifiSim.begun = false; wifiSim.willConnect = false;
+  wifiSim.failStatus = WL_NO_SSID_AVAIL;
+  mw_pulzus = 0; mw_magas = false; mw_wrapok = 0; mw_elozo = g_millis;
+  g_onDelay = mwFigyelo;
+  try { int g = 0; while (++g < 3000000 && deviceMode != (DeviceMode)1) loop(); }
+  catch (...) {}
+  g_onDelay = nullptr;
+}
+
+static void scMW1() {
+  // A rele pulzus a projekt legkritikusabb idozitese - az eredeti fo hiba is
+  // itt volt. Ha a wrap EPP a pulzus alatt tortenik, akkor is 90 mp legyen.
+  wrapFutas(0xFFFFFFFFu - 240000u);
+  CHECK(mw_wrapok == 1, "a millis() tenyleg korbefordult kozben");
+  CHECK(mw_pulzus >= 89000 && mw_pulzus <= 92000,
+        "a rele pulzus a korbefordulas alatt is 90 mp");
+}
+
+static void scMW2() {
+  // Wrap a 10 perces RESET_DELAY alatt, illetve a hibakezeles kozepen.
+  wrapFutas(0xFFFFFFFFu - 700000u);
+  CHECK(mw_wrapok == 1, "korbefordult a RESET_DELAY alatt");
+  CHECK(mw_pulzus >= 89000 && mw_pulzus <= 92000, "a pulzus akkor is 90 mp");
+  CHECK(g_wakeupUs == 3600000000ULL, "a vegen ugyanugy 1 ora alvas");
+
+  wrapFutas(0xFFFFFFFFu - 180000u);
+  CHECK(mw_wrapok == 1, "korbefordult a hibakezeles kozepen");
+  CHECK(mw_pulzus >= 89000 && mw_pulzus <= 92000, "a pulzus akkor is 90 mp");
+}
+
+static void scMW3() {
+  // 169 nap = 3 teljes korbefordulas mogotte. A viselkedes valtozatlan.
+  wrapFutas(1716698112u);                    // 169 nap % 2^32
+  CHECK(mw_wrapok == 0, "ebben a szakaszban nincs wrap");
+  CHECK(mw_pulzus >= 89000 && mw_pulzus <= 92000, "90 mp-es pulzus 169 nap utan is");
+  CHECK(rtcRetryRounds == 1, "a szamlalo normalisan lep");
+  CHECK(g_wakeupUs == 3600000000ULL, "1 ora alvas");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -2794,6 +2857,9 @@ static const Scenario kScenarios[] = {
   { "WR1: fájlírás közben nem indul újra (halasztott újraindítás)", scWR1 },
   { "WR2: fájlírás közben nem alszik el", scWR2 },
   { "WR3: a várakozás korlátos, beragadt jelző nem fagyaszt le", scWR3 },
+  { "MW1: a relé pulzus a millis() körbefordulása alatt is 90 mp", scMW1 },
+  { "MW2: körbefordulás a RESET_DELAY alatt és a hibakezelés közepén", scMW2 },
+  { "MW3: 169 nap (3 körbefordulás) után változatlan viselkedés", scMW3 },
   { "P14: a halasztott újraindítás a türelmi idő UTÁN fut le", scP14 },
   { "L6: minden eseménykód olvasható címkét kap a /log oldalon", scL6 },
   { "L7: üres napló esetén nincs üres táblázat", scL7 },
