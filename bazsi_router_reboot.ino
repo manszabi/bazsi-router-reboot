@@ -180,8 +180,12 @@ constexpr uint32_t HTTP_READ_TIMEOUT_MS = 1500;
 // ennyi kort elmeletileg sem lehet tullepni - ez csak egy vegso kapaszkodo,
 // nehogy egy szabalytalan keretezes vegtelen ciklusba vigyen.
 constexpr uint16_t HTTP_MAX_CHUNKS = HTTP_MAX_PAYLOAD + 2;
-constexpr uint8_t MAX_CYCLE_INDEX = 10;
-constexpr uint8_t RESET_TRIGGER_FAILURES = 3;
+// A legmagasabb letezo ciklus index: ot vegpont van, 0..4. A FAILURE_STATE
+// mar 4-nel resetel, tehat a plafon a gyakorlatban nem is kot - de ez az a
+// szam, ameddig az indexnek egyaltalan ertelme van, es a leptetes ezt mondja ki.
+constexpr uint8_t MAX_CYCLE_INDEX = 4;
+// A reset kuszobe: az index 3 UTAN, vagyis a 4-es indexu teszt (Google) bukasa
+// utan indul a router ujrainditas. Lasd a FAILURE_STATE-et.
 constexpr uint8_t RESET_TRIGGER_CYCLE = 3;
 
 struct TestState {
@@ -2018,11 +2022,11 @@ void loop() {
         }
 
         // Nem jött vissza: azonnal router újraindítás, nem várunk további
-        // teszt ciklusokat. A FAILURE_STATE reset ágát így élesítjük.
+        // teszt ciklusokat. A FAILURE_STATE reset ágát így élesítjük - nincs
+        // hálózat, amin bármelyik végpont elérhető lenne, nincs mit végigpróbálni.
         printUptime();
         Serial.println("WiFi nem jott vissza - router ujrainditas kovetkezik.");
         testState.cycleIndex = RESET_TRIGGER_CYCLE + 1;
-        testState.failedCount = RESET_TRIGGER_FAILURES;
         currentState = FAILURE_STATE;
         timing.stateStart = millis();
         break;
@@ -2082,7 +2086,15 @@ void loop() {
     }
 
     case FAILURE_STATE:
-      if (testState.cycleIndex > RESET_TRIGGER_CYCLE && testState.failedCount >= RESET_TRIGGER_FAILURES) {
+      // Mind az ot vegpont elbukott: a 4-es indexen a Google-t is probaltuk,
+      // tehat a 0..4 mind lefutott es mind bukott. Mivel a ket szamlalo egyutt
+      // lep (failedCount == cycleIndex + 1), ez pontosan 5 egymas utani bukas -
+      // de a feltetel szandekosan a VEGPONT-lefedettseget mondja ki, nem az
+      // idot: egyetlen uzemelteto kiesese soha ne latszodjon internetkimaradasnak.
+      // Egy failedCount-alapu kuszob ugyanezt ma szam szerint eltalalna, de nem
+      // ezt garantalna - ezert csak az index kot. A failedCount a naplozashoz es
+      // a soros kimenethez kell (csak a hibasorozat elso tagja kerul a naplóba).
+      if (testState.cycleIndex > RESET_TRIGGER_CYCLE) {
 
         if (!uiFlags.resetPrinted) {
           // Statikus IP mellett: ha a saját gateway-ünket sem érjük el, a hiba

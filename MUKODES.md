@@ -163,7 +163,6 @@ az öt elbukik**; bármelyik siker nullázza a számlálókat.
 | 2 | `detectportal.firefox.com/success.txt` | Mozilla | `success` | 15 / 33 mp |
 | 3 | `nmcheck.gnome.org/check_network_status.txt` | GNOME | `NetworkManager is online` | 15 / 33 mp |
 | 4 | `connectivitycheck.gstatic.com/generate_204` | Google | 204 | 15 / 33 mp |
-| 5+ | `msftconnecttest.com/connecttest.txt` | Microsoft | `Microsoft Connect Test` | 15 / 33 mp |
 
 A két szám a bukás két módja. **15 mp**, ha a névfeloldás megy, de a szerver
 hallgat: 5 mp connect + 10 mp válasz timeout. **33 mp**, ha maga a DNS halott
@@ -185,9 +184,12 @@ Sikeres teszt → minden számláló nullázódik, a ciklus 0-ról indul.
 
 ## 4. Az internet kiesik – router újraindítás
 
-Akkor indul, ha `failedCount >= 3` **és** `cycleIndex > 3`. A kettő közül a
-ciklus index a szűkebb feltétel, ezért a gyakorlatban **5 egymás utáni
-sikertelen teszt** kell hozzá. Az első teszt indulásától a relé
+Akkor indul, ha `cycleIndex > 3`, vagyis ha a 4-es indexű teszt (Google) is
+elbukott. Mivel a két számláló együtt lép (`failedCount == cycleIndex + 1`),
+ez pontosan **5 egymás utáni sikertelen teszt** – de a feltétel szándékosan a
+**végpont-lefedettséget** mondja ki, nem az időt: mind az öt üzemeltetőt
+végig kell próbálni, hogy egyetlen szolgáltató kiesése soha ne látszódjon
+internetkimaradásnak. Az első teszt indulásától a relé
 megszólalásáig **123 mp** (2,05 perc), ha a nevek feloldódnak és csak a
 szerverek hallgatnak:
 
