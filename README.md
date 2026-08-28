@@ -54,6 +54,13 @@ Ha nincs mentett Wi-Fi adat (vagy a Wi-Fi reset gombot megnyomtad):
 > visszautasítja, ahelyett hogy sikert jelentene egy olyan fix címre, amit az
 > eszköz végül nem használ. DHCP-hez hagyd mindkettőt üresen.
 >
+> **Egy elgépelt, de formailag helyes cím** (pl. `192.168.0.200` a
+> `192.168.1.200` helyett) átmegy a validáción – ilyet semmilyen űrlap nem tud
+> kiszűrni. Az eszköz futás közben veszi észre: ha a saját gateway-ét sem éri
+> el, a router kap egy újraindítást, és ha utána sem érhető el, **AP beállító
+> módba** megy, hogy javítani lehessen (a `/log` oldalon `GW UNREACH` és
+> `AP MODE` 4 néven látszik).
+>
 > **Csak IPv4 cím adható meg** (és nem `0.0.0.0`). Az `IPAddress::fromString()`
 > az IPv4 után IPv6-ot is megpróbál, ezért a `::1` vagy a `fe80::1` is
 > érvényesnek *látszana* – a `WiFi.config()` viszont az `IPAddress` `uint32_t`

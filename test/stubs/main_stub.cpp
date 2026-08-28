@@ -84,7 +84,11 @@ void feedLoopWDT() {
   g_wdtLastFeed = g_millis;
   simLog("wdt_feed");
 }
-void delay(uint32_t ms) { g_millis += ms ? ms : 1; }
+// A tesztek ezzel modellezhetik, hogy egy MASIK task (az aszinkron webszerver)
+// kozben vegez valamit - pl. befejezi a fajlirast. Egyszalu szimulatorban ez az
+// egyetlen mod a konkurencia hu abrazolasara.
+void (*g_onDelay)() = nullptr;
+void delay(uint32_t ms) { g_millis += ms ? ms : 1; if (g_onDelay) g_onDelay(); }
 
 HardwareSerial Serial;
 EspClass ESP;

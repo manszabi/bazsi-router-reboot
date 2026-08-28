@@ -224,6 +224,11 @@ DeviceMode deviceMode = MODE_MONITOR;
 // Sikerült-e a LittleFS csatolása. Ha nem, a beállítások nem menthetők.
 bool fsReady = false;
 
+// Statikus IP konfigurációval megyünk-e? Csak akkor igaz, ha a WiFi.config()
+// ténylegesen sikerült. DHCP-nél a gateway magától a routertől jött, tehát
+// definíció szerint helyes - ott nincs mit ellenőrizni.
+bool staticConfigActive = false;
+
 // Fut-e már a watchdog. A setup() blokkoló ciklusai (pl. az initWiFi() 20 mp-es
 // várakozása) még az initWatchdog() ELŐTT futnak; ott a feedLoopWDT() hívás
 // ESP_ERR_NOT_FOUND-ot kapna ("task not found"), amire a core log_e()-t hív -
@@ -254,13 +259,15 @@ enum EventCode : uint8_t {
   EV_WIFI_LOST = 3,     // param: WiFi.status()
   EV_TEST_FAIL = 4,     // param: teszt ciklus index
   EV_ROUTER_RESET = 5,  // param: hányadik reset esemény
-  EV_AP_MODE = 6,       // param: ok (1=nincs SSID 2=auth hiba 3=2 nap letelt)
+  EV_AP_MODE = 6,       // param: ok (1=nincs SSID 2=auth hiba 3=2 nap letelt
+                        //           4=statikus IP rossz: a gateway sem elerheto)
   EV_CONFIG_SAVED = 7,  // param: 0
   EV_SLEEP = 8,         // param: ok (1=retry 2=internet 3=AP timeout 4=fatal)
   EV_FATAL = 9,         // param: ok (1=FS mount 2=konfig olvasás 3=watchdog
                         //           4=wifireset törlés sikertelen)
   EV_WDT_RESET = 10,    // param: hányadik watchdog reset
-  EV_STUCK_BUTTON = 11  // param: 0 = reset gomb, 1 = wifireset gomb
+  EV_STUCK_BUTTON = 11, // param: 0 = reset gomb, 1 = wifireset gomb
+  EV_GW_UNREACHABLE = 12  // param: 1 = reset elott, 2 = a reset utan is
 };
 
 // Pontosan 8 bájt. A kitöltő mező explicit, hogy a RTC memóriában tárolt
@@ -293,6 +300,7 @@ void resetbutton();
 void wifiresetbutton();
 void blockingDelay(uint32_t duration);
 void waitWithButtons(uint32_t duration);
+void waitForConfigWrite();
 void internetFailSleep();
 void fatalSleep();
 void apSleep();
@@ -311,6 +319,8 @@ bool initWiFi();
 bool reconnectWifi();
 bool writeConfigValue(fs::FS& fs, const char* path, const char* message);
 bool isUsableIPv4(const IPAddress& addr);
+bool gatewayUnreachable();
+bool testInternetPing(const IPAddress& target, const char* targetName);
 bool encodeSecret(const char* plain, char* out, size_t outSize);
 void decodeSecretInPlace(char* buf);
 
@@ -342,6 +352,7 @@ const char* eventName(uint8_t code) {
     case EV_FATAL: return "FATAL";
     case EV_WDT_RESET: return "WDT RESET";
     case EV_STUCK_BUTTON: return "STUCK BUTTON";
+    case EV_GW_UNREACHABLE: return "GW UNREACH";
     default: return "?";
   }
 }
@@ -746,6 +757,34 @@ void waitWithButtons(uint32_t duration) {
   }
 }
 
+// Fájlírás közben SEM aludni, SEM újraindulni nem szabad: a félbeszakadt
+// mentés sérült konfigurációt hagyna hátra. A mentést az aszinkron webszerver
+// taskja végzi, az alvásról és az újraindításról viszont a loop() dönt -
+// ezért itt megvárjuk, amíg az írás befejeződik.
+//
+// Korlátos: ha a jelző bármiért beragadna, az eszköz nem fagyhat le miatta.
+// Egy konfigmentés 4 fájl írása visszaolvasásos ellenőrzéssel, ami tipikusan
+// néhány tíz ezredmásodperc - az 5 másodperc bőven elég tartalék.
+constexpr uint32_t SAVE_WAIT_MAX_MS = 5000;
+
+void waitForConfigWrite() {
+  if (!savingConfig) {
+    return;
+  }
+  printUptime();
+  Serial.println("Fajliras folyik - megvarjuk, mielott alszunk vagy ujraindulunk.");
+  const uint32_t start = millis();
+  while (savingConfig && millis() - start < SAVE_WAIT_MAX_MS) {
+    feedWatchdog();
+    delay(BUTTON_POLL_MS);
+  }
+  if (savingConfig) {
+    Serial.println("FIGYELEM: a mentes 5 mp alatt sem fejezodott be, tovabblepunk.");
+  } else {
+    Serial.println("A fajliras befejezodott.");
+  }
+}
+
 // Szándékosan nem az enterDeepSleep()-et hívja: itt a Wi-Fi és a webszerver
 // még el sem indult, és gombébresztést sem szabad armolni - a beragadt gomb
 // azonnal újraébresztené az eszközt, azaz végtelen boot loop lenne.
@@ -837,10 +876,13 @@ bool initWiFi() {
     const IPAddress dnsFallback(1, 1, 1, 1);  // ha a gateway nem szolgál ki DNS-t
     if (!WiFi.config(localIP, localGateway, subnet, localGateway, dnsFallback)) {
       Serial.println("⚠️ STA Failed to configure");
+      staticConfigActive = false;  // DHCP-re esünk vissza
     } else {
       Serial.println("✅ Manual IP config applied.");
+      staticConfigActive = true;
     }
   } else {
+    staticConfigActive = false;
     Serial.println("➡️ Skipping manual IP config. Using DHCP...");
   }
 
@@ -919,6 +961,9 @@ bool reset_device() {
 // Közös elalvás. timerUs = 0 esetén NINCS időzített ébresztés: az eszköz
 // magától nem tér vissza, csak a reset gombra vagy áramtalanításra.
 void enterDeepSleep(uint64_t timerUs) {
+  // Egyetlen torlópont MINDEN alvásra (apSleep, internetFailSleep,
+  // retrySleep, fatalSleep): fájlírás közben nem alszunk el.
+  waitForConfigWrite();
   digitalWrite(ledPin, LOW);  //led gnd, led off
   digitalWrite(relayPin, LOW);
   digitalWrite(wifiledPin, LOW);
@@ -1322,6 +1367,28 @@ bool testInternetPing(const IPAddress& target, const char* targetName) {
   }
 
   return successCount >= PING_MIN_SUCCESS;
+}
+
+// Elérhető-e a saját gateway-ünk?
+//
+// Csak statikus IP mellett van értelme: DHCP-nél a gateway magától a routertől
+// jött. Ha viszont kézzel adtad meg és elgépelted, akkor a Wi-Fi TÁRSÍTÁS
+// sikerül (az WPA2, 2. réteg), de IP szinten nincs út sehová - és a router
+// újraindítása ezen soha nem segít. Épp ezt a különbséget méri ez a teszt:
+// a hozzáférési pont él (különben nem lennénk csatlakozva), de nem érjük el.
+//
+// FIGYELEM: ha a routered nem válaszol ICMP echóra, ez tévesen "elérhetetlen"-t
+// ad. Ezért is kap a router előbb egy esélyt, és csak a második alkalommal
+// megyünk AP módba. Ha a routered blokkolja a pinget, használj DHCP-t.
+bool gatewayUnreachable() {
+  if (!staticConfigActive || gatewayStr[0] == '\0') {
+    return false;  // nincs mit ellenőrizni
+  }
+  IPAddress gw;
+  if (!gw.fromString(gatewayStr) || !isUsableIPv4(gw)) {
+    return false;
+  }
+  return !testInternetPing(gw, "sajat gateway");
 }
 
 void handleFirstStart(uint32_t currentMillis) {
@@ -1746,8 +1813,13 @@ void setup() {
 void loop() {
   const uint32_t currentMillis = millis();
 
-  // Az AP-módú beállító oldal kérésére halasztott újraindítás
+  // Az AP-módú beállító oldal kérésére halasztott újraindítás.
+  //
+  // A türelmi idő alatt (2 mp) ÚJABB mentés is érkezhet - mobilon a dupla
+  // koppintás gyakori. Ilyenkor épp fájlírás folyik, és az újraindítás félbe
+  // vágná: előbb megvárjuk, hogy az írás befejeződjön.
   if (restartPending && (int32_t)(currentMillis - restartAt) >= 0) {
+    waitForConfigWrite();
     restartPending = false;
     Serial.println("RESTART!");
     Serial.flush();
@@ -1880,6 +1952,16 @@ void loop() {
       if (testState.cycleIndex > RESET_TRIGGER_CYCLE && testState.failedCount >= RESET_TRIGGER_FAILURES) {
 
         if (!uiFlags.resetPrinted) {
+          // Statikus IP mellett: ha a saját gateway-ünket sem érjük el, a hiba
+          // helyi, és a router újraindítása nem javíthatja. Egy esélyt azért
+          // adunk neki (hátha tényleg a router akadt meg) - a döntés a reset
+          // UTÁNI ellenőrzésnél születik meg.
+          if (gatewayUnreachable()) {
+            printUptime();
+            Serial.println("A sajat gateway sem elerheto - lehet, hogy rossz a statikus IP.");
+            Serial.println("Kap a router egy esélyt: ujrainditas, aztan ujra ellenorizzuk.");
+            logEvent(EV_GW_UNREACHABLE, 1);
+          }
           printUptime();
           Serial.println("Beginning Reset in FAILURE_STATE.");
           while (!reset_device()) {
@@ -1917,6 +1999,20 @@ void loop() {
           printUptime();
           Serial.println("WIFI OK in FAILURE_STATE.");
           digitalWrite(wifiledPin, HIGH);
+
+          // A router megkapta az esélyét. Ha a gateway még mindig nem
+          // válaszol, a statikus IP a rossz - a routert nincs értelme tovább
+          // áramtalanítani. Beállító módba megyünk, hogy javítani lehessen.
+          if (gatewayUnreachable()) {
+            printUptime();
+            Serial.println("A router ujrainditasa utan sem elerheto a gateway.");
+            Serial.println("Valoszinuleg rossz a statikus IP - AP beallito mod.");
+            logEvent(EV_GW_UNREACHABLE, 2);
+            logEvent(EV_AP_MODE, 4);
+            digitalWrite(wifiledPin, LOW);
+            startConfigPortal();
+            break;
+          }
 
           testState.cycleIndex = 0;
           testState.failedCount = 0;
