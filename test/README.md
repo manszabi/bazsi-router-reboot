@@ -59,13 +59,14 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 
 ## Lefedett esetek
 
-**173 forgatókönyv, 555 ellenőrzés. Sorlefedettség: 98,31%.**
+**175 forgatókönyv, 559 ellenőrzés. Sorlefedettség: 98,31%.**
 
 | | |
 |---|---|
 | `W1`–`W9` | Wi-Fi: konfig portál, DHCP vs. statikus IP, DNS, timeout, újracsatlakozás, netif-elvesztés |
 | `S1`–`S4` | Deep sleep: beragadt gomb, kimenetek állapota alvás előtt, ébresztőforrások, RTC-láb megkötés |
 | `RL1`–`RL2` | Relé: a 90 másodperces reset pulzus hossza, elalvás N reset után |
+| `R6`–`R7` | **A dokumentált idők mérése**: egy újrapróbálkozási kör ébren töltött 25,5 perce, és a felismerési idő 123 mp (élő DNS) / 213 mp (halott DNS) |
 | `H1`–`H9` | HTTP teszt: CR/LF vágás, hibás státusz, captive portal, Content-Length nélküli válasz, beragadt szerver, **204-es ellenőrzés**, az eszkaláció végpont-sorrendje, **befagyott router-DNS** |
 | `CH1`–`CH5` | **Chunked keretezés**: egy és több darab, darab-kiterjesztés, nagybetűs hexa, szabálytalan és túlcsorduló méret, 50 kB-os darabfolyam |
 | `PG1`–`PG2` | Ping (csak a gateway-ellenőrzéshez): 2-a-4-ből szabály és korai kilépés |

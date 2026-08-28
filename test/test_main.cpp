@@ -1300,6 +1300,70 @@ static void scR5() {
         "a masodik probalkozastol viszont megkulonboztetheto");
 }
 
+// A README/MUKODES konkret szamot igér az ujraprobalkozasi korre: 25,5 perc
+// ebren + 60 perc alvas = 85,5 perc, es 33 kor = 47 ora. Az ebren toltott reszt
+// meg lehet merni - ha barmelyik idozites elmozdul, ez a teszt bukik, nem a
+// dokumentacio rohad el csendben.
+static void scR6() {
+  coldBoot(false, "MyNetwork", "titok123", "", "");   // a halozat nincs ott
+  setup();
+  const uint32_t t0 = 0;                              // a boot a 0. ms
+  bool slept = false;
+  try { while (g_millis < 3u*60*60*1000) loop(); }
+  catch (DeepSleepSignal&) { slept = true; }
+  const uint32_t awake = g_millis - t0;
+  printf("     [info] boot -> deep sleep: %.1f perc\n", awake/60000.0);
+  CHECK(slept, "egy ora alvasra ment, nem AP modba");
+  CHECK(awake > 25u*60*1000 && awake < 26u*60*1000,
+        "az ebren toltott resz 25 es 26 perc kozott van (a doksi 25,5-ot ir)");
+}
+
+// A doksi ket konkret felismerelesi idot igér: 123 mp, ha a nevek feloldodnak
+// es csak a szerverek hallgatnak (5 x 15 mp + 4 x 12 mp), es 213 mp halott DNS
+// mellett (5 x 33 mp + 4 x 12 mp). Meressel ellenorizzuk, kulonben az elso
+// idozites-valtoztatasnal a README csendben hazudni kezdene.
+//
+// A relet NEM a g_log-bol figyeljuk: a reset_device() a 90 mp-es pulzust
+// blokkolva futtatja le, tehat mire a ciklus visszakapja a vezerlest, a
+// szimulalt ora mar 90 mp-cel tovabb jar. A soros napló "Uptime: XhYmZs" sorai
+// viszont pontosan azt a pillanatot rogzitik, amikor a dontes megszuletett.
+static int uptimeSecAt(size_t idx) {
+  // a legkozelebbi MEGELOZO "Uptime: 0h 2m 4s" sor masodpercben
+  for (size_t i = idx + 1; i-- > 0;) {
+    int h, m, sec;
+    if (sscanf(g_serialLog[i].c_str(), "Uptime: %dh %dm %ds", &h, &m, &sec) == 3) {
+      return h * 3600 + m * 60 + sec;
+    }
+    if (i == 0) break;
+  }
+  return -1;
+}
+
+static void scR7() {
+  auto merd = [](uint32_t failMs) -> int {
+    coldBoot(true, "MyNetwork", "titok123", "", "");
+    setup();
+    loop();                       // a firstStart lezarasa
+    g_httpCode = -1;              // innentol minden teszt bukik
+    g_httpFailMs = failMs;
+    g_serialLog.clear(); g_log.clear();
+    int guard = 0;
+    try { while (logIndex("pin7=HIGH") < 0 && ++guard < 500000) loop(); }
+    catch (DeepSleepSignal&) {}
+    g_httpFailMs = 15000; g_httpCode = 200;
+    const int elsoTeszt = serialIndex("Beginning Test.");
+    const int reset     = serialIndex("Beginning Reset in FAILURE_STATE.");
+    if (elsoTeszt < 0 || reset < 0) return -1;
+    return uptimeSecAt((size_t)reset) - uptimeSecAt((size_t)elsoTeszt);
+  };
+  const int elo = merd(15000);
+  printf("     [info] elo DNS, hallgato szerver: %d mp\n", elo);
+  CHECK(elo >= 121 && elo <= 125, "elo DNS mellett 123 mp (a doksi szama)");
+  const int halott = merd(33000);
+  printf("     [info] halott DNS: %d mp\n", halott);
+  CHECK(halott >= 211 && halott <= 215, "halott DNS mellett 213 mp");
+}
+
 static void scR2() {
   // A 40. kör után feladja és AP módba megy (2 nap)
   coldBoot(false, "MyNetwork", "titok123", "", "");
@@ -3214,6 +3278,8 @@ static const Scenario kScenarios[] = {
   { "FS9: csonka olvasás -> végzetes hiba, nem csonka konfig", scFS9 },
   { "FS10: a fileMatches() minden elbukási módja", scFS10 },
   { "R5: a rossz jelszó csak a 2. próbálkozástól látszik (STA.cpp)", scR5 },
+  { "R6: egy újrapróbálkozási kör ébren töltött ideje 25,5 perc", scR6 },
+  { "R7: a felismerési idő 123 mp élő és 213 mp halott DNS mellett", scR7 },
   { "CH1: a chunked válasz keretbájtjai nem buktatják el a tesztet", scCH1 },
   { "CH2: több darabra vágott választ is összefűz", scCH2 },
   { "CH3: darab-kiterjesztés és nagybetűs hexa", scCH3 },
