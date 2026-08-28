@@ -1725,9 +1725,18 @@ void startConfigPortal() {
       } else if (name == PARAM_PASS) {
         if (val.length() <= PASS_MAX_LEN) {
           strlcpy(pass, val.c_str(), sizeof(pass));
-          trimInPlace(pass);  // ugyanaz a szabály, mint az SSID-nél
-          // (itt a hossz már ellenőrzött, tehát a globálist csak érvényes
-          // bemenettel írjuk felül)
+          // Itt a hossz mar ellenorzott, tehat a globalist csak ervenyes
+          // bemenettel irjuk felul.
+          //
+          // TUDATOS KORLAT: a vagas a masolas-beillesztessel bekerult szokozok
+          // ellen szol, es a WPA2 szabvany szerint egy jelszo ELEJEN vagy VEGEN
+          // allo szokoz onmagaban ervenyes volna. Ilyen jelszo ezzel az
+          // eszkozzel NEM allithato be - a mentett ertek a vagott valtozat lesz.
+          // Nem a tarolas kenyszeriti ki: a jelszo "v1:" + hexa alakban megy a
+          // fajlba, abban nincs szokoz, tehat a kodolas/dekodolas a szokozt
+          // hibatlanul visszaadna (ellentetben az SSID-vel, ami sima szovegkent
+          // tarolodik, es amit a readConfigValue() beolvasaskor ugyis vag).
+          trimInPlace(pass);
           Serial.print("Password set to: ");
           Serial.print((unsigned)strlen(pass));
           Serial.println(" chars");

@@ -71,7 +71,10 @@ Ha nincs mentett Wi-Fi adat (vagy a Wi-Fi reset gombot megnyomtad):
 > **Az SSID és a jelszó elejéről/végéről a szóközök levágódnak**, már mentéskor.
 > Így az elmentett érték pontosan az, amivel az eszköz csatlakozni fog, és a
 > portál visszajelzése is ezt mutatja. (Következmény: olyan SSID vagy jelszó
-> nem használható, aminek szándékosan szóköz van a szélén.)
+> nem használható, aminek szándékosan szóköz van a szélén. Az SSID-nél ez a
+> tárolásból is következik – sima szövegként megy a fájlba, és beolvasáskor
+> úgyis levágódna –, a jelszónál viszont tudatos döntés a másolás-beillesztéssel
+> bekerülő szóközök ellen: a `v1:` + hexa alak a szóközt hibátlanul visszaadná.)
 >
 > Az AP mód **5 perc tétlenség** után elalszik (minden HTTP kérés újraindítja a
 > visszaszámlálást), és utána már csak a reset gomb vagy az áramtalanítás
