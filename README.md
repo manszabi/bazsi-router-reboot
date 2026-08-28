@@ -143,14 +143,18 @@ egy téves reset ára ~11,5 perc kiesés, a plusz szigorúságé viszont csak
 ~1 perc késleltetés.
 
 > **Ha DNS-szűrőt futtatsz a hálózaton** (Pi-hole, AdGuard Home), ellenőrizd a
-> blokklistáidat: több népszerű lista tiltja a `connectivitycheck.gstatic.com`
-> és a `detectportal.firefox.com` domaint (épp azért, hogy az OS/böngésző ne
-> „telefonáljon haza"). Egy blokkolt név `0.0.0.0`-ra oldódik vagy NXDOMAIN-t
-> ad, tehát az adott teszt **mindig elbukik**. Ez önmagában nem okoz téves
-> resetet – a 2-es indexig csak akkor jutunk el, ha a 0-s és az 1-es is
-> elbukott –, de elveszíted a redundancia egy részét. A soros naplóban a
-> `Teszt ciklus index = N` sor és a `/log` oldal `TEST FAIL` bejegyzésének
-> paramétere is megmondja, melyik végpont bukott el.
+> blokklistáidat. A kapcsolat-ellenőrző domainek – `connectivitycheck.gstatic.com`,
+> `detectportal.firefox.com` – tipikus célpontjai a telemetria-ellenes listáknak,
+> épp azért, hogy az OS/böngésző ne „telefonáljon haza". A legelterjedtebb lista,
+> a Pi-hole alapértelmezett StevenBlack *unified* (79 746 domain), ellenőrizve
+> **egyiket sem** tiltja (csak a `csi.gstatic.com`-ot), és a
+> *fakenews-gambling-porn-social* változata sem – de a szűkebb, vendor-specifikus
+> listák eltérnek, ezért a sajátodat nézd meg. Egy blokkolt név `0.0.0.0`-ra
+> oldódik vagy NXDOMAIN-t ad, tehát az adott teszt **mindig elbukik**. Ez
+> önmagában nem okoz téves resetet – a 2-es indexig csak akkor jutunk el, ha a
+> 0-s és az 1-es is elbukott –, de elveszíted a redundancia egy részét. A soros
+> naplóban a `Teszt ciklus index = N` sor és a `/log` oldal `TEST FAIL`
+> bejegyzésének paramétere is megmondja, melyik végpont bukott el.
 
 #### Miért nincs ping az internettesztek között
 
