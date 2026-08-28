@@ -129,10 +129,10 @@ Az eszköz három állapotban működik:
 | 2 | `detectportal.firefox.com/success.txt` | Mozilla | `success` |
 | 3 | `nmcheck.gnome.org/check_network_status.txt` | GNOME / NetworkManager | `NetworkManager is online` |
 | 4 | `connectivitycheck.gstatic.com/generate_204` | Google | **204 No Content** |
-| 5+ | `msftconnecttest.com/connecttest.txt` | Microsoft | `Microsoft Connect Test` |
 
-> Az 5+ sor a gyakorlatban nem fordul elő: mivel `failedCount == cycleIndex + 1`
-> mindig igaz, a 4-es indexnél már teljesül a reset feltétele.
+> Öt index van, `0`–`4` (`MAX_CYCLE_INDEX`), és a 4-es bukása után indul a
+> router újraindítás. A `testInternetHTTP()` diszpécserében a Microsoft ága
+> `else`-ként szerepel, tehát a 0-s indexet is az szolgálja ki.
 
 **Nincs internet = mind az öt teszt elbukik.** Öt különböző végpont, öt
 független üzemeltető, két ellenőrzési mód. Bármelyik siker nullázza a
