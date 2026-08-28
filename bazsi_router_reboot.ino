@@ -1942,15 +1942,21 @@ void loop() {
       Serial.print(" | Hibák száma = ");
       Serial.println(testState.failedCount);
 
+      // Mind az ot teszt HTTP, mert az ICMP nem bizonyit sem nevfeloldast, sem
+      // TCP-t: egy befagyott router-DNS mellett a ping tokeletesen megy, kozben
+      // egyetlen eszkoz sem eri el az internetet. Nem veletlen, hogy egyetlen
+      // nagy implementacio sem ICMP-vel validal (NetworkManager, Firefox,
+      // Windows NCSI: mind HTTP). Ot kulonbozo uzemelteto, ket ellenorzesi mod.
+      // Ures elvart valasz = 204-es ellenorzes, lasd testInternetHTTP().
       bool testResult;
       if (testState.cycleIndex == 1) {
-        testResult = testInternetPing(IPAddress(1, 1, 1, 1), "Cloudflare");
-      } else if (testState.cycleIndex == 3) {
-        testResult = testInternetPing(IPAddress(8, 8, 8, 8), "Google");
+        testResult = testInternetHTTP("http://cp.cloudflare.com/generate_204", "");
       } else if (testState.cycleIndex == 2) {
         testResult = testInternetHTTP("http://detectportal.firefox.com/success.txt", "success");
+      } else if (testState.cycleIndex == 3) {
+        testResult = testInternetHTTP("http://nmcheck.gnome.org/check_network_status.txt",
+                                      "NetworkManager is online");
       } else if (testState.cycleIndex == 4) {
-        // Ures elvart valasz = 204-es ellenorzes, lasd testInternetHTTP().
         testResult = testInternetHTTP("http://connectivitycheck.gstatic.com/generate_204", "");
       } else {
         testResult = testInternetHTTP("http://www.msftconnecttest.com/connecttest.txt", "Microsoft Connect Test");

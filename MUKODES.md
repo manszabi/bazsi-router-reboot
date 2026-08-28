@@ -153,23 +153,27 @@ A `/log` oldal az aktuális állapotot is mutatja: reset ok, watchdog számlál�
 
 ### A tesztek ciklikusan váltakoznak
 
-| Ciklus | Teszt | Üzemeltető | Maximális időtartam |
-|:---:|---|---|---|
-| 0 | HTTP – `msftconnecttest.com/connecttest.txt` | Microsoft | ~15 mp (5 mp connect + 10 mp válasz) |
-| 1 | Ping – `1.1.1.1` | Cloudflare | ~5 mp (max. 3 ping × 1 mp + szünetek) |
-| 2 | HTTP – `detectportal.firefox.com/success.txt` | Mozilla | ~15 mp |
-| 3 | Ping – `8.8.8.8` | Google | ~5 mp |
-| 4 | HTTP – `connectivitycheck.gstatic.com/generate_204` | Google | ~15 mp |
-| 5+ | HTTP – `msftconnecttest.com/connecttest.txt` | Microsoft | ~15 mp |
+Mind az öt teszt HTTP, öt különböző üzemeltető felé. **Nincs internet = mind
+az öt elbukik**; bármelyik siker nullázza a számlálókat.
 
-A 4-es index **204 No Content**-et vár, nem szöveget: egy captive portál ezt
+| Ciklus | Végpont | Üzemeltető | Elvárás | Max. időtartam |
+|:---:|---|---|---|---|
+| 0 | `msftconnecttest.com/connecttest.txt` | Microsoft | `Microsoft Connect Test` | ~15 mp (5 mp connect + 10 mp válasz) |
+| 1 | `cp.cloudflare.com/generate_204` | Cloudflare | 204 | ~15 mp |
+| 2 | `detectportal.firefox.com/success.txt` | Mozilla | `success` | ~15 mp |
+| 3 | `nmcheck.gnome.org/check_network_status.txt` | GNOME | `NetworkManager is online` | ~15 mp |
+| 4 | `connectivitycheck.gstatic.com/generate_204` | Google | 204 | ~15 mp |
+| 5+ | `msftconnecttest.com/connecttest.txt` | Microsoft | `Microsoft Connect Test` | ~15 mp |
+
+A **204-es ellenőrzés** szigorúbb a szöveg-egyeztetésnél: egy captive portál
 nem tudja utánozni, mert neki bejelentkező oldalt vagy átirányítást kell
 küldenie.
 
-Sikeres teszt → minden számláló nullázódik, a ciklus 0-ról indul.
+**Ping nincs az internettesztek között**, mert az ICMP nem bizonyít
+névfeloldást: befagyott router-DNS mellett a ping megy, az internet mégsem
+elérhető. A ping csak a saját gateway ellenőrzésére maradt meg (8. pont).
 
-A ping teszt **4 pingből legalább 2 sikert** vár, de leáll, amint az eredmény
-eldőlt (tehát általában 2–3 pinget futtat).
+Sikeres teszt → minden számláló nullázódik, a ciklus 0-ról indul.
 
 ---
 
@@ -177,8 +181,16 @@ eldőlt (tehát általában 2–3 pinget futtat).
 
 Akkor indul, ha `failedCount >= 3` **és** `cycleIndex > 3`. A kettő közül a
 ciklus index a szűkebb feltétel, ezért a gyakorlatban **5 egymás utáni
-sikertelen teszt** kell hozzá – mérve **2,4 perc** az első hibától a relé
-megszólalásáig.
+sikertelen teszt** kell hozzá. Mérve **123 mp** (2,05 perc) az első teszt
+indulásától a relé megszólalásáig:
+
+```
+5 × 15 mp (HTTP timeout)  +  4 × 12 mp (PROBE_DELAY)  =  123 mp
+```
+
+Ha az internet közvetlenül egy sikeres teszt után hal meg, ehhez még hozzájön
+a `SUCCESS_DELAY` hátralévő része, tehát a **legrosszabb felismerési idő
+60 + 123 = 183 mp ≈ 3 perc**.
 
 | Lépés | Időtartam |
 |---|---|
@@ -188,7 +200,9 @@ megszólalásáig.
 | Várakozás a router bootolására | **10 perc** (`RESET_DELAY`) |
 | Wi-Fi újracsatlakozás: 3 próba, köztük 30 mp | max. ~2 perc |
 
-**Egy teljes reset ciklus:** 5 teszt (2,4 perc) + 90 mp + 10 perc + újracsatlakozás ≈ **14 perc**
+**Egy teljes reset ciklus:** 5 teszt (123 mp) + 90 mp + 10 perc + újracsatlakozás
+≈ **13,6 perc**, ha a Wi-Fi az első próbára visszajön; ha mind a 3 próba kell,
+≈ **15,5 perc**.
 
 ### Ha a saját gateway sem válaszol
 

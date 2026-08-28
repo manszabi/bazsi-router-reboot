@@ -1742,8 +1742,9 @@ static void scH7() {
 }
 
 // --- Az eszkalacio tenyleg kulonbozo vegpontokat probal ----------------------
-// Regresszio arra, hogy egyetlen uzemelteto kiesese ne dontsön a router
-// ujrainditasarol: az 5 teszt 5 kulonbozo cel, 2 protokoll.
+// Regresszio arra, hogy egyetlen uzemelteto kiesese ne dontson a router
+// ujrainditasarol: az 5 teszt 5 kulonbozo cel, 5 kulonbozo uzemelteto.
+// ICMP nincs kozottuk - lasd scH9.
 static void scH8() {
   coldBoot(true, "TestNet", "pw", "", "");
   g_httpCode = -1; pingSim.ok = false;
@@ -1761,21 +1762,50 @@ static void scH8() {
   } catch (DeepSleepSignal&) {}
 
   CHECK(relay, "az eszkaláció végén elindul a router reset");
-  CHECK(g_httpUrls.size() == 3, "3 HTTP teszt futott le a reset előtt");
-  if (g_httpUrls.size() == 3) {
+  CHECK(g_httpUrls.size() == 5, "mind az 5 teszt HTTP volt");
+  if (g_httpUrls.size() == 5) {
     CHECK(g_httpUrls[0] == "http://www.msftconnecttest.com/connecttest.txt",
-          "0. index: Microsoft Connect Test");
-    CHECK(g_httpUrls[1] == "http://detectportal.firefox.com/success.txt",
-          "2. index: Mozilla detectportal");
-    CHECK(g_httpUrls[2] == "http://connectivitycheck.gstatic.com/generate_204",
-          "4. index: Google generate_204");
+          "0: Microsoft");
+    CHECK(g_httpUrls[1] == "http://cp.cloudflare.com/generate_204",
+          "1: Cloudflare");
+    CHECK(g_httpUrls[2] == "http://detectportal.firefox.com/success.txt",
+          "2: Mozilla");
+    CHECK(g_httpUrls[3] == "http://nmcheck.gnome.org/check_network_status.txt",
+          "3: GNOME / NetworkManager");
+    CHECK(g_httpUrls[4] == "http://connectivitycheck.gstatic.com/generate_204",
+          "4: Google");
     std::set<std::string> uniq(g_httpUrls.begin(), g_httpUrls.end());
-    CHECK(uniq.size() == 3, "egyik HTTP végpont sem ismétlődik");
+    CHECK(uniq.size() == 5, "öt különböző végpont, egyik sem ismétlődik");
   }
-  std::set<std::string> pingUniq(pingSim.targets.begin(), pingSim.targets.end());
-  CHECK(pingUniq.size() == 2, "két különböző ping célpont");
-  CHECK(pingUniq.count("1.1.1.1") == 1 && pingUniq.count("8.8.8.8") == 1,
-        "1.1.1.1 (Cloudflare) és 8.8.8.8 (Google)");
+  CHECK(pingSim.targets.empty(),
+        "az internetteszt egyetlen pinget sem küld (a ping csak a gateway-hez való)");
+}
+
+// --- Befagyott router-DNS: HTTP semmi, ICMP tokeletes -----------------------
+// Ez a leggyakoribb "csatlakozva, de nincs internet" hiba olcso routereken
+// (a dnsmasq beragad). Amig a ping is szavazhatott, az eszkoz orakon at
+// tetlen maradt: 41 bukott HTTP teszt mellett 0 router reset. Mostantol
+// mind az ot teszt nevfeloldast igenyel, tehat ezt eszreveszi.
+static void scH9() {
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpCode = -1;      // egyetlen nev sem oldodik fel
+  pingSim.ok = true;    // de az IP szintu utvonal hibatlan
+  setup();
+
+  int guard = 0, relays = 0;
+  const uint32_t t0 = g_millis;
+  size_t before = g_log.size();
+  try {
+    while (++guard < 400000 && g_millis - t0 < 30u * 60 * 1000 && relays == 0) {
+      loop();
+      for (size_t i = before; i < g_log.size(); i++)
+        if (g_log[i] == "pin7=HIGH") relays++;
+      before = g_log.size();
+    }
+  } catch (DeepSleepSignal&) {}
+  CHECK(relays == 1, "a befagyott DNS-t router resettel kezeli");
+  CHECK(g_millis - t0 < 5u * 60 * 1000, "5 percen belül, nem órákon át tétlenül");
+  CHECK(pingSim.targets.empty(), "a sikeres ping nem menti meg a hibás állapotot");
 }
 
 
@@ -3013,6 +3043,7 @@ static const Scenario kScenarios[] = {
   { "H6: üres elvárásnál 204-et követel, a captive portált elutasítja", scH6 },
   { "H7: 204-nél a törzs olvasásába bele sem kezd", scH7 },
   { "H8: az eszkaláció 5 különböző célpontot próbál végig", scH8 },
+  { "H9: befagyott router-DNS (HTTP néma, ICMP jó) -> router reset", scH9 },
   { "IP1: a stub ugyanúgy viselkedik, mint a core IPAddress-e", scIP1 },
   { "IP2: IPv6 és 0.0.0.0 cím nem fogadható el a portálon", scIP2 },
   { "IP3: mentett IPv6 gateway esetén DHCP, nem csonka statikus konfig", scIP3 },

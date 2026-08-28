@@ -4,7 +4,7 @@ ESP32-C3 alapú automatikus router újraindító rendszer. Az eszköz folyamatos
 
 ## 📋 Jellemzők
 
-- **Automatikus internetkapcsolat-figyelés** – HTTP és ICMP (ping) tesztek váltakozásával, két különböző publikus szerver felé
+- **Automatikus internetkapcsolat-figyelés** – öt HTTP teszt, öt különböző üzemeltető felé
 - **Automatikus router újraindítás** – relé segítségével áramtalanítja, majd visszakapcsolja a routert
 - **Wi-Fi Manager** – böngészőből konfigurálható SSID, jelszó, IP-cím és gateway
 - **LittleFS** – a beállítások áramszünet után is megmaradnak
@@ -122,22 +122,41 @@ Az eszköz három állapotban működik:
 
 #### Tesztelési módszerek (ciklikusan váltakoznak)
 
-| Ciklus index | Teszt típus | Üzemeltető | Elvárt válasz |
+| Ciklus index | Végpont | Üzemeltető | Elvárt válasz |
 |:---:|---|---|---|
-| 0 | HTTP – `msftconnecttest.com/connecttest.txt` | Microsoft | `Microsoft Connect Test` |
-| 1 | Ping – `1.1.1.1` (4 ping, min. 2 sikeres kell) | Cloudflare | – |
-| 2 | HTTP – `detectportal.firefox.com/success.txt` | Mozilla | `success` |
-| 3 | Ping – `8.8.8.8` | Google | – |
-| 4 | HTTP – `connectivitycheck.gstatic.com/generate_204` | Google | **204 No Content** |
-| 5+ | HTTP – `msftconnecttest.com/connecttest.txt` | Microsoft | `Microsoft Connect Test` |
+| 0 | `msftconnecttest.com/connecttest.txt` | Microsoft | `Microsoft Connect Test` |
+| 1 | `cp.cloudflare.com/generate_204` | Cloudflare | **204 No Content** |
+| 2 | `detectportal.firefox.com/success.txt` | Mozilla | `success` |
+| 3 | `nmcheck.gnome.org/check_network_status.txt` | GNOME / NetworkManager | `NetworkManager is online` |
+| 4 | `connectivitycheck.gstatic.com/generate_204` | Google | **204 No Content** |
+| 5+ | `msftconnecttest.com/connecttest.txt` | Microsoft | `Microsoft Connect Test` |
 
 > Az 5+ sor a gyakorlatban nem fordul elő: mivel `failedCount == cycleIndex + 1`
 > mindig igaz, a 4-es indexnél már teljesül a reset feltétele.
 
-Az öt teszt **öt különböző célpont, négy üzemeltető és két protokoll** – így
-egyetlen szolgáltató kiesése sem látszik internetkimaradásnak. A tesztek
-sorrendje is véd: a 2-es indexig csak úgy jutunk el, ha előtte a Microsoft
-végpont **és** a Cloudflare ping is elbukott.
+**Nincs internet = mind az öt teszt elbukik.** Öt különböző végpont, öt
+független üzemeltető, két ellenőrzési mód. Bármelyik siker nullázza a
+számlálókat, tehát egyetlen szolgáltató kiesése soha nem látszik
+internetkimaradásnak. A küszöb szándékosan szigorúbb az iparági szokásnál
+(a Nagios `max_check_attempts` alapértelmezése 3 egymást követő bukás), mert
+egy téves reset ára ~11,5 perc kiesés, a plusz szigorúságé viszont csak
+~1 perc késleltetés.
+
+#### Miért nincs ping az internettesztek között
+
+Az ICMP nem bizonyít sem névfeloldást, sem TCP-t. A leggyakoribb valós hiba
+– amikor az olcsó router DNS-továbbítója befagy – mellett a ping tökéletesen
+megy, miközben a házban egyetlen eszköz sem éri el az internetet. Mérve: a
+korábbi, pinget is tartalmazó változat **egy órán át 41 bukott HTTP teszt
+mellett nulla** router resetet indított, mert az 1-es indexen a `1.1.1.1`
+ping mindig sikerült és nullázta a számlálókat. Nem véletlen, hogy egyetlen
+nagy implementáció sem ICMP-vel validál: a NetworkManager (libcurl HTTP), a
+Firefox (`detectportal`), a Windows NCSI (DNS + HTTP) mind HTTP-t használ.
+
+A ping megmaradt, de **csak a saját gateway ellenőrzésére** (`gatewayUnreachable()`),
+ahol pont az a kérdés, hogy a 3. rétegben elérünk-e egyáltalán valamit.
+
+#### A két ellenőrzési mód
 
 A **204-es ellenőrzés** szigorúbb, mint a szöveg-egyeztetés: egy captive
 portál nem tud `204 No Content`-et adni, mert neki éppenséggel tartalmat kell
@@ -145,11 +164,9 @@ küldenie (bejelentkező oldal vagy átirányítás). A `testInternetHTTP()` akk
 vált erre az ágra, ha az elvárt válasz üres sztring. Ugyanezt a döntést hozza
 a NetworkManager is (`src/core/nm-connectivity.c`: 204 → „no content, as
 expected", bármi más → portál).
-> A ping teszt akkor áll le, amint az eredmény eldőlt (2 sikeres → sikeres,
-> vagy már a maradék pingekkel sem érhető el a 2 → sikertelen), így általában
-> a 4 pingnél kevesebbet futtat.
-> A HTTP teszt a válaszból legfeljebb 96 bájtot olvas be, és levágja a záró
-> sortörést az összehasonlítás előtt.
+
+> A szöveges ellenőrzés a válaszból legfeljebb 96 bájtot olvas be, és levágja
+> a záró sortörést az összehasonlítás előtt.
 
 #### Router reset folyamat
 
@@ -220,7 +237,7 @@ bazsi-router-reboot/
 | `AsyncTCP` | Aszinkron TCP az ESPAsyncWebServer-hez |
 | `LittleFS` | Fájlrendszer a flash memóriában |
 | `HTTPClient` | HTTP kérések az internettesztekhez |
-| `ESPping` | ICMP ping tesztek |
+| `ESPping` | ICMP ping a saját gateway ellenőrzéséhez |
 
 ## 🚀 Telepítés
 
@@ -280,7 +297,8 @@ Signal strength (RSSI): -45 dBm
 WIFI OK!
 Uptime: 0h 3m 1s
 Beginning Test.
-✅ Ping teszt sikeres.
+Microsoft Connect Test
+Igaz érték!
 Successful Test
 SUCCESS_DELAY delay start.
 ```
