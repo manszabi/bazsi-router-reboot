@@ -110,6 +110,7 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   g_gpioWakeResult = 0;
   g_gpioWakeMask = 0; g_gpioWakeMode = -1;
   g_httpCode = 200; g_httpSize = -2; g_httpBeginOk = true; g_httpBody = "Microsoft NCSI";
+  g_httpChunked = false; g_httpChunkSize = 0; g_httpRawOverride.clear();
   g_httpUrls.clear();
   wifiSim.reset(); pingSim = PingSim();
   wifiSim.willConnect = willConnect; wifiSim.latencyMs = latency;
@@ -1682,6 +1683,72 @@ static void scP9() {
 }
 
 // --- Beragadt szerver: a sajat hatarido tartson ------------------------------
+// ============ CHUNKED VALASZ ============
+//
+// A HTTPClient a darabhatarokat csak a getString() / writeToStream() utjan
+// bontja le; mi egyiket sem hasznaljuk (korlatlanul foglalnanak), tehat a nyers
+// streamben ott vannak a keretbajtok. Ezek nelkul a jol mukodo vegpont valasza
+// is "Hamis ertek" lenne - vagyis egy atkeretezo proxy internetkimaradasnak
+// latszana.
+
+static void scCH1() {
+  g_httpCode = 200; g_httpBeginOk = true;
+  g_httpChunked = true; g_httpChunkSize = 0;   // egyetlen darab
+  g_httpBody = "Microsoft NCSI";
+  CHECK(testInternetHTTP("http://x/", "Microsoft NCSI"), "chunked valasz is egyezik");
+  CHECK(!testInternetHTTP("http://x/", "Valami mas"), "de a tartalmat tovabbra is nezi");
+}
+
+static void scCH2() {
+  g_httpCode = 200; g_httpBeginOk = true;
+  g_httpChunked = true; g_httpChunkSize = 3;   // 5 darabra vagva
+  g_httpBody = "Microsoft NCSI";
+  CHECK(testInternetHTTP("http://x/", "Microsoft NCSI"), "tobb darabot is osszefuz");
+  g_httpChunkSize = 1;
+  CHECK(testInternetHTTP("http://x/", "Microsoft NCSI"), "bajtonkent darabolva is");
+}
+
+static void scCH3() {
+  // Nagybetus hexa es darab-kiterjesztes: az RFC 9112 mindkettot engedi.
+  g_httpCode = 200; g_httpBeginOk = true; g_httpChunked = true;
+  g_httpRawOverride = "E;padding=xyz\r\nMicrosoft NCSI\r\n0\r\n\r\n";
+  CHECK(testInternetHTTP("http://x/", "Microsoft NCSI"), "kiterjesztest es nagybetus hexat is kezel");
+  g_httpRawOverride = "e\r\nMicrosoft NCSI\r\n0\r\n\r\n";
+  CHECK(testInternetHTTP("http://x/", "Microsoft NCSI"), "kisbetus hexa is jo");
+  g_httpRawOverride.clear();
+}
+
+static void scCH4() {
+  // Szabalytalan keretezes: nem talalgatunk, a teszt elbukik - ez a biztonsagos
+  // irany (egy captive portal soha ne szamitson sikeres internettesztnek).
+  g_httpCode = 200; g_httpBeginOk = true; g_httpChunked = true;
+  const uint32_t t0 = g_millis;
+  g_httpRawOverride = "zz\r\nMicrosoft NCSI\r\n0\r\n\r\n";
+  CHECK(!testInternetHTTP("http://x/", "Microsoft NCSI"), "hexa helyett szemet -> nem egyezik");
+  // A meret sor 5 bajtot iger, de a kapcsolat 3 utan veget er.
+  g_httpRawOverride = "5\r\nMic";
+  CHECK(!testInternetHTTP("http://x/", "Microsoft NCSI"), "csonka darab -> nem egyezik");
+  // Tulcsordulasra hajto meret: a 32 bites szamlalo korbefordulna, es egy
+  // "kicsi" meretet kapnank egy oriasi darabra.
+  g_httpRawOverride = "FFFFFFFFFFFF\r\nMicrosoft NCSI\r\n0\r\n\r\n";
+  CHECK(!testInternetHTTP("http://x/", "Microsoft NCSI"), "tulcsordulo darabmeret -> nem egyezik");
+  CHECK(g_millis - t0 < 5000, "es egyik esetben sem var ki timeoutot");
+  g_httpRawOverride.clear();
+}
+
+static void scCH5() {
+  // Egy captive portal darabokban is kuldhet szazezer bajtot. A getSize() ilyenkor
+  // -1, tehat a meret-alapu korai elutasitas nem vedi meg: a darabolvasonak kell
+  // megallnia a puffer hataran.
+  g_httpCode = 200; g_httpBeginOk = true; g_httpChunked = true;
+  g_httpChunkSize = 100;
+  g_httpBody = std::string(50000, 'x');
+  const uint32_t t0 = g_millis;
+  CHECK(!testInternetHTTP("http://x/", "Microsoft NCSI"), "nem egyezik, es nem is szallt el");
+  CHECK(g_millis - t0 < 5000, "nem olvassa vegig az 50 kB-ot");
+  g_httpChunkSize = 0; g_httpBody = "Microsoft NCSI";
+}
+
 static void scH5() {
   // A kapcsolat el, de nem jon tobb adat. A readBounded() nem varhat a socket
   // sajat fogadasi timeoutjara, mert az nem a mienk - a sajat hataridejevel
@@ -2973,7 +3040,7 @@ static const Scenario kScenarios[] = {
   { "H1: a záró CR/LF nem buktatja el az egyezést", sc15 },
   { "H2: eltérő tartalom és hibás státusz elbukik", sc16 },
   { "H3: captive portal nagy válaszát el sem olvassa", sc17 },
-  { "H4: ismeretlen hosszú (chunked) válasz is korlátozva olvasódik", sc18 },
+  { "H4: Content-Length nélküli válasz is korlátozva olvasódik", sc18 },
   { "PG1: 2 sikeres ping után korán kilép", sc19 },
   { "PG2: csupa sikertelen ping - a 3. után eldől", sc20 },
   { "C1: konfig írás/olvasás oda-vissza, csonkítással", sc21 },
@@ -3122,6 +3189,11 @@ static const Scenario kScenarios[] = {
   { "FS8: néma írási hiba a portálon sem jelent sikert", scFS8 },
   { "FS9: csonka olvasás -> végzetes hiba, nem csonka konfig", scFS9 },
   { "FS10: a fileMatches() minden elbukási módja", scFS10 },
+  { "CH1: a chunked válasz keretbájtjai nem buktatják el a tesztet", scCH1 },
+  { "CH2: több darabra vágott választ is összefűz", scCH2 },
+  { "CH3: darab-kiterjesztés és nagybetűs hexa", scCH3 },
+  { "CH4: szabálytalan keretezés -> bukás, nem találgatás", scCH4 },
+  { "CH5: chunked captive portal sem olvastat végig 50 kB-ot", scCH5 },
 };
 
 

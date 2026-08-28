@@ -147,7 +147,7 @@ A `/log` oldal az aktuális állapotot is mutatja: reset ok, watchdog számlál�
 
 | Állapot | Mit csinál | Meddig |
 |---|---|---|
-| `TESTING_STATE` | Lefuttat egy internet tesztet | 1–15 mp (teszttípustól függ) |
+| `TESTING_STATE` | Lefuttat egy internet tesztet | 1–33 mp (a névfeloldástól függ) |
 | `SUCCESS_STATE` | Vár a következő tesztig | **1 perc** (`SUCCESS_DELAY`) |
 | `FAILURE_STATE` | Vár az újratesztelésig | **12 mp** (`PROBE_DELAY`) |
 
@@ -158,12 +158,18 @@ az öt elbukik**; bármelyik siker nullázza a számlálókat.
 
 | Ciklus | Végpont | Üzemeltető | Elvárás | Max. időtartam |
 |:---:|---|---|---|---|
-| 0 | `msftconnecttest.com/connecttest.txt` | Microsoft | `Microsoft Connect Test` | ~15 mp (5 mp connect + 10 mp válasz) |
-| 1 | `cp.cloudflare.com/generate_204` | Cloudflare | 204 | ~15 mp |
-| 2 | `detectportal.firefox.com/success.txt` | Mozilla | `success` | ~15 mp |
-| 3 | `nmcheck.gnome.org/check_network_status.txt` | GNOME | `NetworkManager is online` | ~15 mp |
-| 4 | `connectivitycheck.gstatic.com/generate_204` | Google | 204 | ~15 mp |
-| 5+ | `msftconnecttest.com/connecttest.txt` | Microsoft | `Microsoft Connect Test` | ~15 mp |
+| 0 | `msftconnecttest.com/connecttest.txt` | Microsoft | `Microsoft Connect Test` | 15 / 33 mp |
+| 1 | `cp.cloudflare.com/generate_204` | Cloudflare | 204 | 15 / 33 mp |
+| 2 | `detectportal.firefox.com/success.txt` | Mozilla | `success` | 15 / 33 mp |
+| 3 | `nmcheck.gnome.org/check_network_status.txt` | GNOME | `NetworkManager is online` | 15 / 33 mp |
+| 4 | `connectivitycheck.gstatic.com/generate_204` | Google | 204 | 15 / 33 mp |
+| 5+ | `msftconnecttest.com/connecttest.txt` | Microsoft | `Microsoft Connect Test` | 15 / 33 mp |
+
+A két szám a bukás két módja. **15 mp**, ha a névfeloldás megy, de a szerver
+hallgat: 5 mp connect + 10 mp válasz timeout. **33 mp**, ha maga a DNS halott
+– a névfeloldásra a `HTTPClient` egyik timeoutja sem vonatkozik, mert a
+`NetworkClient::connect()` *előbb* old fel nevet. Részletes levezetés a
+README „Miért 90 mp, és nem 30" szakaszában; a `WD13` teszt méri.
 
 A **204-es ellenőrzés** szigorúbb a szöveg-egyeztetésnél: egy captive portál
 nem tudja utánozni, mert neki bejelentkező oldalt vagy átirányítást kell
@@ -181,16 +187,24 @@ Sikeres teszt → minden számláló nullázódik, a ciklus 0-ról indul.
 
 Akkor indul, ha `failedCount >= 3` **és** `cycleIndex > 3`. A kettő közül a
 ciklus index a szűkebb feltétel, ezért a gyakorlatban **5 egymás utáni
-sikertelen teszt** kell hozzá. Mérve **123 mp** (2,05 perc) az első teszt
-indulásától a relé megszólalásáig:
+sikertelen teszt** kell hozzá. Az első teszt indulásától a relé
+megszólalásáig **123 mp** (2,05 perc), ha a nevek feloldódnak és csak a
+szerverek hallgatnak:
 
 ```
 5 × 15 mp (HTTP timeout)  +  4 × 12 mp (PROBE_DELAY)  =  123 mp
 ```
 
+Halott DNS mellett – ez a tipikus eset, amit az eszköz javít – minden teszt
+33 mp-ig tart, tehát:
+
+```
+5 × 33 mp (DNS + connect)  +  4 × 12 mp (PROBE_DELAY)  =  213 mp (3,55 perc)
+```
+
 Ha az internet közvetlenül egy sikeres teszt után hal meg, ehhez még hozzájön
 a `SUCCESS_DELAY` hátralévő része, tehát a **legrosszabb felismerési idő
-60 + 123 = 183 mp ≈ 3 perc**.
+60 + 213 = 273 mp ≈ 4,5 perc** (élő DNS mellett 60 + 123 = 183 mp ≈ 3 perc).
 
 | Lépés | Időtartam |
 |---|---|
@@ -200,9 +214,9 @@ a `SUCCESS_DELAY` hátralévő része, tehát a **legrosszabb felismerési idő
 | Várakozás a router bootolására | **10 perc** (`RESET_DELAY`) |
 | Wi-Fi újracsatlakozás: 3 próba, köztük 30 mp | max. ~2 perc |
 
-**Egy teljes reset ciklus:** 5 teszt (123 mp) + 90 mp + 10 perc + újracsatlakozás
-≈ **13,6 perc**, ha a Wi-Fi az első próbára visszajön; ha mind a 3 próba kell,
-≈ **15,5 perc**.
+**Egy teljes reset ciklus:** 5 teszt (123–213 mp) + 90 mp + 10 perc +
+újracsatlakozás ≈ **13,6–15,1 perc**, ha a Wi-Fi az első próbára visszajön;
+ha mind a 3 próba kell, ≈ **15,5–17,0 perc**.
 
 ### Ha a saját gateway sem válaszol
 
@@ -339,7 +353,7 @@ történik, és soha nem tér vissza. Kívülről nézve a viselkedés azonos.
 |---|---|
 | Timeout | **90 mp** |
 | Élesedés | a LittleFS csatolása után, a Wi-Fi indítása **előtt** |
-| Leghosszabb etetés nélküli szakasz (mérve) | **15 mp** (egy timeoutba futó HTTP kérés) |
+| Leghosszabb etetés nélküli szakasz (mérve) | **33 mp** (egy halott DNS-be futó HTTP kérés; hallgató szerver mellett 15 mp) |
 | Etetés a hosszú várakozások alatt | ~10 ms-onként |
 | Timeoutkor | panic → újraindulás |
 | 3 rendellenes újraindulás után | `MODE_FATAL` |

@@ -59,14 +59,15 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 
 ## Lefedett esetek
 
-**167 forgatókönyv, 540 ellenőrzés. Sorlefedettség: 98,14%.**
+**172 forgatókönyv, 552 ellenőrzés. Sorlefedettség: 98,31%.**
 
 | | |
 |---|---|
 | `W1`–`W9` | Wi-Fi: konfig portál, DHCP vs. statikus IP, DNS, timeout, újracsatlakozás, netif-elvesztés |
 | `S1`–`S4` | Deep sleep: beragadt gomb, kimenetek állapota alvás előtt, ébresztőforrások, RTC-láb megkötés |
 | `RL1`–`RL2` | Relé: a 90 másodperces reset pulzus hossza, elalvás N reset után |
-| `H1`–`H9` | HTTP teszt: CR/LF vágás, hibás státusz, captive portal, chunked válasz, beragadt szerver, **204-es ellenőrzés**, az eszkaláció végpont-sorrendje, **befagyott router-DNS** |
+| `H1`–`H9` | HTTP teszt: CR/LF vágás, hibás státusz, captive portal, Content-Length nélküli válasz, beragadt szerver, **204-es ellenőrzés**, az eszkaláció végpont-sorrendje, **befagyott router-DNS** |
+| `CH1`–`CH5` | **Chunked keretezés**: egy és több darab, darab-kiterjesztés, nagybetűs hexa, szabálytalan és túlcsorduló méret, 50 kB-os darabfolyam |
 | `PG1`–`PG2` | Ping (csak a gateway-ellenőrzéshez): 2-a-4-ből szabály és korai kilépés |
 | `C1` | Konfig fájlok írása/olvasása, csonkítás, hiányzó fájl |
 | `B1` | Gomb debounce: zajtüske vs. tartós nyomás |

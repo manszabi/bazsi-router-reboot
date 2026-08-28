@@ -143,14 +143,18 @@ egy téves reset ára ~11,5 perc kiesés, a plusz szigorúságé viszont csak
 ~1 perc késleltetés.
 
 > **Ha DNS-szűrőt futtatsz a hálózaton** (Pi-hole, AdGuard Home), ellenőrizd a
-> blokklistáidat: több népszerű lista tiltja a `connectivitycheck.gstatic.com`
-> és a `detectportal.firefox.com` domaint (épp azért, hogy az OS/böngésző ne
-> „telefonáljon haza"). Egy blokkolt név `0.0.0.0`-ra oldódik vagy NXDOMAIN-t
-> ad, tehát az adott teszt **mindig elbukik**. Ez önmagában nem okoz téves
-> resetet – a 2-es indexig csak akkor jutunk el, ha a 0-s és az 1-es is
-> elbukott –, de elveszíted a redundancia egy részét. A soros naplóban a
-> `Teszt ciklus index = N` sor és a `/log` oldal `TEST FAIL` bejegyzésének
-> paramétere is megmondja, melyik végpont bukott el.
+> blokklistáidat. A kapcsolat-ellenőrző domainek – `connectivitycheck.gstatic.com`,
+> `detectportal.firefox.com` – tipikus célpontjai a telemetria-ellenes listáknak,
+> épp azért, hogy az OS/böngésző ne „telefonáljon haza". A legelterjedtebb lista,
+> a Pi-hole alapértelmezett StevenBlack *unified* (79 746 domain), ellenőrizve
+> **egyiket sem** tiltja (csak a `csi.gstatic.com`-ot), és a
+> *fakenews-gambling-porn-social* változata sem – de a szűkebb, vendor-specifikus
+> listák eltérnek, ezért a sajátodat nézd meg. Egy blokkolt név `0.0.0.0`-ra
+> oldódik vagy NXDOMAIN-t ad, tehát az adott teszt **mindig elbukik**. Ez
+> önmagában nem okoz téves resetet – a 2-es indexig csak akkor jutunk el, ha a
+> 0-s és az 1-es is elbukott –, de elveszíted a redundancia egy részét. A soros
+> naplóban a `Teszt ciklus index = N` sor és a `/log` oldal `TEST FAIL`
+> bejegyzésének paramétere is megmondja, melyik végpont bukott el.
 
 #### Miért nincs ping az internettesztek között
 
@@ -177,6 +181,38 @@ expected", bármi más → portál).
 
 > A szöveges ellenőrzés a válaszból legfeljebb 96 bájtot olvas be, és levágja
 > a záró sortörést az összehasonlítás előtt.
+
+#### Miért bontja a firmware maga a chunked keretezést
+
+A `HTTPClient` a `Transfer-Encoding: chunked` darabhatárait **csak** a
+`getString()` és a `writeToStream()` útján bontja le (`HTTPClient.cpp`:
+`_transferEncoding == HTTPC_TE_CHUNKED`). Egyiket sem használjuk: mindkettő
+korlátlanul foglal vagy ír, egy captive portál többszáz kilobájtos válaszán
+pedig épp ezt akarjuk elkerülni – ezért olvassuk a `begin()`-nek átadott
+`WiFiClient`-et közvetlenül, fix méretű pufferbe.
+
+Csakhogy a nyers streamben a keretbájtok is ott vannak. Egy chunked `success`
+válasz így néz ki a dróton:
+
+```
+7\r\nsuccess\r\n0\r\n\r\n
+```
+
+A `strcmp()` ezt nem látná `success`-nek, tehát a **tökéletesen működő végpont
+is bukott tesztnek számítana**. Öt ilyen egymás után = fölösleges router
+újraindítás. A `readChunked()` ezért lebontja a keretezést:
+
+- hexa méret sor, opcionális `;kiterjesztés`-sel, kis- és nagybetűvel egyaránt;
+- a 96 bájtos puffer határán megáll – nem olvas végig egy darabokban érkező
+  captive portált sem;
+- túlcsorduló méretnél és nem hexa méret sornál feladja, és a teszt elbukik.
+  Nem találgatunk: egy szabálytalanul keretező köztes doboz **soha** ne
+  számítson sikeres internettesztnek.
+
+A ma használt öt végpont mind `Content-Length`-et küld, tehát ez a kód
+gyakorlatban nem fut le – de egy közbeiktatott proxy bármikor átkeretezheti a
+választ, és ez a hiba némán, a redundancia elvesztésével jelentkezne. A
+`CH1`–`CH5` forgatókönyvek fedik.
 
 #### Router reset folyamat
 
