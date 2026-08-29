@@ -3255,6 +3255,13 @@ static void scP17() {
   CHECK(code == 200, "szóközös IP/gateway elfogadva (vágás után)");
   CHECK(g_fs["/ip.txt"] == "192.168.1.200", "az IP vágva mentődik");
   CHECK(g_fs["/gateway.txt"] == "192.168.1.1", "a gateway vágva mentődik");
+  // A vágás nem válhat csonkolássá: egy 31 karakternél hosszabb érték végét a
+  // puffer levágná, és a maradék akár érvényes címmé is "vágódhatna" - az ilyen
+  // bemenet hiba, nem csendben megtisztított érték. (Az űrlap maxlength=15-je
+  // ezt böngészőből nem engedi, kézzel gyártott POST-ból jöhet.)
+  const char* oversize = "192.168.1.200                    X";  // 34 karakter
+  const int code2 = postConfig("MyNetwork", "jelszo", oversize, "192.168.1.1");
+  CHECK(code2 == 500, "túlméretes IP érték hiba, nem csonkolt elfogadás");
 }
 
 static void scP18() {

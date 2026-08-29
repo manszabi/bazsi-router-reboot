@@ -59,7 +59,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 
 ## Lefedett esetek
 
-**183 forgatókönyv, 592 ellenőrzés. Sorlefedettség: 98,33%.**
+**183 forgatókönyv, 593 ellenőrzés. Sorlefedettség: 98,33%.**
 
 | | |
 |---|---|
