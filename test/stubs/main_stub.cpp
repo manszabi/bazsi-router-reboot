@@ -75,6 +75,11 @@ void enableLoopWDT() {
   if (!g_wdtInited) { simLog("enableLoopWDT_FAIL"); return; }
   g_wdtEnabled = true; simLog("enableLoopWDT");
 }
+// A valodi disableLoopWDT() (esp32-hal-misc.c) esp_task_wdt_delete-tel
+// leiratkoztatja a loop taskot.
+void disableLoopWDT() {
+  if (g_wdtEnabled) { g_wdtEnabled = false; simLog("disableLoopWDT"); }
+}
 esp_err_t esp_task_wdt_status(void*) {
   if (!g_wdtInited) return ESP_ERR_INVALID_STATE;
   return g_wdtEnabled ? ESP_OK : ESP_ERR_NOT_FOUND;

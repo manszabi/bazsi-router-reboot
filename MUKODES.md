@@ -313,7 +313,11 @@ A várakozás **korlátos** (5 mp): ha a jelző bármiért beragadna, az eszköz
 fagyhat le miatta – továbblép, és a soros porton szól róla.
 
 Sikeres mentés után: válasz elküldése, **2 mp** türelmi idő, majd újraindulás.
-Sikertelen mentésnél HTTP 500 és **nincs** újraindulás – a beírt adatok maradnak.
+A mentés **két fázisú**: előbb minden mező validálódik, és fájl csak akkor
+íródik, ha mindegyik érvényes. Sikertelen validálásnál HTTP 500 és **nincs**
+újraindulás – sem a fájlok, sem a futó konfiguráció nem változik, a beírt
+adatok az űrlapon maradnak. Ha a konfigfájlokat épp más írja (wifireset gombos
+törlés), a mentés HTTP 503-mal hátrál.
 
 ---
 

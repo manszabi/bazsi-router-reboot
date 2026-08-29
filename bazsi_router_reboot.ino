@@ -354,6 +354,7 @@ bool routerResetAndRetry();
 bool wifiAuthFailed();
 bool reset_device();
 void logEvent(EventCode code, uint16_t param);
+bool beginConfigWrite();
 void startConfigPortal();
 void enterFatal(const char* reason);
 void fatalHalt(const char* reason);
@@ -778,8 +779,17 @@ void initWatchdog() {
     // Ne hazudjunk védelmet. Egy 5 mp-es alapértelmezett timeout ráadásul
     // rosszabb lenne a semminél: a 15-33 mp-ig tartó HTTP teszt alatt
     // újraindítana (a 33 mp-es esetet lásd a WDT_TIMEOUT_MS-nél).
+    if (watchdogEnabled) {
+      // Feliratkozva maradni a be nem állított (tipikusan 5 mp-es) timeouttal
+      // pontosan a fenti csapda lenne: a http.GET() etetés nélküli blokkolása
+      // alatt MINDEN teszt watchdog-panicba és újraindítási hurokba futna,
+      // három kör után végzetes hibáig. Ezért kiiratkozunk: védelem nincs,
+      // de a program legalább fut.
+      disableLoopWDT();
+      watchdogEnabled = (esp_task_wdt_status(NULL) == ESP_OK);
+    }
     Serial.print("FIGYELEM: a watchdog NEM vedi a loop()-ot (feliratkozas ");
-    Serial.print(watchdogEnabled ? "OK" : "SIKERTELEN");
+    Serial.print(watchdogEnabled ? "OK" : "SIKERTELEN/VISSZAVONVA");
     Serial.print(", hibakod ");
     Serial.print((int)cfgErr);
     Serial.println("). A program fut, de lefagyas eseten nem indul ujra.");
@@ -827,6 +837,23 @@ void waitWithButtons(uint32_t duration) {
 // Egy konfigmentés 4 fájl írása visszaolvasásos ellenőrzéssel, ami tipikusan
 // néhány tíz ezredmásodperc - az 5 másodperc bőven elég tartalék.
 constexpr uint32_t SAVE_WAIT_MAX_MS = 5000;
+
+// A konfigfájloknak egyszerre csak EGY írója lehet: vagy a webes mentés
+// (async_tcp task), vagy a wifireset gomb törlése (loop task). A zár maga a
+// savingConfig jelző - a megszerzését viszont atomikussá kell tenni, mert a
+// puszta "if (savingConfig)" ellenőrzés és az írás megkezdése között a másik
+// task közbeléphetne, és a két író ugyanazokat a fájlokat írná egyszerre.
+// A rövid kritikus szakaszhoz ugyanazt a spinlockot használjuk, mint a napló.
+bool beginConfigWrite() {
+  bool acquired = false;
+  portENTER_CRITICAL(&evLogMux);
+  if (!savingConfig) {
+    savingConfig = true;
+    acquired = true;
+  }
+  portEXIT_CRITICAL(&evLogMux);
+  return acquired;
+}
 
 void waitForConfigWrite() {
   if (!savingConfig) {
@@ -1300,6 +1327,14 @@ void wifiresetbutton() {
     return;
   }
   if (now - timing.wifiResetBtnDownSince >= BUTTON_DEBOUNCE_MS) {
+    // A zár ATOMIKUS megszerzése. A fenti gyors savingConfig-ellenőrzés és ez
+    // a pont között az async_tcp taskban elindulhatott egy webes mentés - a
+    // puszta jelző-olvasás után a törlés és a mentés ugyanazokat a fájlokat
+    // írná egyszerre. Ha a zár nem a miénk, a következő 10 ms-os mintavételi
+    // kör újra próbálkozik.
+    if (!beginConfigWrite()) {
+      return;
+    }
     Serial.println("WIFIRESET button is pulling down!");
     Serial.println("RESET saved wifi data!");
     // FONTOS a sorrend: az SSID megy ELŐSZÖR. A "wifireset" célja, hogy az
@@ -1322,12 +1357,15 @@ void wifiresetbutton() {
       // amiből csak a gomb vagy az áramtalanítás hoz vissza.
       Serial.println("!!! A mentett wifi adatok törlése NEM sikerült !!!");
       logEvent(EV_FATAL, 4);
+      // A zár oldása még a hibajelzés előtt: a fatalHalt() gombkezelőjét a
+      // beragadt savingConfig némává tenné (a resetbutton() ellenőrzi).
+      savingConfig = false;
       fatalHalt("A mentett wifi adatok nem torolhetok - serult fajlrendszer.");
       // fatalHalt() nem tér vissza
     }
     Serial.println("RESTART ESP32C3 device.");
     Serial.flush();
-    ESP.restart();
+    ESP.restart();  // a zár az újraindulással hal el
   }
 }
 
@@ -1713,16 +1751,25 @@ void startConfigPortal() {
               (unsigned)rtcRetryRounds, (unsigned)MAX_RETRY_ROUNDS);
     r->printf("Uptime: %u mp</p>", (unsigned)(esp_timer_get_time() / 1000000));
 
-    if (rtcEvMagic != EVLOG_MAGIC || rtcEvNext == 0) {
+    // Pillanatkép a naplóról a mux alatt: az író (logEvent) a loop taskból
+    // fut, ez a kezelő az async_tcp taskból - enélkül félig kiírt bejegyzést
+    // is olvashatnánk. A másolat 264 bájt, a kritikus szakasz egy memcpy.
+    uint32_t evTotal;
+    EventEntry evCopy[EVLOG_SIZE];
+    portENTER_CRITICAL(&evLogMux);
+    evTotal = (rtcEvMagic == EVLOG_MAGIC) ? rtcEvNext : 0;
+    memcpy(evCopy, rtcEvents, sizeof(evCopy));
+    portEXIT_CRITICAL(&evLogMux);
+
+    if (evTotal == 0) {
       r->print(F("<p>Nincs rogzitett esemeny.</p>"));
     } else {
       r->print(F("<table border=1 cellpadding=4><tr><th>Uptime</th>"
                  "<th>Esemeny</th><th>Param</th></tr>"));
       // A legregebbi meg meglevo bejegyzestol indulunk
-      const uint32_t total = rtcEvNext;
-      const uint32_t shown = total < EVLOG_SIZE ? total : EVLOG_SIZE;
-      for (uint32_t i = total - shown; i < total; i++) {
-        const EventEntry& e = rtcEvents[i % EVLOG_SIZE];
+      const uint32_t shown = evTotal < EVLOG_SIZE ? evTotal : EVLOG_SIZE;
+      for (uint32_t i = evTotal - shown; i < evTotal; i++) {
+        const EventEntry& e = evCopy[i % EVLOG_SIZE];
         r->printf("<tr><td>%u:%02u:%02u</td><td>%s</td><td>%u</td></tr>",
                   (unsigned)(e.uptimeSec / 3600), (unsigned)((e.uptimeSec % 3600) / 60),
                   (unsigned)(e.uptimeSec % 60), eventName(e.code), (unsigned)e.param);
@@ -1759,13 +1806,29 @@ void startConfigPortal() {
       return;
     }
 
-    // Amíg ez igaz, a loop() semmiképp nem altatja el az eszközt: fájlírás
-    // közbeni deep sleep félig kiírt konfigurációt hagyna hátra.
-    savingConfig = true;
+    // --- 1. FÁZIS: validálás. Itt még sem fájlt nem írunk, sem globálist nem
+    // módosítunk: bármely mező hibája esetén MINDEN marad a régiben, így az
+    // 500-as válasz ("nem mentettünk") szó szerint igaz. A korábbi, menet
+    // közben író változat a hibás mező ELŐTT álló érvényes mezőket már
+    // kiírta - egy rossz gateway így fél-új, fél-régi konfigurációt hagyott
+    // a flashben, amivel az eszköz a következő induláskor rossz statikus
+    // címen jött volna fel.
     bool saveOk = true;
     bool ssidProvided = false;
     // Az első hiba oka, hogy a felhasználó konkrét visszajelzést kapjon.
     const char* failReason = nullptr;
+
+    // A jelöltek. A "Set" jelzők azt mondják meg, mely mezők érkeztek a
+    // kérésben - ami nem érkezett, annak a mentett értéke marad érvényben.
+    char ssidNew[SSID_MAX_LEN + 1] = { 0 };
+    char passNew[PASS_MAX_LEN + 1] = { 0 };
+    char encNew[SECRET_ENC_MAX + 1] = { 0 };
+    char ipNew[IPSTR_MAX_LEN + 1] = { 0 };
+    char gwNew[IPSTR_MAX_LEN + 1] = { 0 };
+    bool passSet = false;
+    bool ipSet = false;
+    bool gwSet = false;
+
     const int params = request->params();
     for (int i = 0; i < params; i++) {
       const AsyncWebParameter* p = request->getParam(i);
@@ -1781,27 +1844,20 @@ void startConfigPortal() {
         // az, amivel az eszköz később csatlakozni fog. A csupa szóközből álló
         // SSID így üresre fogy - azt pedig nem szabad sikerként elfogadni,
         // mert az újraindulás után AP módban kötnénk ki.
-        // Előbb helyi pufferbe: hibás bemenet ne írja felül a globálist.
         char candidate[SSID_MAX_LEN + 1];
         strlcpy(candidate, val.c_str(), sizeof(candidate));
         trimInPlace(candidate);
         if (val.length() <= SSID_MAX_LEN && candidate[0] != '\0') {
           ssidProvided = true;
-          strlcpy(ssid, candidate, sizeof(ssid));
-          Serial.print("SSID set to: ");
-          Serial.println(ssid);
-          saveOk &= writeConfigValue(LittleFS, ssidPath, ssid);
+          strlcpy(ssidNew, candidate, sizeof(ssidNew));
         } else {
           Serial.println("Invalid SSID length!");
           saveOk = false;
-          failReason = "Ervenytelen SSID (1-32 karakter, nem csak szokoz).";
+          if (failReason == nullptr) failReason = "Ervenytelen SSID (1-32 karakter, nem csak szokoz).";
         }
       } else if (name == PARAM_PASS) {
         if (val.length() <= PASS_MAX_LEN) {
-          strlcpy(pass, val.c_str(), sizeof(pass));
-          // Itt a hossz mar ellenorzott, tehat a globalist csak ervenyes
-          // bemenettel irjuk felul.
-          //
+          strlcpy(passNew, val.c_str(), sizeof(passNew));
           // TUDATOS KORLAT: a vagas a masolas-beillesztessel bekerult szokozok
           // ellen szol, es a WPA2 szabvany szerint egy jelszo ELEJEN vagy VEGEN
           // allo szokoz onmagaban ervenyes volna. Ilyen jelszo ezzel az
@@ -1810,16 +1866,12 @@ void startConfigPortal() {
           // fajlba, abban nincs szokoz, tehat a kodolas/dekodolas a szokozt
           // hibatlanul visszaadna (ellentetben az SSID-vel, ami sima szovegkent
           // tarolodik, es amit a readConfigValue() beolvasaskor ugyis vag).
-          trimInPlace(pass);
-          Serial.print("Password set to: ");
-          Serial.print((unsigned)strlen(pass));
-          Serial.println(" chars");
+          trimInPlace(passNew);
           // Összekeverve mentjük, hogy egy flash dumpon a `strings` ne adjon
           // használható jelszót. A visszaolvasásos ellenőrzés érintetlen: a
           // writeConfigValue() a kódolt formát verifikálja.
-          char enc[SECRET_ENC_MAX + 1];
-          if (encodeSecret(pass, enc, sizeof(enc))) {
-            saveOk &= writeConfigValue(LittleFS, passPath, enc);
+          if (encodeSecret(passNew, encNew, sizeof(encNew))) {
+            passSet = true;
           } else {
             Serial.println("- a jelszo kodolasa nem fert a pufferbe");
             saveOk = false;
@@ -1841,15 +1893,12 @@ void startConfigPortal() {
         trimInPlace(candidate);
         IPAddress testIP;
         if (candidate[0] == '\0') {
-          ipStr[0] = '\0';
-          Serial.println("IP empty, using DHCP.");
-          saveOk &= writeConfigValue(LittleFS, ipPath, "");
+          ipNew[0] = '\0';
+          ipSet = true;
         } else if (strlen(candidate) <= IPSTR_MAX_LEN && testIP.fromString(candidate)
                    && isUsableIPv4(testIP)) {
-          strlcpy(ipStr, candidate, sizeof(ipStr));
-          Serial.print("IP Address set to: ");
-          Serial.println(ipStr);
-          saveOk &= writeConfigValue(LittleFS, ipPath, ipStr);
+          strlcpy(ipNew, candidate, sizeof(ipNew));
+          ipSet = true;
         } else {
           Serial.println("Invalid IP format!");
           saveOk = false;
@@ -1862,15 +1911,12 @@ void startConfigPortal() {
         trimInPlace(candidate);
         IPAddress testIP;
         if (candidate[0] == '\0') {
-          gatewayStr[0] = '\0';
-          Serial.println("Gateway empty, using DHCP.");
-          saveOk &= writeConfigValue(LittleFS, gatewayPath, "");
+          gwNew[0] = '\0';
+          gwSet = true;
         } else if (strlen(candidate) <= IPSTR_MAX_LEN && testIP.fromString(candidate)
                    && isUsableIPv4(testIP)) {
-          strlcpy(gatewayStr, candidate, sizeof(gatewayStr));
-          Serial.print("Gateway set to: ");
-          Serial.println(gatewayStr);
-          saveOk &= writeConfigValue(LittleFS, gatewayPath, gatewayStr);
+          strlcpy(gwNew, candidate, sizeof(gwNew));
+          gwSet = true;
         } else {
           Serial.println("Invalid gateway format!");
           saveOk = false;
@@ -1896,7 +1942,10 @@ void startConfigPortal() {
     // Statikus IP-hez a gateway is kell. Az initWiFi() csak akkor konfigurál,
     // ha MINDKETTŐ értelmezhető - félig kitöltve csendben DHCP-re esne vissza,
     // a felhasználó viszont azt olvasná, hogy a megadott fix címen lesz.
-    if ((ipStr[0] != '\0') != (gatewayStr[0] != '\0')) {
+    // A VÉGSŐ értékpárt nézzük: a most küldöttet, különben a mentettet.
+    const char* ipFinal = ipSet ? ipNew : ipStr;
+    const char* gwFinal = gwSet ? gwNew : gatewayStr;
+    if ((ipFinal[0] != '\0') != (gwFinal[0] != '\0')) {
       saveOk = false;
       if (failReason == nullptr) {
         failReason = "Statikus IP-hez az IP cimet ES a gateway-t is meg kell adni "
@@ -1904,12 +1953,11 @@ void startConfigPortal() {
       }
     }
 
-    savingConfig = false;
-    touchApDeadline();
-
     if (!saveOk) {
       // Ne hazudjunk sikert és főleg ne indítsunk újra: az újraindítás
       // eldobná a beírt adatokat, a felhasználó pedig ugyanitt kötne ki.
+      // Fájlt nem írtunk és globálist sem módosítottunk - minden a régi.
+      touchApDeadline();
       Serial.println("A beallitasok mentese SIKERTELEN.");
       // A leghosszabb indoklás (statikus IP + gateway) a rögzített szöveggel
       // együtt 176 bájt; a snprintf() csonkolna, ha ennél kisebb lenne.
@@ -1917,8 +1965,66 @@ void startConfigPortal() {
       snprintf(err, sizeof(err),
                "A beallitasok mentese nem sikerult: %s "
                "Az eszkoz NEM indul ujra, probald meg ismet.",
-               failReason ? failReason : "LittleFS irasi hiba.");
+               failReason ? failReason : "ismeretlen hiba.");
       request->send(500, "text/plain", err);
+      return;
+    }
+
+    // --- 2. FÁZIS: minden mező érvényes -> zár, globálisok, fájlok.
+    // A zár (savingConfig) atomikus megszerzése: a wifireset gomb törlése a
+    // loop taskban ugyanezeket a fájlokat írná. Amíg a zár él, a loop() nem
+    // altatja el az eszközt, és a gombok sem szólnak közbe.
+    if (!beginConfigWrite()) {
+      request->send(503, "text/plain",
+                    "Az eszkoz eppen a konfiguraciot irja (gombos torles vagy "
+                    "masik mentes). Probald ujra egy pillanat mulva.");
+      return;
+    }
+
+    strlcpy(ssid, ssidNew, sizeof(ssid));
+    Serial.print("SSID set to: ");
+    Serial.println(ssid);
+    saveOk &= writeConfigValue(LittleFS, ssidPath, ssid);
+
+    if (passSet) {
+      strlcpy(pass, passNew, sizeof(pass));
+      Serial.print("Password set to: ");
+      Serial.print((unsigned)strlen(pass));
+      Serial.println(" chars");
+      saveOk &= writeConfigValue(LittleFS, passPath, encNew);
+    }
+    if (ipSet) {
+      strlcpy(ipStr, ipNew, sizeof(ipStr));
+      if (ipStr[0] == '\0') {
+        Serial.println("IP empty, using DHCP.");
+      } else {
+        Serial.print("IP Address set to: ");
+        Serial.println(ipStr);
+      }
+      saveOk &= writeConfigValue(LittleFS, ipPath, ipStr);
+    }
+    if (gwSet) {
+      strlcpy(gatewayStr, gwNew, sizeof(gatewayStr));
+      if (gatewayStr[0] == '\0') {
+        Serial.println("Gateway empty, using DHCP.");
+      } else {
+        Serial.print("Gateway set to: ");
+        Serial.println(gatewayStr);
+      }
+      saveOk &= writeConfigValue(LittleFS, gatewayPath, gatewayStr);
+    }
+
+    savingConfig = false;
+    touchApDeadline();
+
+    if (!saveOk) {
+      // Ide már csak tényleges fájlrendszer-hiba hozhat; ilyenkor a flash
+      // tartalma lehet vegyes, de az eszköz nem indul újra, és a válasz
+      // megmondja, mi történt.
+      Serial.println("A beallitasok mentese SIKERTELEN.");
+      request->send(500, "text/plain",
+                    "A beallitasok mentese nem sikerult: LittleFS irasi hiba. "
+                    "Az eszkoz NEM indul ujra, probald meg ismet.");
       return;
     }
 

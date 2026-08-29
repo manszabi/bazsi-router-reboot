@@ -1082,7 +1082,9 @@ static void scP3() {
 }
 
 static void scP4() {
-  // Érvénytelen IP formátum
+  // Érvénytelen IP formátum. A mentés két fázisú: hibás mezőnél az ELŐTTE
+  // álló érvényes mezők SEM íródnak ki - különben fél-új, fél-régi
+  // konfiguráció maradna a flashben.
   coldBoot(false, "", "", "", "");
   setup();
   std::string body;
@@ -1090,6 +1092,9 @@ static void scP4() {
   CHECK(code == 500, "HTTP 500 rossz IP esetén");
   CHECK(!restartPending, "nem indul újra");
   CHECK(body.find("IP") != std::string::npos, "a válasz megnevezi az okot");
+  CHECK(!g_fs.count("/ssid.txt") && !g_fs.count("/pass.txt"),
+        "az érvényes SSID/jelszó SEM íródott ki (két fázisú mentés)");
+  CHECK(ssid[0] == '\0', "a futó konfiguráció (globálisok) is érintetlen");
 }
 
 static void scP5() {
@@ -1761,15 +1766,27 @@ static void scWDT7() {
 }
 
 static void scWDT8() {
-  // A feliratkozas sikerul, de a konfiguralas nem. Ilyenkor a timeout az IDF
-  // 5 mp-es alapertelmezese maradna, ami a 15 mp-ig tarto HTTP teszt alatt
-  // ujrainditana - tehat semmikepp nem szabad sikert jelenteni.
+  // A feliratkozas sikerul, de a konfiguralas nem. Feliratkozva maradni a be
+  // nem allitott (tipikusan 5 mp-es) timeouttal maga lenne a csapda: a
+  // http.GET() akar 33 mp-ig blokkol etetes nelkul, tehat MINDEN teszt
+  // watchdog-panicba es ujrainditasi hurokba futna. Ilyenkor a helyes lepes
+  // a leiratkozas: vedelem nincs, de a program legalabb fut.
   coldBoot(true, "TestNet", "pw", "", "");
   g_wdtReconfigureFails = true;
   setup();
   CHECK(!serialHas("Watchdog enabled"), "nem jelent sikeres 90 mp-es timeoutot");
   CHECK(serialHas("FIGYELEM"), "figyelmeztet, hogy nincs vedelem");
-  CHECK(g_wdtEnabled, "a feliratkozas maga megvolt, tehat etetni szabad");
+  CHECK(!g_wdtEnabled, "leiratkozott: az 5 mp-es default nem valhat csapdava");
+  CHECK(logIndex("disableLoopWDT") > logIndex("enableLoopWDT"),
+        "a leiratkozas a sikertelen konfiguralas KOVETKEZMENYE");
+  // Etetes nelkuli mukodes: a feedWatchdog() kapuzva van, nincs log_e() aradat.
+  g_wdtFeedNotSubscribed = 0;
+  const uint32_t t0 = g_millis;
+  int guard = 0;
+  try { while (g_millis - t0 < 30u * 1000 && ++guard < 300000) loop(); }
+  catch (...) {}
+  CHECK(g_wdtFeedNotSubscribed == 0,
+        "leiratkozas utan egyetlen etetes sincs (nincs hibasor-aradat)");
 }
 
 // --- Diagnosztikai naplo: a dokumentalt esemenykodok tenyleg keletkeznek ----
@@ -3249,6 +3266,40 @@ static void scP18() {
   CHECK(g_fs["/ip.txt"].empty() && g_fs["/gateway.txt"].empty(), "DHCP-ként mentve");
 }
 
+static void scP19() {
+  // A konfigfájloknak egy írója lehet: ha a zár (savingConfig) másnál van -
+  // épp a wifireset gomb töröl -, a webes mentés 503-mal hátrál, fájlt nem ír.
+  coldBoot(false, "", "", "", "");
+  setup();
+  savingConfig = true;                     // a másik író épp dolgozik
+  const int code = postConfig("MyNetwork", "jelszo", "", "");
+  CHECK(code == 503, "zárolt konfignál 503, nem néma felülírás");
+  CHECK(!g_fs.count("/ssid.txt"), "fájl nem íródott");
+  CHECK(!restartPending, "újraindítás sincs beütemezve");
+  CHECK(savingConfig, "a más által tartott zárat nem engedte el");
+  savingConfig = false;
+  const int code2 = postConfig("MyNetwork", "jelszo", "", "");
+  CHECK(code2 == 200, "a zár felszabadulása után a mentés már lefut");
+}
+
+static void scP20() {
+  // Mentett statikus IP mellett egy csak SSID+jelszó POST érvényes: a
+  // párosság-ellenőrzés a VÉGSŐ értékpárra vonatkozik (a nem küldött mező a
+  // mentett értékén marad), és az ip/gateway fájlokhoz hozzá sem nyúlunk.
+  coldBoot(false, "", "", "", "");
+  setup();                                     // AP portál fut
+  // Korábbi mentés maradéka: statikus pár a fájlokban ÉS a futó globálisokban.
+  strlcpy(ipStr, "192.168.1.200", 16);
+  strlcpy(gatewayStr, "192.168.1.1", 16);
+  g_fs["/ip.txt"] = "192.168.1.200";
+  g_fs["/gateway.txt"] = "192.168.1.1";
+  const int code = postConfig("UjHalozat", "ujjelszo", nullptr, nullptr);
+  CHECK(code == 200, "SSID+jelszó csere statikus IP mellett érvényes");
+  CHECK(g_fs["/ssid.txt"] == "UjHalozat", "az SSID frissült");
+  CHECK(g_fs["/ip.txt"] == "192.168.1.200" && g_fs["/gateway.txt"] == "192.168.1.1",
+        "a nem küldött IP/gateway fájlok érintetlenek");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -3390,6 +3441,8 @@ static const Scenario kScenarios[] = {
   { "P16: a validáció mindkét űrlapon azonos", scP16 },
   { "P17: az IP/gateway mező szóközei vágva validálódnak", scP17 },
   { "P18: csupa szóköz IP/gateway = DHCP, nem hiba", scP18 },
+  { "P19: zárolt konfignál a webes mentés 503-mal hátrál", scP19 },
+  { "P20: részleges POST a mentett statikus párral konzisztens", scP20 },
   { "WR1: fájlírás közben nem indul újra (halasztott újraindítás)", scWR1 },
   { "WR2: fájlírás közben nem alszik el", scWR2 },
   { "WR3: a várakozás korlátos, beragadt jelző nem fagyaszt le", scWR3 },

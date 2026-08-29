@@ -640,8 +640,9 @@ kezelve van – és ami fontosabb, **egyik sem hazudik sikert**.
 | Rövid írás (megtelt FS) | A `print()` visszatérési értéke ellenőrizve, `false` |
 | Az írás „sikerült", de a tartalom hibás | **Visszaolvasásos ellenőrzés** fogja meg |
 | A törlés (csonkolás) nem megy | Tartalék: a fájl törlése `remove()`-val |
-| Mentés a beállító oldalról | Hiba esetén HTTP 500 magyarázattal és **nincs újraindítás** |
-| Érvénytelen űrlapadat (rossz SSID hossz, IP formátum, hiányzó SSID) | Ugyanúgy HTTP 500 az ok megnevezésével, **nincs újraindítás** |
+| Mentés a beállító oldalról | Két fázisú: fájl csak akkor íródik, ha **minden** mező érvényes. Hiba esetén HTTP 500 magyarázattal és **nincs újraindítás** |
+| Érvénytelen űrlapadat (rossz SSID hossz, IP formátum, hiányzó SSID) | HTTP 500 az ok megnevezésével; **semmi nem íródik ki**, a futó konfiguráció sem változik |
+| Mentés, miközben a wifireset gomb épp töröl | HTTP 503, a mentés nem ír bele a törlésbe (atomikus zár) |
 
 A visszaolvasás azért kell, mert a `File::close()` és a `File::flush()` is
 `void` a core-ban – a lezáráskor jelentkező hibát másképp nem lehetne észlelni.
