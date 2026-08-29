@@ -1895,8 +1895,13 @@ void startConfigPortal() {
         if (candidate[0] == '\0') {
           ipNew[0] = '\0';
           ipSet = true;
-        } else if (strlen(candidate) <= IPSTR_MAX_LEN && testIP.fromString(candidate)
+        } else if (val.length() < sizeof(candidate)
+                   && strlen(candidate) <= IPSTR_MAX_LEN && testIP.fromString(candidate)
                    && isUsableIPv4(testIP)) {
+          // A val.length() feltetel az SSID/jelszo agak explicit hossz-
+          // ellenorzesenek parja: a strlcpy() csonkolasa utan egy tulmeretes
+          // bemenet vege csendben elveszne, es a maradek akar ervenyes cimme
+          // is vagodhatna - ilyet nem fogadunk el, az a hiba-agra tartozik.
           strlcpy(ipNew, candidate, sizeof(ipNew));
           ipSet = true;
         } else {
@@ -1913,8 +1918,10 @@ void startConfigPortal() {
         if (candidate[0] == '\0') {
           gwNew[0] = '\0';
           gwSet = true;
-        } else if (strlen(candidate) <= IPSTR_MAX_LEN && testIP.fromString(candidate)
+        } else if (val.length() < sizeof(candidate)
+                   && strlen(candidate) <= IPSTR_MAX_LEN && testIP.fromString(candidate)
                    && isUsableIPv4(testIP)) {
+          // Lasd az IP ag megjegyzeset a csonkolas elleni vedelemrol.
           strlcpy(gwNew, candidate, sizeof(gwNew));
           gwSet = true;
         } else {
