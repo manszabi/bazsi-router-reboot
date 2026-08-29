@@ -723,6 +723,13 @@ MIT License – lásd a [LICENSE](LICENSE) fájlt.
 Az eszköz teljes viselkedése – mikor mit csinál és meddig, minden esettel:
 [MUKODES.md](MUKODES.md)
 
+## 🗺️ Folyamatábrák
+
+A teljes működés pontos folyamatábrái Mermaid formátumban (a GitHub natívan
+rendereli): `setup()`, `loop()` diszpécser, monitor állapotgép, router reset
+szekvencia, AP portál, alvás/ébredés:
+[FOLYAMATABRA.md](FOLYAMATABRA.md)
+
 ## 🔍 Diagnosztikai napló
 
 Az utolsó 32 esemény RTC memóriában, a beállító portál **`/log`** oldalán
