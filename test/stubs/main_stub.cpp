@@ -6,6 +6,7 @@
 #include <esp_task_wdt.h>
 #include <esp_system.h>
 #include <ESPAsyncWebServer.h>
+#include <driver/gpio.h>
 
 uint32_t g_millis = 0;
 std::vector<std::string> g_log;
@@ -157,6 +158,31 @@ void esp_sleep_disable_wakeup_source(int) {
   simLog("wakeup_disable_all");
 }
 void esp_deep_sleep_start() { simLog("DEEP_SLEEP"); throw DeepSleepSignal{g_wakeupUs}; }
+// --- GPIO hold (driver/gpio.h) ---
+std::set<int> g_heldPins;
+bool g_deepSleepHoldEnabled = false;
+bool g_gpioHoldFails = false;
+int gpio_hold_en(gpio_num_t p) {
+  if (g_gpioHoldFails) { simLog("gpio_hold_en_FAIL"); return ESP_FAIL; }
+  g_heldPins.insert(p);
+  simLog("gpio_hold_en(" + std::to_string(p) + ")");
+  return ESP_OK;
+}
+int gpio_hold_dis(gpio_num_t p) {
+  g_heldPins.erase(p);
+  simLog("gpio_hold_dis(" + std::to_string(p) + ")");
+  return ESP_OK;
+}
+void gpio_deep_sleep_hold_en()  { g_deepSleepHoldEnabled = true;  simLog("deep_sleep_hold_en"); }
+void gpio_deep_sleep_hold_dis() { g_deepSleepHoldEnabled = false; simLog("deep_sleep_hold_dis"); }
+// --- FreeRTOS kritikus szakasz ---
+int g_criticalDepth = 0;
+int g_criticalMaxDepth = 0;
+void portENTER_CRITICAL(portMUX_TYPE*) {
+  g_criticalDepth++;
+  if (g_criticalDepth > g_criticalMaxDepth) g_criticalMaxDepth = g_criticalDepth;
+}
+void portEXIT_CRITICAL(portMUX_TYPE*) { g_criticalDepth--; }
 size_t strlcpy(char* d, const char* s, size_t n) {
   size_t l = strlen(s);
   if (n) { size_t c = l >= n ? n - 1 : l; memcpy(d, s, c); d[c] = 0; }

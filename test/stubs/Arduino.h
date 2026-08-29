@@ -115,6 +115,15 @@ void delay(uint32_t ms);
 extern void (*g_onDelay)();
 void feedLoopWDT();
 void enableLoopWDT();
+// FreeRTOS kritikus szakasz (a valodiban makro + spinlock). A hoston nincs
+// valodi parhuzamossag; a stub a hivasok kiegyensulyozottsagat szamolja, hogy
+// egy kritikus szakaszban felejtett return kimutathato legyen.
+struct portMUX_TYPE { int dummy; };
+#define portMUX_INITIALIZER_UNLOCKED {0}
+void portENTER_CRITICAL(portMUX_TYPE*);
+void portEXIT_CRITICAL(portMUX_TYPE*);
+extern int g_criticalDepth;     // aktualis beagyazottsag (0 = nincs nyitva)
+extern int g_criticalMaxDepth;
 extern bool     g_wdtEnabled;
 extern uint32_t g_wdtTimeoutMs;
 extern uint32_t g_wdtIdleMask;

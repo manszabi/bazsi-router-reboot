@@ -21,13 +21,13 @@ test: $(BUILD)/run-idf5 $(BUILD)/run-idf6
 $(BUILD)/sketch.cpp: $(SKETCH) | $(BUILD)
 	@cp $(SKETCH) $@
 
-$(BUILD)/run-idf5: $(BUILD)/sketch.cpp test_main.cpp stubs/main_stub.cpp $(wildcard stubs/*.h)
+$(BUILD)/run-idf5: $(BUILD)/sketch.cpp test_main.cpp stubs/main_stub.cpp $(wildcard stubs/*.h) $(wildcard stubs/driver/*.h)
 	$(CXX) $(CXXFLAGS) -DESP_IDF_VERSION_MAJOR=5 -o $@ $(SRC)
 
-$(BUILD)/run-idf6: $(BUILD)/sketch.cpp test_main.cpp stubs/main_stub.cpp $(wildcard stubs/*.h)
+$(BUILD)/run-idf6: $(BUILD)/sketch.cpp test_main.cpp stubs/main_stub.cpp $(wildcard stubs/*.h) $(wildcard stubs/driver/*.h)
 	$(CXX) $(CXXFLAGS) -DESP_IDF_VERSION_MAJOR=6 -o $@ $(SRC)
 
-$(BUILD)/run-san: $(BUILD)/sketch.cpp test_main.cpp stubs/main_stub.cpp $(wildcard stubs/*.h)
+$(BUILD)/run-san: $(BUILD)/sketch.cpp test_main.cpp stubs/main_stub.cpp $(wildcard stubs/*.h) $(wildcard stubs/driver/*.h)
 	$(CXX) $(CXXFLAGS) -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer \
 	  -DESP_IDF_VERSION_MAJOR=5 -o $@ $(SRC)
 
@@ -38,7 +38,7 @@ san: $(BUILD)/run-san
 # Sorlefedettseg: megmutatja, mely agakat NEM futtatja egyetlen forgatokonyv
 # sem. A gyerekprocesszek _exit()-tel lepnek ki, ami nem uritene a szamlalokat,
 # ezert a COVERAGE_BUILD kezzel hivja a __gcov_dump()-ot.
-$(BUILD)/run-cov: $(BUILD)/sketch.cpp test_main.cpp stubs/main_stub.cpp $(wildcard stubs/*.h)
+$(BUILD)/run-cov: $(BUILD)/sketch.cpp test_main.cpp stubs/main_stub.cpp $(wildcard stubs/*.h) $(wildcard stubs/driver/*.h)
 	$(CXX) $(CXXFLAGS) -O0 --coverage -DESP_IDF_VERSION_MAJOR=5 -DCOVERAGE_BUILD -o $@ $(SRC)
 
 cov: $(BUILD)/run-cov
