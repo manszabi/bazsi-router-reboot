@@ -59,7 +59,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 
 ## Lefedett esetek
 
-**181 forgatókönyv, 580 ellenőrzés. Sorlefedettség: 98,35%.**
+**183 forgatókönyv, 592 ellenőrzés. Sorlefedettség: 98,33%.**
 
 | | |
 |---|---|
@@ -80,7 +80,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 | `WF1`–`WF6` | Csatlakozási hiba: újrapróbálkozás vs. AP portál, RTC-számláló |
 | `WD1`–`WD13` | Ismétlődő watchdog újraindulás; a leghosszabb etetés nélküli szakasz minden üzemmódban, a **halott DNS** legrosszabb esetét is beleértve |
 | `E1`–`E6` | Végponttól végpontig: egészséges ciklus, router reset, AP mód, gombok, visszatérő WiFi |
-| `P1`–`P18` | Beállító portál mentése: validáció, írási hiba, jelszó-szivárgás, határidő, IP+gateway páros, whitespace (az IP/gateway vágását is beleértve), mentés közbeni gombnyomás, halasztott újraindítás |
+| `P1`–`P20` | Beállító portál mentése: **két fázisú commit** (hibás mezőnél semmi sem íródik), validáció, írási hiba, jelszó-szivárgás, határidő, IP+gateway páros, whitespace (az IP/gateway vágását is beleértve), mentés közbeni gombnyomás, halasztott újraindítás, **503 zárolt konfignál** |
 | `CPU1`–`CPU2` | A loop() nem pörgeti a CPU-t a várakozó állapotokban |
 | `X1`–`X14` | Határesetek: gomb a relé pulzus közben, nyílt hálózat, SSID/jelszó határértékek, wifireset törlési sorrend és **sikertelen törlés → végzetes hiba**, query-paraméter, 1 napnál hosszabb uptime |
 | `PO1`–`PO3` | Áramszünet: mekkora router-indulási késést tolerál |
@@ -92,12 +92,12 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 | `IP1`–`IP3` | Csak IPv4 fogadható el (IPv6 és `0.0.0.0` nem) |
 | `LED1` | A router áramtalanításakor egyik LED sem hazudik |
 
-A név-előtag **prefix**, nem pontos egyezés: a `P1` így a `P1`, `P10`–`P15`
+A név-előtag **prefix**, nem pontos egyezés: a `P1` így a `P1`, `P10`–`P19`
 eseteket is futtatja.
 
 ### Ami szándékosan fedetlen
 
-A `make cov` hét sort jelez, mindegyik védekező vagy bizonyíthatóan
+A `make cov` nyolc ágat jelez, mindegyik védekező vagy bizonyíthatóan
 elérhetetlen – ezeket **nem** kell tesztelni:
 
 | Hol | Miért nem érhető el |
@@ -108,6 +108,7 @@ elérhetetlen – ezeket **nem** kell tesztelni:
 | `testInternetPing()` záró `return`-je | a ciklus minden ága korábban visszatér (az utolsó körben `remaining == 0`) |
 | POST `!fsReady` ága | ha a LittleFS nem csatolható, a `setup()` `MODE_FATAL`-ba megy, és a portál el sem indul |
 | A jelszókódolás puffer-hiba ága | a POST már ellenőrzi a hosszt, a puffer pedig pontosan 63 karakterre méretezett – nem tud elbukni |
+| A wifireset zár-ütközési `return`-je | a `savingConfig` kapu és a zárszerzés közé egyszálú futásban nem ékelődhet másik író – ez pont a valódi kéttaskos versenyhelyzet védőága |
 | `FAILURE_STATE` záró `break`-je | előtte `wifiGiveUp()` vagy módváltás történik |
 
 ## Fontos

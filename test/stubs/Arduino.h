@@ -115,6 +115,7 @@ void delay(uint32_t ms);
 extern void (*g_onDelay)();
 void feedLoopWDT();
 void enableLoopWDT();
+void disableLoopWDT();
 // FreeRTOS kritikus szakasz (a valodiban makro + spinlock). A hoston nincs
 // valodi parhuzamossag; a stub a hivasok kiegyensulyozottsagat szamolja, hogy
 // egy kritikus szakaszban felejtett return kimutathato legyen.

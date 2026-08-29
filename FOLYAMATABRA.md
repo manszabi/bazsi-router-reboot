@@ -196,10 +196,13 @@ flowchart TD
     IDLE --> REQ{Kérés típusa}
     REQ -->|"GET /"| FORM["wifimanager.html a LittleFS-ről,<br>ha nincs: beépített tartalék űrlap"]
     REQ -->|"GET /log"| LOG["Diagnosztikai napló:<br>reset ok, számlálók, 32 esemény"]
-    REQ -->|"POST /"| VAL{"Validálás:<br>SSID 1-32 (trim), jelszó max 63 (trim),<br>IP és gateway: IPv4, nem 0.0.0.0, trim,<br>statikus IP CSAK párban"}
-    VAL -->|hiba| E500["500 + konkrét indok<br>NINCS újraindítás, az űrlap kitöltve marad"]
-    VAL -->|ok| SAVE["savingConfig = true<br>4 fájl írása visszaolvasó ellenőrzéssel<br>(jelszó: v1 + XOR-hexa kódolás)<br>savingConfig = false"]
-    SAVE --> R200["200: Done. ESP will restart...<br>restartPending = true"]
+    REQ -->|"POST /"| VAL{"1. FÁZIS - validálás:<br>SSID 1-32 (trim), jelszó max 63 (trim),<br>IP és gateway: IPv4, nem 0.0.0.0, trim,<br>statikus IP CSAK párban"}
+    VAL -->|hiba| E500["500 + konkrét indok<br>SEMMI nem íródik ki, a futó konfig<br>sem változik, NINCS újraindítás"]
+    VAL -->|"minden mező érvényes"| LOCK{"Zár megszerzése<br>(beginConfigWrite, atomikus)"}
+    LOCK -->|"foglalt (wifireset töröl)"| E503["503: próbáld újra<br>egy pillanat múlva"]
+    LOCK -->|ok| SAVE["2. FÁZIS - commit:<br>globálisok + fájlok írása<br>visszaolvasó ellenőrzéssel<br>(jelszó: v1 + XOR-hexa kódolás)<br>savingConfig = false"]
+    SAVE -->|"írási hiba"| E500W["500: LittleFS írási hiba<br>NINCS újraindítás"]
+    SAVE -->|ok| R200["200: Done. ESP will restart...<br>restartPending = true"]
     R200 --> DEF["A loop 2 s türelmi idő után<br>(esetleges 2. mentést megvárva)<br>ESP.restart()"]
 ```
 
