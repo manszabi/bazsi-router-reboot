@@ -23,6 +23,12 @@ ESP32-C3 alapú automatikus router újraindító rendszer. Az eszköz folyamatos
 | **Nyomógomb #1** | Reset gomb (D1 pin) – ESP újraindítás |
 | **Nyomógomb #2** | Wi-Fi reset gomb (D0 pin) – mentett Wi-Fi adatok törlése |
 
+> ⚠️ **Strapping láb.** A `D0` = **GPIO2** az ESP32-C3 egyik strapping lába: a
+> chip csak akkor bootol, ha a reset pillanatában GPIO2 = 1. A Wi-Fi reset
+> gombot **bekapcsolás közben ne tartsd nyomva** – az eszköz el sem indulna,
+> és ez ellen szoftver nem védhet. Új hardver revízióban a gombot érdemes
+> szabad, nem-strapping lábra tenni (pl. `D2` = GPIO4, ami RTC-képes is).
+
 ### Pin kiosztás
 
 | Pin | Funkció |
@@ -252,18 +258,22 @@ választ, és ez a hiba némán, a redundancia elvesztésével jelentkezne. A
 
 Az ESP32-C3 deep sleepből mindig **újraindulással** ébred: a RAM tartalma elvész,
 így a hibaszámlálók (`resetEvents`, `failedCount`) nullázódnak, és az eszköz
-tiszta lappal kezdi az internet tesztelését. A projekt nem használ RTC memóriát,
-tehát alvás előtti állapot nem őrződik meg.
+tiszta lappal kezdi az internet tesztelését. Három érték él RTC memóriában:
+az újrapróbálkozási körök száma (`rtcRetryRounds`, csak a deep sleepet éli túl),
+a watchdog-újraindulások számlálója és a 32 bejegyzéses diagnosztikai napló
+(mindkettő `RTC_NOINIT`, a resetet is túléli – csak az áramtalanítás törli).
 
-> ⚠️ **Hardver követelmény a relére.** Deep sleep alatt az ESP32-C3 digitális
-> lábai (GPIO6–21) nagyimpedanciás állapotba kerülnek, és csak az RTC lábak
-> (GPIO0–5) tarthatók meg hold funkcióval. A relé a `D5` = **GPIO7**-en van,
-> tehát az alvás teljes ideje alatt **lebeg** – ezt szoftverből nem lehet
-> megakadályozni. A relé vezérlőbemenetére **külső lehúzó ellenállás** kell
-> (aktív-HIGH modulnál 10 kΩ a GND felé), különben az alvás alatt a lebegő láb
-> véletlenül áramtalaníthatja a routert.
-> (Forrás: ESP-IDF *Sleep Modes*, ESP32-C3 – „digital GPIOs (GPIO6 ~ 21) are in
-> a high impedance state".)
+> ⚠️ **Hardver ajánlás a relére.** Deep sleep alatt az ESP32-C3 digitális lábai
+> (GPIO6–21) alapból nagyimpedanciás állapotba kerülnek. A firmware ezért
+> minden elalvás előtt **rögzíti a relé lábát** (`D5` = GPIO7) LOW-ra a
+> `gpio_hold_en()` + `gpio_deep_sleep_hold_en()` párossal, és ébredés után –
+> miután a lábat már maga hajtja – oldja fel, így a relé alvás alatt sem lebeg.
+> A relé vezérlőbemenetére **külső lehúzó ellenállás továbbra is ajánlott**
+> (aktív-HIGH modulnál 10 kΩ a GND felé): a bekapcsolás és a program indulása
+> közti ablakban a hold még nem él, és a szoftveres védelem esetleges hibája
+> ellen is ez az utolsó háló.
+> (Forrás: ESP-IDF `driver/gpio.h` – a `gpio_hold_en` C3-ra vonatkozó
+> megjegyzése és a `gpio_deep_sleep_hold_en` leírása.)
 
 ## 📁 Projekt struktúra
 
@@ -281,12 +291,17 @@ bazsi-router-reboot/
 
 | Könyvtár | Leírás |
 |----------|--------|
-| `WiFi.h` | ESP32 Wi-Fi kezelés |
-| `ESPAsyncWebServer` | Aszinkron webszerver |
-| `AsyncTCP` | Aszinkron TCP az ESPAsyncWebServer-hez |
-| `LittleFS` | Fájlrendszer a flash memóriában |
-| `HTTPClient` | HTTP kérések az internettesztekhez |
-| `ESPping` | ICMP ping a saját gateway ellenőrzéséhez |
+| `WiFi.h` | ESP32 Wi-Fi kezelés (a board package része) |
+| `ESPAsyncWebServer` (**ESP32Async** fork, tesztelve: 3.12.0) | Aszinkron webszerver |
+| `AsyncTCP` (**ESP32Async** fork, tesztelve: 3.5.0) | Aszinkron TCP az ESPAsyncWebServer-hez |
+| `LittleFS` | Fájlrendszer a flash memóriában (a board package része) |
+| `HTTPClient` | HTTP kérések az internettesztekhez (a board package része) |
+| `ESPping` (dvarrel, tesztelve: 1.0.5) | ICMP ping a saját gateway ellenőrzéséhez |
+
+> A webszervernél kifejezetten a karbantartott **ESP32Async** forkot használd
+> (`ESP32Async/ESPAsyncWebServer` + `ESP32Async/AsyncTCP`): a régi, elhagyott
+> me-no-dev változat API-ja több ponton eltér (pl. `params()` visszatérési
+> típusa, `getParam()` const-ossága, a hiányzó fájl hibakódja).
 
 ## 🚀 Telepítés
 
@@ -309,9 +324,9 @@ platform = espressif32
 board = seeed_xiao_esp32c3
 framework = arduino
 lib_deps =
-    ESP Async WebServer
-    AsyncTCP
-    ESPping
+    ESP32Async/ESPAsyncWebServer @ ^3.12.0
+    ESP32Async/AsyncTCP @ ^3.5.0
+    dvarrel/ESPping @ ^1.0.5
 board_build.filesystem = littlefs
 ```
 
@@ -359,6 +374,9 @@ SUCCESS_DELAY delay start.
 | **Board package** | ESP32 Arduino **3.3.11** |
 | **Beágyazott ESP-IDF** | `release_v5.5` (`esp32-arduino-libs-idf-release_v5.5-b774170f`) |
 | **Board** | XIAO ESP32-C3 (`D0`=GPIO2, `D1`=GPIO3, `D3`=GPIO5, `D4`=GPIO6, `D5`=GPIO7) |
+| **ESPAsyncWebServer** | ESP32Async fork, **3.12.0** |
+| **AsyncTCP** | ESP32Async fork, **3.5.0** |
+| **ESPping** | dvarrel, **1.0.5** |
 
 A firmware viselkedését meghatározó feltételezések ezen a konkrét verzión lettek
 ellenőrizve a core, illetve az ESP-IDF forrásában:
@@ -644,6 +662,10 @@ beírt adatok sem vesznek el.
   érdemes lecserélni az `AP_PASSWORD` konstansban. A hosszát `static_assert`
   őrzi (WPA2: 8–63 karakter), mert a core rövidebbnél nem indítana AP-t, és a
   `softAP()` visszatérési értékét nem nézzük.
+- Mivel az AP jelszava (a PSK) nyilvános, a WPA2 titkosítás a portál forgalmát
+  gyakorlatilag nem védi olyan támadótól, aki a kapcsolódási kézfogást is
+  rögzíti – a beállítást ezért ne végezze senki olyan környezetben, ahol a
+  rádiótávolságon belüli lehallgatás reális kockázat.
 
 ### A mentett jelszó összekeverése
 

@@ -137,7 +137,7 @@ Minden bejegyzés uptime bélyeget, egy eseménykódot és egy paramétert tarta
 | `SLEEP` | 1 = újrapróbálkozás, 2 = tartós internetkiesés, 3 = AP időtúllépés, 4 = végzetes hiba |
 | `FATAL` | 1 = LittleFS csatolás, 2 = konfiguráció olvasás, 3 = watchdog, 4 = a wifireset törlése nem sikerült |
 | `WDT RESET` | hányadik rendellenes újraindulás |
-| `STUCK BUTTON` | 0 = reset gomb, 1 = wifireset gomb |
+| `STUCK BUTTON` | 0 = reset gomb, 1 = wifireset gomb (csak az **első** kör – az ismétlődő 60 mp-es alvás-ébredés körök nem íródnak be újra) |
 
 A `/log` oldal az aktuális állapotot is mutatja: reset ok, watchdog számláló,
 újrapróbálkozási körök, uptime.
@@ -394,6 +394,12 @@ hibaüzeneteket öntene a soros portra (mérve 100 sor/perc), védelmet nem adna
 A gombokat 10 ms-onként mintavételezzük, és csak a végig lenyomva maradt
 állapotot fogadjuk el – egyetlen zajtüske tehát nem indít újra.
 
+> ⚠️ A Wi-Fi reset gomb lába (`D0` = **GPIO2**) az ESP32-C3 egyik *strapping*
+> lába: a chip csak akkor bootol, ha a reset pillanatában GPIO2 = 1.
+> **Bekapcsolás közben ne tartsd nyomva** – az eszköz el sem indulna, és ez
+> ellen szoftver nem védhet. Új hardver revízióban a gombot érdemes szabad,
+> nem-strapping lábra tenni (pl. `D2` = GPIO4).
+
 **Fájlírás közben egyik gomb sem hat.** A mentést az aszinkron webszerver
 taskja végzi; egy odaeső gombnyomás félbeszakított írást okozna. A gombok a
 mentés befejeztével működnek tovább (ilyenkor egy új 50 ms-os lenyomás kell).
@@ -437,9 +443,12 @@ Minden alvás előtt a **relé `LOW`**, tehát a router kap áramot.
 > nem RTC-képes lábra teszi a reset gombot), az eszköz a „csak gombbal" alvások
 > esetén is armol egy 1 órás időzítőt – így nem válhat elérhetetlenné.
 
-> ⚠️ Deep sleep alatt az ESP32-C3 `GPIO6–21` lábai nagyimpedanciásak, így a relé
-> (`D5` = GPIO7) **lebeg**. Ez szoftverből nem javítható – aktív-HIGH
-> relémodulnál külső 10 kΩ lehúzó ellenállás kell a GND felé.
+> ⚠️ Deep sleep alatt az ESP32-C3 `GPIO6–21` lábai alapból nagyimpedanciásak.
+> A firmware ezért minden elalvás előtt **rögzíti a relé lábát LOW-ra**
+> (`gpio_hold_en` + `gpio_deep_sleep_hold_en`), és ébredés után – miután a
+> lábat már maga hajtja – oldja fel. Külső 10 kΩ lehúzó ellenállás a GND felé
+> **ettől még ajánlott** aktív-HIGH relémodulnál: a bekapcsolás és a program
+> indulása közti ablakban a hold még nem él.
 
 ---
 

@@ -7,6 +7,7 @@
 #include <esp_system.h>
 
 #include <ESPAsyncWebServer.h>
+#include <driver/gpio.h>
 extern std::map<std::string, ArRequestHandlerFunction> g_handlers;
 #include <cassert>
 #include <unistd.h>
@@ -142,6 +143,10 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   watchdogEnabled = false;
   g_gpioWakeResult = 0;
   g_gpioWakeMask = 0; g_gpioWakeMode = -1;
+  // A GPIO hold a valosagban tuleli az ebredest (reset), csak az
+  // aramtalanitas torli - a modell is igy tesz.
+  g_gpioHoldFails = false;
+  if (!deepSleepWake) { g_heldPins.clear(); g_deepSleepHoldEnabled = false; }
   g_httpCode = 200; g_httpSize = -2; g_httpBeginOk = true; g_httpBody = "Microsoft NCSI";
   g_httpChunked = false; g_httpChunkSize = 0; g_httpRawOverride.clear();
   g_httpUrls.clear();
@@ -306,6 +311,10 @@ static void sc10() {
     CHECK(g_pinState[5] == LOW,  "wifi LED (GPIO5) LOW");
     CHECK(!g_serialOn, "Serial.end() megtörtént");
     CHECK(logIndex("pin7=LOW") < logIndex("DEEP_SLEEP"), "a relé az alvás ELŐTT kapcsolt le");
+    CHECK(g_heldPins.count(7) == 1, "a relé láb (GPIO7) hold-dal rögzítve alvásra");
+    CHECK(g_deepSleepHoldEnabled, "a hold deep sleep alatt is érvényes (deep_sleep_hold_en)");
+    { const int h = logIndex("gpio_hold_en(7)");
+      CHECK(h >= 0 && h < logIndex("DEEP_SLEEP"), "a rögzítés az elalvás ELŐTT történt"); }
     CHECK(g_gpioWakeMask == (1ULL << 3), "reset gomb (GPIO3) ébresztésre armolva");
     CHECK(g_gpioWakeMode == 0, "LOW szintre ébred");
     CHECK(logIndex("timer_wakeup") < logIndex("DEEP_SLEEP"), "timer is armolva alvás előtt"); }
@@ -3167,6 +3176,79 @@ static void scWD12() {
   CHECK(g_wdtMaxFeedGap < 90000, "a setup() is 90 mp alatt marad");
 }
 
+static void scS5() {
+  // Ébredés után a setup() előbb maga hajtja LOW-ra a relét, és csak utána
+  // oldja fel az alvás előtti holdot - a láb egy pillanatra sem marad magára.
+  coldBoot(true, "TestNet", "pw", "", "", 500, true);   // deep sleep ébredés
+  g_heldPins.insert(7); g_deepSleepHoldEnabled = true;  // az alvás előtti hold
+  setup();
+  CHECK(g_heldPins.empty(), "a hold ébredés után feloldva");
+  CHECK(!g_deepSleepHoldEnabled, "a globális deep sleep hold kikapcsolva");
+  { const int drive = logIndex("pin7=LOW");
+    const int release = logIndex("gpio_hold_dis(7)");
+    CHECK(drive >= 0 && release >= 0 && drive < release,
+          "előbb a meghajtott LOW, aztán a hold feloldása"); }
+}
+
+static void scS6() {
+  // Ha a hold rögzítése hibázik, az alvás attól még megtörténik, és a hiba
+  // nem néma - a külső lehúzó ellenállás a dokumentált tartalék.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  g_gpioHoldFails = true;
+  bool slept = false;
+  try {
+    for (int c = 0; c < 10; c++) {
+      int guard = 0;
+      while (!reset_device() && ++guard < 200000) { yield(); }
+    }
+  } catch (DeepSleepSignal&) { slept = true; }
+  CHECK(slept, "az alvás a hold hibája ellenére megtörténik");
+  CHECK(!g_deepSleepHoldEnabled, "hibás hold_en után nincs deep sleep hold");
+  CHECK(serialHas("FIGYELEM: a rele lab rogzitese"), "a hiba nem néma");
+}
+
+static void scSB5() {
+  // Az ismétlődő beragadt-gomb ébredés nem árasztja el a naplót: az első kör
+  // (BOOT + STUCK BUTTON) bekerül, az ismétlések némák - különben a 60 mp-es
+  // körforgás fél óra alatt kiszorítaná a kivizsgálandó eseményeket.
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcEvMagic = 0; rtcEvNext = 0;
+  g_pinRead[2] = LOW;                        // wifireset beragadva
+  try { setup(); } catch (DeepSleepSignal&) {}
+  const uint32_t afterFirst = rtcEvNext;
+  CHECK(afterFirst == 2, "az első kör két bejegyzés: BOOT + STUCK BUTTON");
+  for (int wake = 0; wake < 5; wake++) {     // öt további ébredés, még beragadva
+    coldBoot(true, "TestNet", "pw", "", "", 500, true);
+    g_pinRead[2] = LOW;
+    try { setup(); } catch (DeepSleepSignal&) {}
+  }
+  CHECK(rtcEvNext == afterFirst, "az ismétlődő ébredések nem írnak új bejegyzést");
+  coldBoot(true, "TestNet", "pw", "", "", 500, true);   // a gomb kiszabadult
+  setup();
+  CHECK(rtcEvNext > afterFirst, "a kiszabadulás utáni boot újra naplóz");
+}
+
+static void scP17() {
+  // Másolás-beillesztés szóközei: az IP/gateway mező is vágva validálódik,
+  // ugyanúgy, ahogy az SSID és a jelszó.
+  coldBoot(false, "", "", "", "");
+  setup();
+  const int code = postConfig("MyNetwork", "jelszo", " 192.168.1.200 ", "192.168.1.1 ");
+  CHECK(code == 200, "szóközös IP/gateway elfogadva (vágás után)");
+  CHECK(g_fs["/ip.txt"] == "192.168.1.200", "az IP vágva mentődik");
+  CHECK(g_fs["/gateway.txt"] == "192.168.1.1", "a gateway vágva mentődik");
+}
+
+static void scP18() {
+  // Csupa szóköz mező = üres mező = DHCP, nem hibaüzenet.
+  coldBoot(false, "", "", "", "");
+  setup();
+  const int code = postConfig("MyNetwork", "jelszo", "   ", "  ");
+  CHECK(code == 200, "csupa szóköz IP/gateway nem hiba");
+  CHECK(g_fs["/ip.txt"].empty() && g_fs["/gateway.txt"].empty(), "DHCP-ként mentve");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -3182,6 +3264,8 @@ static const Scenario kScenarios[] = {
   { "S2: alvás előtt minden kimenet biztonságos állapotba kerül", sc10 },
   { "S4: a gomb-ébresztés csak RTC-képes lábon működik (C3: GPIO0-5)", sc11 },
   { "S3: ébredés = teljes újraindulás, a számlálók nullázódnak", sc12 },
+  { "S5: ébredés után a relé holdja rendezetten oldódik fel", scS5 },
+  { "S6: hibás hold rögzítés nem akadályozza az alvást és nem néma", scS6 },
   { "RL1: a reset pulzus tényleg 90 másodperc (regresszió a fő hibára)", sc13 },
   { "RL2: az 5. reset esemény deep sleepet vált ki", sc14 },
   { "H1: a záró CR/LF nem buktatja el az egyezést", sc15 },
@@ -3260,6 +3344,7 @@ static const Scenario kScenarios[] = {
   { "SB2: beragadt wifireset gomb -> ugyanaz", scSB2 },
   { "SB3: a LED-ek FELVÁLTVA villognak elalvás előtt", scSB3 },
   { "SB4: a beragadt gomb naplózva", scSB4 },
+  { "SB5: az ismétlődő beragadt-gomb kör nem árasztja el a naplót", scSB5 },
   { "SER1: normál működés soros terhelése", scSER1 },
   { "SER2: internet kiesés soros terhelése", scSER2 },
   { "SER3: AP és hibajelző mód néma", scSER3 },
@@ -3303,6 +3388,8 @@ static const Scenario kScenarios[] = {
   { "GW2: elérhetetlen gateway -> egy reset, majd AP mód + napló", scGW2 },
   { "GW3: DHCP-nél nincs gateway-ellenőrzés", scGW3 },
   { "P16: a validáció mindkét űrlapon azonos", scP16 },
+  { "P17: az IP/gateway mező szóközei vágva validálódnak", scP17 },
+  { "P18: csupa szóköz IP/gateway = DHCP, nem hiba", scP18 },
   { "WR1: fájlírás közben nem indul újra (halasztott újraindítás)", scWR1 },
   { "WR2: fájlírás közben nem alszik el", scWR2 },
   { "WR3: a várakozás korlátos, beragadt jelző nem fagyaszt le", scWR3 },

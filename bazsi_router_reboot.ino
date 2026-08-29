@@ -15,6 +15,10 @@
 // Az esp_timer_get_time()-ot a core is expliciten includeolja (esp32-hal-misc.c),
 // nem hagyatkozik a FreeRTOS fejlecek atteteles behuzasara. Mi sem tesszuk.
 #include "esp_timer.h"
+// A rele labanak rogzitese deep sleep idejere: gpio_hold_en() +
+// gpio_deep_sleep_hold_en(). A C3-on a digitalis padek (GPIO6-21) holdjat csak
+// ez a paros tartja meg alvas alatt (driver/gpio.h, a gpio_hold_en 3. megj.).
+#include "driver/gpio.h"
 
 // Create AsyncWebServer object on port 80
 AsyncWebServer server(80);
@@ -88,7 +92,7 @@ const char gatewayPath[] = "/gateway.txt";
 // Az IPAddress a core 3.x-ben ~28 bájt (16 bájtos unió + típus + zóna + vptr),
 // ezért egyik sem globális: mind ott jön létre, ahol használjuk.
 
-// strapping pins 2, 8, 9
+// Strapping labak a C3-on: GPIO2, GPIO8, GPIO9 (datasheet, Boot Configurations).
 // Set LED GPIO, relay state
 constexpr uint8_t ledPin = D4;
 // wifi ok led
@@ -96,6 +100,16 @@ constexpr uint8_t wifiledPin = D3;
 // Set RELAY pin, to router
 constexpr uint8_t relayPin = D5;
 // Set reset pin, esp wifireset pin
+//
+// FIGYELEM (hardver): a D0 = GPIO2 strapping lab! A chip-reset alatti
+// mintavetelnel GPIO2=1 kell mind az SPI boothoz, mind a letoltesi modhoz -
+// bekapcsolas/reset KOZBEN nyomva tartott (vagy beragadt) wifireset gombnal
+// az eszkoz el sem indul. Ez ellen szoftver nem vedhet: a handleStuckButton()
+// csak a mar elindult programbol mukodik, es a beragadt gomb 60 mp-es
+// alvas-ebredes kore is chip-resettel ebred, azaz ujra a lenyomott gombot
+// mintavetelezne. Uj hardver reviziora a gombot szabad, nem-strapping labra
+// erdemes tenni (pl. D2 = GPIO4, ami raadasul RTC-kepes is); a jelenlegi
+// bekotesnel a szabaly annyi: bekapcsolas kozben ne legyen nyomva.
 constexpr uint8_t wifiresetPin = D0;
 // Set reset pin, esp reset/wakeup pin
 constexpr uint8_t resetPin = D1;
@@ -344,6 +358,8 @@ void startConfigPortal();
 void enterFatal(const char* reason);
 void fatalHalt(const char* reason);
 void enterDeepSleep(uint64_t timerUs);
+void holdRelayForSleep();
+bool stuckCycleAlreadyLogged(uint16_t which);
 bool initWiFi();
 bool reconnectWifi();
 bool writeConfigValue(fs::FS& fs, const char* path, const char* message);
@@ -354,7 +370,15 @@ bool encodeSecret(const char* plain, char* out, size_t outSize);
 void decodeSecretInPlace(char* buf);
 
 // Esemény rögzítése a körpufferbe. Nem allokál, nem blokkol.
+//
+// Két task is hív: a loop task mellett az async_tcp task is (a POST kezelő
+// CONFIG_SAVED bejegyzése). A pozíció léptetése és a slot írása együtt nem
+// atomi, ezért kritikus szakasz védi - enélkül két egyidejű hívás ugyanabba
+// a slotba írhatna, vagy egy bejegyzés elveszne. A szakasz rövid (a memset
+// csak a legelső híváskor fut), a megszakítás-tiltás belefér.
+portMUX_TYPE evLogMux = portMUX_INITIALIZER_UNLOCKED;
 void logEvent(EventCode code, uint16_t param) {
+  portENTER_CRITICAL(&evLogMux);
   if (rtcEvMagic != EVLOG_MAGIC) {
     rtcEvMagic = EVLOG_MAGIC;
     rtcEvNext = 0;
@@ -366,6 +390,7 @@ void logEvent(EventCode code, uint16_t param) {
   e.param = param;
   e.reserved = 0;
   rtcEvNext++;
+  portEXIT_CRITICAL(&evLogMux);
 }
 
 const char* eventName(uint8_t code) {
@@ -821,16 +846,51 @@ void waitForConfigWrite() {
   }
 }
 
+// A relé lábának rögzítése az alvás idejére. Deep sleep alatt a digitális
+// padek (GPIO6-21) alapból nagyimpedanciásak; a gpio_hold_en() a pad
+// pillanatnyi (LOW) kimenetét rögzíti, a gpio_deep_sleep_hold_en() pedig
+// érvényben tartja a holdot deep sleep alatt is (C3: driver/gpio.h, a
+// gpio_hold_en 3. megjegyzése). A router így alvás közben akkor sem veszít
+// áramot, ha a külső lehúzó ellenállás hiányzik. Az ellenállás ettől még
+// kell: a hold a BEKAPCSOLÁS és a program indulása közti ablakban nem él.
+// A hold az ébredés (ami a C3-on reset) után is tart; a setup() oldja fel,
+// miután a lábat már maga hajtja LOW-ra - a relé így ébredéskor sem "villan".
+void holdRelayForSleep() {
+  if (gpio_hold_en((gpio_num_t)relayPin) == ESP_OK) {
+    gpio_deep_sleep_hold_en();
+  } else {
+    // Nem végzetes: a dokumentált külső lehúzó ellenállás a tartalék.
+    Serial.println("FIGYELEM: a rele lab rogzitese (gpio_hold_en) nem sikerult.");
+  }
+}
+
+// Igaz, ha a napló legutóbbi két bejegyzése már pontosan ez a beragadt-gomb
+// kör (BOOT, majd STUCK BUTTON ugyanazzal a gombbal) - vagyis a mostani
+// ébredés csak a 60 mp-es alvás-ébredés kör ismétlése.
+bool stuckCycleAlreadyLogged(uint16_t which) {
+  if (rtcEvMagic != EVLOG_MAGIC || rtcEvNext < 2) {
+    return false;
+  }
+  const EventEntry& last = rtcEvents[(rtcEvNext - 1) % EVLOG_SIZE];
+  const EventEntry& prev = rtcEvents[(rtcEvNext - 2) % EVLOG_SIZE];
+  return last.code == EV_STUCK_BUTTON && last.param == which
+         && prev.code == EV_BOOT;
+}
+
 // Szándékosan nem az enterDeepSleep()-et hívja: itt a Wi-Fi és a webszerver
 // még el sem indult, és gombébresztést sem szabad armolni - a beragadt gomb
 // azonnal újraébresztené az eszközt, azaz végtelen boot loop lenne.
-void handleStuckButton(const char* message, uint16_t which) {
+// logIt = false: a beragadt-gomb kör ismétlése, nem kerül újra a naplóba
+// (lásd a setup() spam-védelmét).
+void handleStuckButton(const char* message, uint16_t which, bool logIt) {
   Serial.println(message);
   Serial.print("Alvas ");
   Serial.print((unsigned long)(STUCK_BUTTON_SLEEP_US / 1000000ULL));
   Serial.println(" masodpercre, utana ujraprobalkozas.");
   Serial.flush();
-  logEvent(EV_STUCK_BUTTON, which);
+  if (logIt) {
+    logEvent(EV_STUCK_BUTTON, which);
+  }
 
   // A két LED FELVÁLTVA villog. Ez szándékosan más, mint a végzetes hiba
   // jelzése (ott egyszerre villognak), így ránézésre megkülönböztethető.
@@ -845,6 +905,8 @@ void handleStuckButton(const char* message, uint16_t which) {
   digitalWrite(ledPin, LOW);
   digitalWrite(wifiledPin, LOW);
 
+  // A relé itt is LOW (a setup() elején kapcsoltuk), és alvás alatt is az marad.
+  holdRelayForSleep();
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
   esp_sleep_enable_timer_wakeup(STUCK_BUTTON_SLEEP_US);
   esp_deep_sleep_start();
@@ -989,11 +1051,13 @@ bool reset_device() {
 }
 
 // FIGYELEM (hardver): deep sleep alatt az ESP32-C3 digitális lábai (GPIO6-21)
-// nagyimpedanciás állapotba kerülnek, és csak az RTC lábak (GPIO0-5) tarthatók
-// meg hold funkcióval. A relé a D5 = GPIO7-en van, tehát az alvás teljes ideje
-// alatt LEBEG - szoftverből nem tartható. A relé vezérlőbemenetére külső
-// lehúzó ellenállás kell (aktív-HIGH modulnál 10k GND felé), különben az
-// alvás alatt véletlenül áramtalaníthatja a routert.
+// alapból nagyimpedanciás állapotba kerülnek. A relé lábát (D5 = GPIO7) ezért
+// alvás előtt a holdRelayForSleep() rögzíti LOW-ra (gpio_hold_en +
+// gpio_deep_sleep_hold_en) - így az alvás alatt sem lebeg. A relé
+// vezérlőbemenetére ettől függetlenül TOVÁBBRA IS kell külső lehúzó ellenállás
+// (aktív-HIGH modulnál 10k GND felé): a hold a bekapcsolás és a program
+// indulása közti ablakban még nem él, és a szoftveres védelem hibája ellen
+// is ez az utolsó háló.
 // Közös elalvás. timerUs = 0 esetén NINCS időzített ébresztés: az eszköz
 // magától nem tér vissza, csak a reset gombra vagy áramtalanításra.
 void enterDeepSleep(uint64_t timerUs) {
@@ -1003,6 +1067,9 @@ void enterDeepSleep(uint64_t timerUs) {
   digitalWrite(ledPin, LOW);
   digitalWrite(relayPin, LOW);
   digitalWrite(wifiledPin, LOW);
+  // A meghajtott LOW rögzítése az alvás idejére - a sorrend kötött: előbb a
+  // digitalWrite, aztán a hold, mert a hold a pad PILLANATNYI állapotát fogja.
+  holdRelayForSleep();
   WiFi.disconnect(true);
   server.end();
   Serial.flush();
@@ -1202,7 +1269,9 @@ void resetbutton() {
   }
   const uint32_t now = millis();
   if (timing.resetBtnDownSince == 0) {
-    timing.resetBtnDownSince = now;
+    // A 0 a "felengedve" jelölés; ha a millis() épp 0 (körbefordulás), 1-re
+    // kerekítünk, hogy ne ütközzön vele. Hatása legfeljebb 1 ms a debounce-ban.
+    timing.resetBtnDownSince = (now != 0) ? now : 1;
     return;
   }
   // Csak akkor fogadjuk el, ha végig lenyomva maradt (valódi debounce)
@@ -1226,7 +1295,8 @@ void wifiresetbutton() {
   }
   const uint32_t now = millis();
   if (timing.wifiResetBtnDownSince == 0) {
-    timing.wifiResetBtnDownSince = now;
+    // Lásd a resetbutton() megjegyzését a 0 sentinelről.
+    timing.wifiResetBtnDownSince = (now != 0) ? now : 1;
     return;
   }
   if (now - timing.wifiResetBtnDownSince >= BUTTON_DEBOUNCE_MS) {
@@ -1443,7 +1513,9 @@ bool testInternetHTTP(const char* url, const char* expectedResponse) {
       Serial.print("Unexpected payload size: ");
       Serial.println(len);
     } else {
-      const size_t want = (len > 0) ? (size_t)len : HTTP_MAX_PAYLOAD;
+      // len == 0 (Content-Length: 0): nincs mit olvasni, várni sem kell rá.
+      // len < 0: nincs Content-Length, a keretet a kapcsolat zárása adja.
+      const size_t want = (len >= 0) ? (size_t)len : HTTP_MAX_PAYLOAD;
       char payload[HTTP_MAX_PAYLOAD + 1];
       // Ugyanaz a stream, amit a http.begin() kapott — nem függünk a
       // getStream() core-verziónként eltérő visszatérési típusától.
@@ -1591,8 +1663,10 @@ void startConfigPortal() {
   Serial.println(WiFi.softAPIP());
 
   // Web Server Root URL. Ha a data/ mappa nem került fel a LittleFS-re, a
-  // beginResponse(FS&,...) NULL-t ad és a kliens 501-et kapna - ilyenkor az
-  // eszköz konfigurálhatatlan lenne, ezért beépített tartalék űrlapot adunk.
+  // send(FS&,...) hibaválaszt adna a kliensnek (a régi AsyncWebServerben a
+  // NULL beginResponse 501-et, az ESP32Async v3.x-ben már 404-et) - egyik sem
+  // használható űrlap, az eszköz konfigurálhatatlan lenne. Ezért beépített
+  // tartalék űrlapot adunk.
   server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
     touchApDeadline();
     if (LittleFS.exists("/wifimanager.html")) {
@@ -1757,14 +1831,22 @@ void startConfigPortal() {
           if (failReason == nullptr) failReason = "A jelszo tul hosszu (max 63 karakter).";
         }
       } else if (name == PARAM_IP) {
+        // Az SSID-hez es a jelszohoz hasonloan a masolas-beillesztes szokozeit
+        // itt is levagjuk a validalas elott: a "192.168.1.200 " szandeka
+        // egyertelmu. A puffer bovebb a mezonel, hogy a szokozokkel egyutt is
+        // beferjen a vagas elott; a vagott ertek hosszat kulon ellenorizzuk.
+        // A csupa szokoz uresre fogy = DHCP, nem hibauzenet.
+        char candidate[IPSTR_MAX_LEN * 2 + 2];
+        strlcpy(candidate, val.c_str(), sizeof(candidate));
+        trimInPlace(candidate);
         IPAddress testIP;
-        if (val.length() == 0) {
+        if (candidate[0] == '\0') {
           ipStr[0] = '\0';
           Serial.println("IP empty, using DHCP.");
           saveOk &= writeConfigValue(LittleFS, ipPath, "");
-        } else if (val.length() <= IPSTR_MAX_LEN && testIP.fromString(val.c_str())
+        } else if (strlen(candidate) <= IPSTR_MAX_LEN && testIP.fromString(candidate)
                    && isUsableIPv4(testIP)) {
-          strlcpy(ipStr, val.c_str(), sizeof(ipStr));
+          strlcpy(ipStr, candidate, sizeof(ipStr));
           Serial.print("IP Address set to: ");
           Serial.println(ipStr);
           saveOk &= writeConfigValue(LittleFS, ipPath, ipStr);
@@ -1774,14 +1856,18 @@ void startConfigPortal() {
           if (failReason == nullptr) failReason = "Ervenytelen IP cim (csak IPv4, nem 0.0.0.0).";
         }
       } else if (name == PARAM_GATEWAY) {
+        // Ugyanaz a vagas, mint az IP-nel.
+        char candidate[IPSTR_MAX_LEN * 2 + 2];
+        strlcpy(candidate, val.c_str(), sizeof(candidate));
+        trimInPlace(candidate);
         IPAddress testIP;
-        if (val.length() == 0) {
+        if (candidate[0] == '\0') {
           gatewayStr[0] = '\0';
           Serial.println("Gateway empty, using DHCP.");
           saveOk &= writeConfigValue(LittleFS, gatewayPath, "");
-        } else if (val.length() <= IPSTR_MAX_LEN && testIP.fromString(val.c_str())
+        } else if (strlen(candidate) <= IPSTR_MAX_LEN && testIP.fromString(candidate)
                    && isUsableIPv4(testIP)) {
-          strlcpy(gatewayStr, val.c_str(), sizeof(gatewayStr));
+          strlcpy(gatewayStr, candidate, sizeof(gatewayStr));
           Serial.print("Gateway set to: ");
           Serial.println(gatewayStr);
           saveOk &= writeConfigValue(LittleFS, gatewayPath, gatewayStr);
@@ -1868,6 +1954,13 @@ void setup() {
   digitalWrite(relayPin, LOW);
   digitalWrite(ledPin, HIGH);  //bekapcsolja a ledet, +5volt 150 ohm
 
+  // Ha alvásból ébredtünk, a relé lábát még az alvás előtti hold tartja LOW-n
+  // (lásd holdRelayForSleep()). Most már mi hajtjuk meg: előbb a meghajtás
+  // (fent), aztán a feloldás - így a láb egy pillanatra sem marad magára.
+  // Első bekapcsoláskor mindkét hívás ártalmatlan no-op.
+  gpio_deep_sleep_hold_dis();
+  gpio_hold_dis((gpio_num_t)relayPin);
+
   Serial.begin(115200);
   const uint32_t serialTimeout = millis();
   while (!Serial && millis() - serialTimeout < 3000) { delay(BUTTON_POLL_MS); }
@@ -1875,14 +1968,25 @@ void setup() {
 
   printUptime();
 
-  logEvent(EV_BOOT, (uint16_t)esp_reset_reason());
-
   // Mindkét gombot ellenőrizzük: ha bármelyik beragadt, nem indulunk el.
-  if (digitalRead(resetPin) == LOW) {
-    handleStuckButton("Reset button got stuck.", 0);
+  // Spam-védelem: a beragadt gomb 60 mp-es alvás-ébredés köre percenként adna
+  // egy BOOT + STUCK BUTTON párt, ami fél óra alatt kiszorítaná a körpufferből
+  // a kivizsgálandó eseményeket. Ezért csak az ELSŐ kör kerül a naplóba, az
+  // ismétlések (a hozzájuk tartozó BOOT-tal együtt) nem - ugyanaz az elv, mint
+  // a TEST FAIL sorozatoknál.
+  const int stuckButton = (digitalRead(resetPin) == LOW)     ? 0
+                        : (digitalRead(wifiresetPin) == LOW) ? 1
+                                                             : -1;
+  const bool stuckRepeat =
+    stuckButton >= 0 && stuckCycleAlreadyLogged((uint16_t)stuckButton);
+  if (!stuckRepeat) {
+    logEvent(EV_BOOT, (uint16_t)esp_reset_reason());
   }
-  if (digitalRead(wifiresetPin) == LOW) {
-    handleStuckButton("Wifireset button got stuck.", 1);
+  if (stuckButton == 0) {
+    handleStuckButton("Reset button got stuck.", 0, !stuckRepeat);
+  }
+  if (stuckButton == 1) {
+    handleStuckButton("Wifireset button got stuck.", 1, !stuckRepeat);
   }
 
   checkWatchdogResets();
