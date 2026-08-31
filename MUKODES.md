@@ -35,7 +35,7 @@ Az eszköz mindig pontosan egy üzemmódban van.
 | Van mentett SSID? | Viselkedés |
 |---|---|
 | **Nincs** | Azonnal `MODE_CONFIG` |
-| **Van** | **10 perc** várakozás (`firstStartDelay`), majd **3 próba** (köztük 30 mp) |
+| **Van** | **legfeljebb 10 perc** várakozás (`firstStartDelay`), majd **3 próba** (köztük 30 mp). A várakozás korábban véget ér, ha 60 mp-enkénti próbánál a hálózat **és** az internet is megvan |
 
 A 3 próba után a **hiba oka** dönt, nem az eltelt idő:
 
@@ -64,6 +64,12 @@ indulás → 10,0 perc  firstStartDelay várakozás
         → 60,0 perc  deep sleep
         = 85,5 perc / kör
 ```
+
+> A két 10 perces tétel **felső korlát**. A firmware 60 mp-enként megnézi, hogy
+> visszajött-e a hálózat és az internet, és ha igen, azonnal továbblép. Erre a
+> táblázatra ez mégsem hat: ha a hálózat végig halott – márpedig ez a szakasz
+> pontosan arról szól –, a próbák sosem sikerülnek, és a körök a fenti teljes
+> hosszukban futnak. A 46 órás türelem tehát változatlan.
 
 | | |
 |---|---|
@@ -221,10 +227,10 @@ a `SUCCESS_DELAY` hátralévő része, tehát a **legrosszabb felismerési idő
 
 | Lépés | Időtartam |
 |---|---|
-| Relé **be** → router áramtalanítva, státusz LED ki | |
+| Relé **be** → router áramtalanítva, státusz LED **villog 2 Hz** | 90 mp sötét LED ránézésre a halott eszköztől sem különbözne |
 | Áramtalanítás | **90 mp** (`RESET_PULSE`) |
 | Relé **ki** → router visszakap áramot, státusz LED be | |
-| Várakozás a router bootolására | **10 perc** (`RESET_DELAY`) |
+| Várakozás a router bootolására | **legfeljebb 10 perc** (`RESET_DELAY`) – 60 mp-enként megnézzük, hogy visszajött-e a hálózat és az internet; ha igen, a várakozás azonnal véget ér |
 | Wi-Fi újracsatlakozás: 3 próba, köztük 30 mp | max. ~2 perc |
 
 **Egy teljes reset ciklus:** 5 teszt (123–213 mp) + 90 mp + 10 perc +
@@ -273,7 +279,7 @@ internet nem, tehát érdemes később újrapróbálni.
 
 | Lépés | Időtartam |
 |---|---|
-| Wi-Fi LED ki | azonnal |
+| Wi-Fi LED **villog 1 Hz**, státusz LED végig **be** | azonnal |
 | **3 újracsatlakozási próba**, köztük 30 mp | max. ~2 perc |
 | Sikertelen → azonnal **router újraindítás** (4. pont szerint) | |
 
@@ -473,7 +479,13 @@ Minden alvás előtt a **relé `LOW`**, tehát a router kap áramot.
 | Státusz LED (`D4`) | Wi-Fi LED (`D3`) | Jelentés |
 |---|---|---|
 | be | be | Minden rendben, van Wi-Fi |
-| be | ki | Nincs Wi-Fi kapcsolat |
-| ki | ki | Router áramtalanítva (reset pulzus alatt), vagy alvás |
+| be | ki | Nincs Wi-Fi kapcsolat (pl. a router bootolására várunk) |
+| ki | ki | Alvás |
+| be | **villog 1 Hz** | **AP beállító mód** – várja a böngészőt (`AP_BLINK_MS`) |
+| **villog 2 Hz** | ki | **Router reset pulzus** – a router épp áram nélkül (`RESET_BLINK_MS`) |
 | **együtt villog 5 Hz** | **együtt villog 5 Hz** | **Végzetes hiba** (LittleFS / konfig / watchdog) |
 | **felváltva villog 5 Hz** | **felváltva villog 5 Hz** | **Beragadt gomb** induláskor |
+
+A négy villogó jelzés szándékosan elkülönül: az **AP mód** és a **router reset**
+csak az egyik LED-et villogtatja (a másik állapota is más), a két hibajelzés
+pedig mindkettőt, gyorsabban – az egyik együtt, a másik ellenfázisban.

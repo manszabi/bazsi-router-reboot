@@ -171,6 +171,13 @@ constexpr uint32_t FATAL_SLEEP_AFTER_MS = 5 * 60 * 1000;
 // Beragadt gomb jelzése elalvás előtt: a két LED FELVÁLTVA villog, hogy meg
 // lehessen különböztetni a végzetes hibától, ahol EGYÜTT villognak.
 constexpr uint32_t STUCK_BLINK_MS = 3000;
+// AP beállító mód: a Wi-Fi LED villog 1 Hz-cel, a státusz LED végig VILÁGÍT.
+// Lassabb a végzetes hiba 5 Hz-énél, hogy össze ne lehessen téveszteni vele.
+constexpr uint32_t AP_BLINK_MS = 500;
+// Router reset pulzus: a státusz LED villog 2 Hz-cel, a Wi-Fi LED KI marad
+// (a router áram nélkül van, kapcsolat sincs). A két villogó jelzés így a
+// villogó LED-ről és a sebességről is megkülönböztethető.
+constexpr uint32_t RESET_BLINK_MS = 250;
 // Watchdog timeout. Nagyobb kell, mint a leghosszabb olyan blokkolás, amit NEM
 // tudunk etetni - ez a http.GET(). A rossz eset NEM a szerver hallgatasa
 // (5 mp connect + 10 mp valasz = 15 mp), hanem a HALOTT DNS, mert a
@@ -197,6 +204,24 @@ constexpr uint32_t RESTART_GRACE_MS = 2000;  // válasz kiküldése újraindít�
 
 constexpr uint64_t SLEEP_DURATION_US = 3600ULL * 1000000ULL;      // 1 óra
 constexpr uint64_t STUCK_BUTTON_SLEEP_US = 60ULL * 1000000ULL;    // 60 másodperc
+
+// A hosszú várakozások (firstStartDelay, RESET_DELAY) korai lezárása.
+//
+// Mindkét várakozás arra való, hogy a router bootolására időt hagyjunk - de ha
+// a router hamarabb feláll, felesleges a maradékot kivárni. Ennyi időnként
+// megnézzük, hogy visszajött-e a hálózat ÉS az internet; ha mindkettő megvan,
+// a várakozás azonnal véget ér. Ha nem, a várakozás szabályosan végigfut.
+//
+// MIÉRT 60 mp? Egy router bootolása 1-3 perc, tehát ennél sűrűbb kérdezés nem
+// hozna érdemben korábbi kilépést, viszont rádiózna. Egy 10 perces várakozás
+// alatt így legfeljebb 10 próba fut - és mivel a Wi-Fi újracsatlakozás a
+// WiFi.persistent(false) mellett NEM ír NVS-t, ez a flasht sem terheli.
+constexpr uint32_t ONLINE_PROBE_INTERVAL_MS = 60 * 1000;
+// A korai kilépés ping célpontja: fix IP, hogy a névfeloldás ne számítson -
+// itt csak azt kérdezzük, van-e út kifelé. (Cloudflare.) Az IPAddress ~28
+// bájt és virtuális, ezért itt csak a négy oktett él, a cím a hívás helyén
+// jön létre.
+constexpr uint8_t PROBE_PING_IP[4] = { 1, 1, 1, 1 };
 
 // Teszt paraméterek
 constexpr uint8_t PING_ATTEMPTS = 4;
@@ -284,6 +309,11 @@ bool fsReady = false;
 // definíció szerint helyes - ott nincs mit ellenőrizni.
 bool staticConfigActive = false;
 
+// A FAILURE_STATE-beli RESET_DELAY korai lezárásának órája. Nem a
+// TimingState-ben van, mert az a struct a valódi állapotgép idejeit tartja;
+// ez csak egy sebességkorlátozó számláló.
+uint32_t resetDelayProbeLast = 0;
+
 // Fut-e már a watchdog. Az initWatchdog() a setup() elején fut, de EL IS
 // BUKHAT (kikapcsolt TWDT, sikertelen feliratkozás) - és ilyenkor szándékosan
 // le is iratkozunk. Feliratkozás nélkül a feedLoopWDT() ESP_ERR_NOT_FOUND-ot
@@ -357,6 +387,9 @@ void resetbutton();
 void wifiresetbutton();
 void blockingDelay(uint32_t duration);
 void waitWithButtons(uint32_t duration);
+bool waitWithButtonsUntilOnline(uint32_t duration);
+bool onlineProbe();
+bool onlineProbeDue(uint32_t& lastProbe, uint32_t now);
 void waitForConfigWrite();
 void internetFailSleep();
 void fatalSleep();
@@ -844,6 +877,75 @@ void waitWithButtons(uint32_t duration) {
   }
 }
 
+// Vissza van-e minden? Két lépés, ebben a sorrendben:
+//   1. van-e Wi-Fi kapcsolat,
+//   2. ha van: kimegy-e csomag az internetre (ping egy fix IP-re).
+// Csak akkor igaz, ha MINDKETTŐ sikerül. Ezt kizárólag a hosszú várakozások
+// korai lezárására használjuk.
+//
+// MIÉRT PING, amikor az internetteszt szándékosan HTTP? Mert itt más a tét.
+// A ciklikus tesztnél egy hamis pozitív VÉGZETES lenne: befagyott router-DNS
+// mellett a ping megy, és az eszköz sosem indítaná újra a routert (mérve: 41
+// bukott HTTP teszt mellett nulla reset). Itt viszont a ping legrosszabb
+// esetben annyit ér el, hogy a várakozás korábban ér véget - utána AZONNAL a
+// rendes HTTP tesztsorozat következik, ami a befagyott DNS-t így is elbukja.
+// Vagyis a hamis pozitív itt nem elrejt egy hibát, hanem hamarabb deríti ki.
+// Cserébe a ping olcsó: nincs névfeloldás, nincs TCP, kevés rádióidő.
+//
+// FLASH: ez a függvény semmit nem ír a fájlrendszerre, és a WiFi.begin() sem
+// ír NVS-be, mert a setup() WiFi.persistent(false)-t hívott. Az esemény-napló
+// RTC RAM-ban van. Tehát tetszőleges gyakorisággal ismételhető.
+bool onlineProbe() {
+  // 1. lépés: hálózat.
+  if (WiFi.status() != WL_CONNECTED) {
+    // Nem várunk rá és nem blokkolunk: egy aszinkron újracsatlakozást
+    // kezdeményezünk, a választ a KÖVETKEZŐ próba status()-a adja meg. A
+    // hívások közt egy teljes ONLINE_PROBE_INTERVAL_MS telik, ami sokszorosa
+    // egy asszociáció idejének - így nem szakítunk félbe egy futó próbát.
+    if (ssid[0] != '\0') {
+      WiFi.begin(ssid, pass);
+    }
+    return false;
+  }
+
+  // 2. lépés: internet.
+  const IPAddress target(PROBE_PING_IP[0], PROBE_PING_IP[1],
+                         PROBE_PING_IP[2], PROBE_PING_IP[3]);
+  return testInternetPing(target, "internet");
+}
+
+// Az onlineProbe() időzített változata: legfeljebb ONLINE_PROBE_INTERVAL_MS
+// -enként enged tényleges próbát, közte azonnal hamissal tér vissza. Így a
+// hívó minden körben hívhatja, a rádió mégsem dolgozik feleslegesen.
+// A lastProbe-ot a hívó tartja, mert minden várakozásnak saját órája van.
+bool onlineProbeDue(uint32_t& lastProbe, uint32_t now) {
+  if (now - lastProbe < ONLINE_PROBE_INTERVAL_MS) {
+    return false;
+  }
+  lastProbe = now;
+  return onlineProbe();
+}
+
+// Ugyanaz, mint a waitWithButtons(), de közben figyeli, hogy visszajött-e a
+// hálózat és az internet. Igazzal tér vissza, ha emiatt lépett ki korábban;
+// hamissal, ha a teljes időt kivárta.
+bool waitWithButtonsUntilOnline(uint32_t duration) {
+  const uint32_t start = millis();
+  uint32_t lastProbe = start;   // az első próba egy teljes intervallum múlva
+  while (millis() - start < duration) {
+    if (onlineProbeDue(lastProbe, millis())) {
+      printUptime();
+      Serial.println("A varakozas korabban veget er: halozat es internet OK.");
+      return true;
+    }
+    resetbutton();
+    wifiresetbutton();
+    feedWatchdog();
+    delay(BUTTON_POLL_MS);
+  }
+  return false;
+}
+
 // Fájlírás közben SEM aludni, SEM újraindulni nem szabad: a félbeszakadt
 // mentés sérült konfigurációt hagyna hátra. A mentést az aszinkron webszerver
 // taskja végzi, az alvásról és az újraindításról viszont a loop() dönt -
@@ -1068,10 +1170,16 @@ bool reset_device() {
     Serial.println(testState.resetEvents);
     digitalWrite(relayPin, HIGH);
     Serial.println("Relay on.");
+    // A státusz LED a pulzus alatt VILLOG (lásd lent), nem csak kialszik:
+    // 90 mp sötét LED ránézésre nem különböztethető meg a halott eszköztől.
+    // A villogás azt mondja: "épp én kapcsoltam le a routert, dolgozom".
     digitalWrite(ledPin, LOW);
-    // A Wi-Fi LED is le: a router most áram nélkül van, tehát kapcsolat sincs.
-    // Enélkül a LED a teljes pulzus + RESET_DELAY alatt (~11,5 perc) azt
-    // mutatná, hogy van Wi-Fi. Visszakapcsolni a sikeres újracsatlakozás fogja.
+    timing.blinkLast = millis();
+    uiFlags.blinkOn = false;
+    // A Wi-Fi LED viszont KI marad: a router most áram nélkül van, tehát
+    // kapcsolat sincs. Enélkül a LED a teljes pulzus + RESET_DELAY alatt
+    // (~11,5 perc) azt mutatná, hogy van Wi-Fi. Visszakapcsolni a sikeres
+    // újracsatlakozás fogja.
     digitalWrite(wifiledPin, LOW);
     Serial.println("Reset_pulse delay.");
     testState.resetStep = 1;
@@ -1085,10 +1193,18 @@ bool reset_device() {
     Serial.print("Powering ON the router. Instance = ");
     Serial.println(testState.resetEvents);
     digitalWrite(relayPin, LOW);
-    digitalWrite(ledPin, HIGH);
+    digitalWrite(ledPin, HIGH);  // a villogás vége: a jelzés visszaáll folyamatosra
     printUptime();
     testState.resetStep = 0;
     return true;
+  }
+
+  // A pulzus alatt: a státusz LED villog 2 Hz-cel. A hívó ciklusa
+  // BUTTON_POLL_MS-enként hív minket, tehát ez elég sűrű ütem hozzá.
+  if (millis() - timing.blinkLast >= RESET_BLINK_MS) {
+    timing.blinkLast = millis();
+    uiFlags.blinkOn = !uiFlags.blinkOn;
+    digitalWrite(ledPin, uiFlags.blinkOn ? HIGH : LOW);
   }
   return false;
 }
@@ -1178,7 +1294,12 @@ bool routerResetAndRetry() {
   }
   printUptime();
   Serial.println("Router reset kesz, varakozas a bootolasra.");
-  waitWithButtons(RESET_DELAY);
+  // Ha a router hamarabb feláll, nem várjuk ki a maradékot. A próba a
+  // kapcsolatot már igazolta, tehát a reconnectWifi() is felesleges.
+  if (waitWithButtonsUntilOnline(RESET_DELAY)) {
+    digitalWrite(wifiledPin, HIGH);
+    return true;
+  }
   return reconnectWifi();
 }
 
@@ -1668,7 +1789,29 @@ bool gatewayUnreachable() {
 }
 
 void handleFirstStart(uint32_t currentMillis) {
-  if (WiFi.status() != WL_CONNECTED) {
+  // A várakozás korai lezárása. A static a loop() körei közt tartja az órát;
+  // hidegindulásnál nulláról indul, ahogy a timing.startMillis is - az első
+  // próba tehát ~egy intervallummal az indulás után fut.
+  //
+  // FIGYELEM, VISELKEDÉSVÁLTOZÁS: korábban a puszta Wi-Fi kapcsolat is azonnal
+  // lezárta a várakozást. Most a ping is kell hozzá. Ha a hálózat megvan, de
+  // az internet nem, a firstStartDelay végigfut - épp erre való: áramszünet
+  // után a router lassabban indul, mint az ESP, és nem akarjuk 2 perccel a
+  // bekapcsolás után újraindítani.
+  static uint32_t lastProbe = 0;
+  static bool probeArmed = false;
+  if (!probeArmed) {
+    probeArmed = true;
+    // Az ELSŐ próba azonnal fusson le, ne csak egy intervallum múlva. A tipikus
+    // eset ugyanis az, hogy a kapcsolat MÁR él (a setup() initWiFi()-je
+    // sikerült) - ilyenkor semmi értelme 60 mp-et várni a továbblépéssel.
+    // Az előjel nélküli kivonás körbefordulása itt szándékos és helyes: a
+    // különbség akkor is pontosan egy intervallum, ha a millis() még kicsi.
+    lastProbe = currentMillis - ONLINE_PROBE_INTERVAL_MS;
+  }
+  const bool online = onlineProbeDue(lastProbe, currentMillis);
+
+  if (!online) {
     if (currentMillis - timing.startMillis < firstStartDelay) {
       if (!uiFlags.firstStartPrinted) {
         printUptime();
@@ -1697,6 +1840,11 @@ void handleFirstStart(uint32_t currentMillis) {
         return;
       }
     }
+  } else {
+    // A próba már igazolta a kapcsolatot: nincs mit újracsatlakoztatni.
+    printUptime();
+    Serial.println("First start wait end (halozat es internet visszajott).");
+    digitalWrite(wifiledPin, HIGH);
   }
   // Innentől a firstStart lezárult: a timing.startMillis-t senki nem olvassa
   // többé, ezért nincs értelme frissíteni.
@@ -1709,7 +1857,13 @@ void startConfigPortal() {
   }
   deviceMode = MODE_CONFIG;
   touchApDeadline();
-  digitalWrite(wifiledPin, LOW);  //led off
+  // Jelzés: a Wi-Fi LED villog (a villogtatást a loop() végzi), a státusz LED
+  // közben végig világít. Az utóbbi azért kell expliciten, mert ide a router
+  // reset ága felől is be lehet érkezni, ahol a státusz LED épp villogott.
+  digitalWrite(wifiledPin, LOW);
+  digitalWrite(ledPin, HIGH);
+  timing.blinkLast = millis();
+  uiFlags.blinkOn = false;
 
   Serial.println("Setting AP (Access Point)");
   char apName[32];
@@ -2247,6 +2401,15 @@ void loop() {
   }
 
   if (deviceMode == MODE_CONFIG) {
+    // A Wi-Fi LED villog: "beállító módban vagyok, várom a böngészőt". A
+    // státusz LED közben végig világít - a kettő együtt egyértelműen más,
+    // mint a végzetes hiba (mindkettő 5 Hz) vagy a router reset (csak a
+    // státusz LED, 2 Hz).
+    if (currentMillis - timing.blinkLast >= AP_BLINK_MS) {
+      timing.blinkLast = currentMillis;
+      uiFlags.blinkOn = !uiFlags.blinkOn;
+      digitalWrite(wifiledPin, uiFlags.blinkOn ? HIGH : LOW);
+    }
     // Konfig módban nincs internetteszt. A portál AP_TIMEOUT_MS tétlenségig
     // él; minden kérés és a folyamatban lévő mentés kitolja a határidőt.
     resetbutton();
@@ -2405,29 +2568,43 @@ void loop() {
           Serial.println("RESET_DELAY start in FAILURE_STATE.");
           timing.stateStart = millis();
           uiFlags.resetPrinted = true;
+          resetDelayProbeLast = millis();  // az első próba egy intervallum múlva
           break;                        // a RESET_DELAY a következő körökben telik
         }
 
-        if (millis() - timing.stateStart >= RESET_DELAY) {
-          printUptime();
-          Serial.println("RESET_DELAY end in FAILURE_STATE.");
-          Serial.println("Reconnect WIFI in FAILURE_STATE.");
-          WiFi.disconnect(true);
-          blockingDelay(100);
+        // A RESET_DELAY korai lezárása: ha a router hamarabb feláll, és az
+        // internet is megvan, nincs mire várni.
+        const bool earlyOnline = onlineProbeDue(resetDelayProbeLast, millis());
 
-          // Egységesen 3 próba 30 mp szünetekkel. A reconnectWifi() minden
-          // próbája teljes initWiFi(), ami újra alkalmazza a statikus IP/DNS
-          // konfigot - a disconnect(true) ugyanis eldobja a netifet.
-          if (!reconnectWifi()) {
-            printUptime();
-            Serial.println("A router reset utan sem jott vissza a WiFi.");
-            digitalWrite(wifiledPin, LOW);
-            wifiGiveUp();
-            break;
+        if (earlyOnline || millis() - timing.stateStart >= RESET_DELAY) {
+          printUptime();
+          if (earlyOnline) {
+            Serial.println("RESET_DELAY korai vege: halozat es internet OK.");
+          } else {
+            Serial.println("RESET_DELAY end in FAILURE_STATE.");
           }
 
-          printUptime();
-          Serial.println("WIFI OK in FAILURE_STATE.");
+          // Korai kilépéskor a kapcsolat MÁR él és mérve is van - a
+          // disconnect(true) épp azt bontaná le, amit az imént igazoltunk.
+          if (!earlyOnline) {
+            Serial.println("Reconnect WIFI in FAILURE_STATE.");
+            WiFi.disconnect(true);
+            blockingDelay(100);
+
+            // Egységesen 3 próba 30 mp szünetekkel. A reconnectWifi() minden
+            // próbája teljes initWiFi(), ami újra alkalmazza a statikus IP/DNS
+            // konfigot - a disconnect(true) ugyanis eldobja a netifet.
+            if (!reconnectWifi()) {
+              printUptime();
+              Serial.println("A router reset utan sem jott vissza a WiFi.");
+              digitalWrite(wifiledPin, LOW);
+              wifiGiveUp();
+              break;
+            }
+
+            printUptime();
+            Serial.println("WIFI OK in FAILURE_STATE.");
+          }
           digitalWrite(wifiledPin, HIGH);
 
           // A router megkapta az esélyét. Ha a gateway még mindig nem

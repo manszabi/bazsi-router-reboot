@@ -78,17 +78,22 @@ flowchart TD
 ## 3. First start – türelmi idő induláskor
 
 Áramszünet után a router lassabban bootol, mint az ESP; ezért mentett SSID
-mellett az eszköz nem megy azonnal AP módba.
+mellett az eszköz nem megy azonnal AP módba. A 10 perc **felső korlát**:
+60 másodpercenként megnézzük, hogy visszajött-e a hálózat és az internet, és
+ha mindkettő megvan, a várakozás azonnal véget ér.
 
 ```mermaid
 flowchart TD
-    IN([SSID mentve, de a WiFi nem jött össze]) --> WAIT{"Eltelt már 10 perc?<br>(firstStartDelay)"}
+    IN([SSID mentve, de a WiFi nem jött össze]) --> PRB{"60 s-onként: onlineProbe()<br>1. WiFi.status() == WL_CONNECTED<br>2. ping 1.1.1.1 (fix IP, DNS nélkül)"}
+    PRB -->|"mindkettő OK"| EARLY["firstStart AZONNAL lezárva<br>(nem várjuk ki a maradékot)"]
+    EARLY --> DONE
+    PRB -->|"bármelyik bukik"| WAIT{"Eltelt már 10 perc?<br>(firstStartDelay)"}
     WAIT -->|nem| BACK([vissza a loop-ba<br>gombok és watchdog élnek])
     WAIT -->|igen| REC{"reconnectWifi()<br>3 próba, 30 s szünetekkel<br>(próbánként 20 s timeout)"}
     REC -->|siker| DONE["firstStart lezárva<br>normál monitor üzem (4. ábra)"]
     REC -->|sikertelen| AUTH{"WL_CONNECT_FAILED?<br>(hitelesítési hiba)"}
     AUTH -->|igen| GU["wifiGiveUp() (6. ábra)"]
-    AUTH -->|nem| RST{"routerResetAndRetry():<br>relé 90 s ki + 10 perc bootvárás<br>+ reconnectWifi()"}
+    AUTH -->|nem| RST{"routerResetAndRetry():<br>relé 90 s ki + max 10 perc bootvárás<br>(60 s-onként onlineProbe, korai kilépéssel)<br>+ reconnectWifi()"}
     RST -->|siker| DONE
     RST -->|sikertelen| GU
 ```
@@ -105,7 +110,7 @@ flowchart TD
     MODE -->|MODE_FATAL| FB["Mindkét LED együtt villog (5 Hz)<br>gombok élnek"] --> F5{"5 perc letelt?"}
     F5 -->|igen| FSL["fatalSleep() – EV_SLEEP(4)<br>alvás timer NÉLKÜL"]
     F5 -->|nem| L
-    MODE -->|MODE_CONFIG| APT{"5 perc tétlenség,<br>nincs mentés, nincs restart?"}
+    MODE -->|MODE_CONFIG| APB["Wi-Fi LED villog 1 Hz<br>státusz LED végig be"] --> APT{"5 perc tétlenség,<br>nincs mentés, nincs restart?"}
     APT -->|igen| ASL["apSleep() – EV_SLEEP(3)<br>alvás timer NÉLKÜL"]
     APT -->|nem| L
     MODE -->|MODE_MONITOR| FST{firstStart?}
@@ -157,9 +162,12 @@ flowchart TD
     GWL --> CNT["resetEvents++<br>EV_ROUTER_RESET"]
     CNT --> MX{"resetEvents >= 5?"}
     MX -->|"igen (már 4 reset volt)"| NFS["internetFailSleep()<br>EV_SLEEP(2)<br>deep sleep 1 óra"]
-    MX -->|nem| P1["Relé = HIGH: router áram nélkül<br>90 s (RESET_PULSE)<br>mindkét LED sötét"]
-    P1 --> P2["Relé = LOW: router bootol<br>10 perc várakozás (RESET_DELAY)<br>gombok + watchdog élnek"]
-    P2 --> P3["WiFi.disconnect(true)<br>reconnectWifi(): 3 próba, 30 s szünet<br>(a statikus IP/DNS újra beáll)"]
+    MX -->|nem| P1["Relé = HIGH: router áram nélkül<br>90 s (RESET_PULSE)<br>státusz LED VILLOG 2 Hz, Wi-Fi LED sötét"]
+    P1 --> P2["Relé = LOW: router bootol<br>max 10 perc várakozás (RESET_DELAY)<br>gombok + watchdog élnek"]
+    P2 --> PRB{"60 s-onként: onlineProbe()<br>Wi-Fi kapcsolat ÉS ping 1.1.1.1"}
+    PRB -->|"mindkettő OK"| GW2
+    PRB -->|"még nem, és letelt a 10 perc"| P3["WiFi.disconnect(true)<br>reconnectWifi(): 3 próba, 30 s szünet<br>(a statikus IP/DNS újra beáll)"]
+    PRB -->|"még nem, és van hátra idő"| P2
     P3 -->|sikertelen| GU["wifiGiveUp() (6. ábra)"]
     P3 -->|siker| GW2{"A gateway továbbra<br>sem pingelhető?"}
     GW2 -->|igen| APX["EV_GW_UNREACHABLE(2) + EV_AP_MODE(4)<br>startConfigPortal()<br>(valószínűleg rossz a statikus IP)"]

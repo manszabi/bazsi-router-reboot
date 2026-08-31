@@ -40,6 +40,24 @@ ESP32-C3 alapú automatikus router újraindító rendszer. Az eszköz folyamatos
 | `D4` | Állapot LED |
 | `D10` | Relé vezérlés (router tápellátás) – **külső 22 kΩ lehúzó a GND felé** |
 
+### LED jelzések
+
+| Státusz LED (`D4`) | Wi-Fi LED (`D3`) | Jelentés |
+|---|---|---|
+| be | be | Minden rendben, van Wi-Fi |
+| be | ki | Nincs Wi-Fi kapcsolat (pl. a router bootolására várunk) |
+| ki | ki | Alvás |
+| be | **villog 1 Hz** | **AP beállító mód** – várja a böngészőt |
+| **villog 2 Hz** | ki | **Router reset pulzus** – a router épp áram nélkül |
+| **együtt villog 5 Hz** | **együtt villog 5 Hz** | **Végzetes hiba** (LittleFS / konfig / watchdog) |
+| **felváltva villog 5 Hz** | **felváltva villog 5 Hz** | **Beragadt gomb** induláskor |
+
+A négy villogó jelzés szándékosan elkülönül. Az AP mód és a router reset csak
+az **egyik** LED-et villogtatja, más-más ütemben, és a másik LED állapota is
+eltér; a két hibajelzés mindkettőt villogtatja, gyorsabban – az egyik együtt,
+a másik ellenfázisban. A reset pulzus alatt azért villog a státusz LED, mert
+90 másodpercnyi sötét LED ránézésre a halott eszköztől sem különböztethető meg.
+
 ## ⚙️ Működés
 
 ### 1. Első indulás – Wi-Fi konfiguráció
@@ -250,7 +268,9 @@ választ, és ez a hiba némán, a redundancia elvesztésével jelentkezne. A
    - Relé **bekapcsol** → router áramtalanítva
    - **90 másodperc** várakozás (RESET_PULSE)
    - Relé **kikapcsol** → router visszakap áramot
-   - **10 perc** várakozás (RESET_DELAY) – idő a router bootolásához
+   - **legfeljebb 10 perc** várakozás (RESET_DELAY) – idő a router bootolásához;
+     60 mp-enként megnézzük, hogy visszajött-e a hálózat és az internet, és ha
+     igen, itt azonnal továbblépünk
    - Wi-Fi újracsatlakozás
 2. Ha **4 router újraindítás** sem hozza vissza az internetet → deep sleep 1 órára,
    majd magától ébred és újrapróbálja. (A `maxfailureEvents = 5` a *reset esemény*
@@ -401,8 +421,9 @@ Amit ez hoz:
 | `SUCCESS_DELAY` | 1 perc | Várakozás sikeres teszt után |
 | `PROBE_DELAY` | 12s | Várakozás sikertelen teszt után (újrapróbálkozás előtt) |
 | `RESET_PULSE` | 90s | Router áramtalanítás időtartama |
-| `RESET_DELAY` | 10 perc | Várakozás a router reset után (bootolási idő) |
-| `firstStartDelay` | 10 perc | Első indítás utáni várakozás |
+| `RESET_DELAY` | **max.** 10 perc | Várakozás a router reset után (bootolási idő) – korábban véget ér, ha a hálózat és az internet is visszajött |
+| `firstStartDelay` | **max.** 10 perc | Első indítás utáni várakozás – ugyanígy korábban is véget érhet |
+| `ONLINE_PROBE_INTERVAL_MS` | 60 mp | Ilyen sűrűn nézzük a két hosszú várakozás alatt, hogy vége lehet-e |
 | `maxfailureEvents` | 5 | A reset esemény számláló határa → **4** tényleges router újraindítás után deep sleep |
 | `wifi_maxRetries` | 3 | Wi-Fi újracsatlakozási próbálkozások |
 | `wifiInterval` | 30s | Szünet a próbálkozások között |
@@ -422,7 +443,13 @@ Connected to: MyNetwork
 IP Address: 192.168.1.200
 Signal strength (RSSI): -45 dBm
 WIFI OK!
-Uptime: 0h 3m 1s
+Ping teszt futtatása (internet - 1.1.1.1)...
+Ping 1 sikeres.
+Ping 2 sikeres.
+✅ Ping teszt sikeres.
+Uptime: 0h 0m 2s
+First start wait end (halozat es internet visszajott).
+Uptime: 0h 0m 2s
 Beginning Test.
 Teszt ciklus index = 1
 Uptime: 0h 3m 1s
@@ -642,17 +669,39 @@ Egységes politika **minden** ágon: **3 próba, köztük 30 másodperc szünet*
 | Helyzet | Viselkedés |
 |---|---|
 | Nincs mentett SSID | Azonnal **AP beállító portál** |
-| Van SSID, de nem érhető el | **10 perc várakozás** (`firstStartDelay`), majd 3 próba → ha így sem megy: **AP portál** |
+| Van SSID, de nem érhető el | **legfeljebb 10 perc várakozás** (`firstStartDelay`), majd 3 próba → ha így sem megy: **AP portál** |
 
 A 10 perces várakozás a lényeg: áramszünet után az ESP másodpercek alatt
 elindul, a router viszont percekig bootol.
+
+**De nem várunk feleslegesen.** A várakozás alatt 60 mp-enként lefut egy
+kétlépcsős próba: (1) van-e Wi-Fi kapcsolat, (2) ha van, kimegy-e csomag az
+internetre (ping a `1.1.1.1`-re). Ha **mindkettő** sikerül, a várakozás azonnal
+véget ér, és jöhet a rendes tesztsorozat. Ha bármelyik elbukik, a várakozás
+szabályosan végigfut. Ugyanez a próba fut a router reset utáni `RESET_DELAY`
+alatt is – ott ráadásul az újracsatlakozási kört is megspórolja, hiszen a
+kapcsolatot épp az imént mértük.
+
+> **Miért ping, amikor az internettesztek szándékosan HTTP-t használnak?**
+> Mert itt más a tét. A ciklikus tesztnél egy hamis pozitív végzetes: befagyott
+> router-DNS mellett a ping megy, és az eszköz sosem indítaná újra a routert.
+> Itt viszont a ping legrosszabb esetben annyit ér el, hogy a várakozás
+> korábban ér véget – utána **azonnal a rendes HTTP tesztsorozat következik**,
+> ami a befagyott DNS-t így is elbukja. A hamis pozitív itt tehát nem elrejt
+> egy hibát, hanem hamarabb deríti ki. Cserébe a ping olcsó: nincs névfeloldás,
+> nincs TCP, kevés rádióidő.
+
+> **Flash kímélés.** A próba semmit nem ír a fájlrendszerre, és a benne lévő
+> `WiFi.begin()` sem ír NVS-be, mert a `setup()` `WiFi.persistent(false)`-t
+> hívott. A 60 mp-es köz így is korlátoz: egy 10 perces várakozás alatt
+> legfeljebb 10 próba fut.
 
 ### Működés közben megszakad a kapcsolat
 
 ```
 kapcsolatvesztés → 3 próba (30 mp szünetekkel)
                  → sikertelen → ROUTER ÚJRAINDÍTÁS (relé ki 90 mp, be)
-                 → 10 perc várakozás (RESET_DELAY)
+                 → max. 10 perc várakozás (RESET_DELAY, korán is végetérhet)
                  → 3 próba (30 mp szünetekkel)
                  → sikertelen → AP beállító portál
 ```
