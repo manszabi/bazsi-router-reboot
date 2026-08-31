@@ -7,6 +7,7 @@ ESP32-C3 alapú automatikus router újraindító rendszer. Az eszköz folyamatos
 - **Automatikus internetkapcsolat-figyelés** – öt HTTP teszt, öt különböző üzemeltető felé
 - **Automatikus router újraindítás** – relé segítségével áramtalanítja, majd visszakapcsolja a routert
 - **Wi-Fi Manager** – böngészőből konfigurálható SSID, jelszó, IP-cím és gateway
+- **Beépített beállító weboldal** – a programba fordítva, nincs feltöltendő fájlrendszer-tartalom
 - **LittleFS** – a beállítások áramszünet után is megmaradnak
 - **Deep Sleep védelem** – túl sok sikertelen próbálkozás után az ESP alvó módba lép (1 óra), majd újrapróbálkozik
 - **Fizikai gombok** – reset és Wi-Fi reset gombok debounce-szal
@@ -17,7 +18,7 @@ ESP32-C3 alapú automatikus router újraindító rendszer. Az eszköz folyamatos
 | Komponens | Leírás |
 |-----------|--------|
 | **Mikrokontroller** | ESP32-C3 (pl. XIAO ESP32-C3) |
-| **Relé modul** | 1 csatornás relé (router tápellátásának kapcsolására) |
+| **Relé modul** | 1 csatornás relé (router tápellátásának kapcsolására), a vezérlőbemenetén 22 kΩ lehúzó ellenállás a GND felé |
 | **LED #1** | Állapot LED (D4 pin) |
 | **LED #2** | Wi-Fi állapot LED (D3 pin) |
 | **Nyomógomb #1** | Reset gomb (D1 pin) – ESP újraindítás |
@@ -37,7 +38,25 @@ ESP32-C3 alapú automatikus router újraindító rendszer. Az eszköz folyamatos
 | `D1` | Reset / ébresztő gomb (INPUT_PULLUP) – RTC GPIO, deep sleepből is ébreszt |
 | `D3` | Wi-Fi állapot LED |
 | `D4` | Állapot LED |
-| `D5` | Relé vezérlés (router tápellátás) |
+| `D10` | Relé vezérlés (router tápellátás) – **külső 22 kΩ lehúzó a GND felé** |
+
+### LED jelzések
+
+| Státusz LED (`D4`) | Wi-Fi LED (`D3`) | Jelentés |
+|---|---|---|
+| be | be | Minden rendben, van Wi-Fi |
+| be | ki | Nincs Wi-Fi kapcsolat (pl. a router bootolására várunk) |
+| ki | ki | Alvás |
+| be | **villog 1 Hz** | **AP beállító mód** – várja a böngészőt |
+| **villog 2 Hz** | ki | **Router reset pulzus** – a router épp áram nélkül |
+| **együtt villog 5 Hz** | **együtt villog 5 Hz** | **Végzetes hiba** (LittleFS / konfig / watchdog) |
+| **felváltva villog 5 Hz** | **felváltva villog 5 Hz** | **Beragadt gomb** induláskor |
+
+A négy villogó jelzés szándékosan elkülönül. Az AP mód és a router reset csak
+az **egyik** LED-et villogtatja, más-más ütemben, és a másik LED állapota is
+eltér; a két hibajelzés mindkettőt villogtatja, gyorsabban – az egyik együtt,
+a másik ellenfázisban. A reset pulzus alatt azért villog a státusz LED, mert
+90 másodpercnyi sötét LED ránézésre a halott eszköztől sem különböztethető meg.
 
 ## ⚙️ Működés
 
@@ -131,17 +150,23 @@ Az eszköz három állapotban működik:
 
 #### Tesztelési módszerek (ciklikusan váltakoznak)
 
-| Ciklus index | Végpont | Üzemeltető | Elvárt válasz |
-|:---:|---|---|---|
-| 0 | `msftconnecttest.com/connecttest.txt` | Microsoft | `Microsoft Connect Test` |
-| 1 | `cp.cloudflare.com/generate_204` | Cloudflare | **204 No Content** |
-| 2 | `detectportal.firefox.com/success.txt` | Mozilla | `success` |
-| 3 | `nmcheck.gnome.org/check_network_status.txt` | GNOME / NetworkManager | `NetworkManager is online` |
-| 4 | `connectivitycheck.gstatic.com/generate_204` | Google | **204 No Content** |
+| Kiírt sorszám | `cycleIndex` | Végpont | Üzemeltető | Elvárt válasz |
+|:---:|:---:|---|---|---|
+| 1 | 0 | `msftconnecttest.com/connecttest.txt` | Microsoft | `Microsoft Connect Test` |
+| 2 | 1 | `cp.cloudflare.com/generate_204` | Cloudflare | **204 No Content** |
+| 3 | 2 | `detectportal.firefox.com/success.txt` | Mozilla | `success` |
+| 4 | 3 | `nmcheck.gnome.org/check_network_status.txt` | GNOME / NetworkManager | `NetworkManager is online` |
+| 5 | 4 | `connectivitycheck.gstatic.com/generate_204` | Google | **204 No Content** |
 
-> Öt index van, `0`–`4` (`MAX_CYCLE_INDEX`), és a 4-es bukása után indul a
+> **Két számozás, szándékosan.** A soros port és a `/log` oldal **1-től**
+> számol (`Teszt ciklus index = 1`…`5`), mert emberi olvasónak nincs „0-dik
+> teszt". A `cycleIndex` változó viszont marad **0-alapú**: a `0`–`4`
+> tartományhoz kötődik a végpontválasztó `if`-lánc és a `RESET_TRIGGER_CYCLE`
+> küszöb is. A kódban tehát `0`–`4`, a kimeneten `1`–`5`.
+>
+> Öt végpont van (`MAX_CYCLE_INDEX + 1`), és az ötödik bukása után indul a
 > router újraindítás. A `testInternetHTTP()` diszpécserében a Microsoft ága
-> `else`-ként szerepel, tehát a 0-s indexet is az szolgálja ki.
+> `else`-ként szerepel, tehát a `cycleIndex == 0`-t is az szolgálja ki.
 
 **Nincs internet = mind az öt teszt elbukik.** Öt különböző végpont, öt
 független üzemeltető, két ellenőrzési mód. Bármelyik siker nullázza a
@@ -160,10 +185,24 @@ egy téves reset ára ~11,5 perc kiesés, a plusz szigorúságé viszont csak
 > *fakenews-gambling-porn-social* változata sem – de a szűkebb, vendor-specifikus
 > listák eltérnek, ezért a sajátodat nézd meg. Egy blokkolt név `0.0.0.0`-ra
 > oldódik vagy NXDOMAIN-t ad, tehát az adott teszt **mindig elbukik**. Ez
-> önmagában nem okoz téves resetet – a 2-es indexig csak akkor jutunk el, ha a
-> 0-s és az 1-es is elbukott –, de elveszíted a redundancia egy részét. A soros
-> naplóban a `Teszt ciklus index = N` sor és a `/log` oldal `TEST FAIL`
-> bejegyzésének paramétere is megmondja, melyik végpont bukott el.
+> önmagában nem okoz téves resetet – a **3.** tesztre (Mozilla) csak akkor
+> kerül sor, ha az 1. és a 2. is elbukott –, de elveszíted a redundancia egy
+> részét. A soros naplóban a `Teszt ciklus index = N` sor és a `/log` oldal
+> `TEST FAIL` bejegyzésének paramétere is megmondja, melyik végpont bukott el
+> (mindkettő 1-alapú, a fenti táblázat szerint).
+
+> **A soros kimenet két száma, és hogy miért ott áll, ahol.**
+> A `Teszt ciklus index = N` a teszt **előtt** áll, mert azt mondja meg, melyik
+> végpont következik (`1`…`5`). A `Test failed. | Hibák száma = N / 5` viszont a
+> teszt **után**, mert az már az eredmény – hány egymás utáni bukás van, és hány
+> után jön a router újraindítása. (Korábban a hibaszámláló is a teszt előtt
+> állt, így a sorozat első tesztjénél mindig `0`-t mutatott.)
+>
+> **Sikeres teszt csak a `Successful Test` sort adja.** A `testInternetHTTP()`
+> siker esetén hallgat: sem a kapott törzset, sem külön nyugtázó sort nem ír ki.
+> Eltéréskor viszont kiírja a **kapott törzset** és a `Hamis érték!` sort – ott
+> ugyanis épp az a kérdés, mi jött vissza a várt válasz helyett (captive portál,
+> megváltozott végpont).
 
 #### Miért nincs ping az internettesztek között
 
@@ -229,7 +268,9 @@ választ, és ez a hiba némán, a redundancia elvesztésével jelentkezne. A
    - Relé **bekapcsol** → router áramtalanítva
    - **90 másodperc** várakozás (RESET_PULSE)
    - Relé **kikapcsol** → router visszakap áramot
-   - **10 perc** várakozás (RESET_DELAY) – idő a router bootolásához
+   - **legfeljebb 10 perc** várakozás (RESET_DELAY) – idő a router bootolásához;
+     60 mp-enként megnézzük, hogy visszajött-e a hálózat és az internet, és ha
+     igen, itt azonnal továbblépünk
    - Wi-Fi újracsatlakozás
 2. Ha **4 router újraindítás** sem hozza vissza az internetet → deep sleep 1 órára,
    majd magától ébred és újrapróbálja. (A `maxfailureEvents = 5` a *reset esemény*
@@ -263,15 +304,20 @@ az újrapróbálkozási körök száma (`rtcRetryRounds`, csak a deep sleepet é
 a watchdog-újraindulások számlálója és a 32 bejegyzéses diagnosztikai napló
 (mindkettő `RTC_NOINIT`, a resetet is túléli – csak az áramtalanítás törli).
 
-> ⚠️ **Hardver ajánlás a relére.** Deep sleep alatt az ESP32-C3 digitális lábai
-> (GPIO6–21) alapból nagyimpedanciás állapotba kerülnek. A firmware ezért
-> minden elalvás előtt **rögzíti a relé lábát** (`D5` = GPIO7) LOW-ra a
-> `gpio_hold_en()` + `gpio_deep_sleep_hold_en()` párossal, és ébredés után –
-> miután a lábat már maga hajtja – oldja fel, így a relé alvás alatt sem lebeg.
-> A relé vezérlőbemenetére **külső lehúzó ellenállás továbbra is ajánlott**
-> (aktív-HIGH modulnál 10 kΩ a GND felé): a bekapcsolás és a program indulása
-> közti ablakban a hold még nem él, és a szoftveres védelem esetleges hibája
-> ellen is ez az utolsó háló.
+> ⚠️ **Hardver: a relé lába és a lehúzó ellenállás.** A relé vezérlése a
+> `D10` = **GPIO10** lábon van, **22 kΩ lehúzó ellenállással a GND felé**.
+> (A korábbi `D5` = GPIO7 bekötés nem bizonyult stabilnak. A `D10` nem
+> strapping láb – a C3-on `GPIO2`, `GPIO8`, `GPIO9` az –, tehát a reset alatti
+> szintje a bootot nem befolyásolja.)
+>
+> Deep sleep alatt az ESP32-C3 digitális lábai (GPIO6–21, köztük a GPIO10)
+> alapból nagyimpedanciás állapotba kerülnek. A firmware ezért minden elalvás
+> előtt **rögzíti a relé lábát** LOW-ra a `gpio_hold_en()` +
+> `gpio_deep_sleep_hold_en()` párossal, és ébredés után – miután a lábat már
+> maga hajtja – oldja fel, így a relé alvás alatt sem lebeg.
+> A 22 kΩ lehúzó ettől függetlenül **nem elhagyható**: a bekapcsolás és a
+> program indulása közti ablakban a hold még nem él, és a szoftveres védelem
+> esetleges hibája ellen is ez az utolsó háló.
 > (Forrás: ESP-IDF `driver/gpio.h` – a `gpio_hold_en` C3-ra vonatkozó
 > megjegyzése és a `gpio_deep_sleep_hold_en` leírása.)
 
@@ -279,13 +325,15 @@ a watchdog-újraindulások számlálója és a 32 bejegyzéses diagnosztikai nap
 
 ```
 bazsi-router-reboot/
-├── bazsi_router_reboot.ino   # Fő Arduino sketch
-├── data/
-│   ├── wifimanager.html      # Wi-Fi beállító weboldal
-│   ├── style.css             # Weboldal stílus
-│   └── favicon.png           # Favicon
+├── bazsi_router_reboot.ino   # Fő Arduino sketch (a beállító weboldal is ebben van)
+├── partitions_custom.csv     # Egyedi partíciós tábla: OTA nélkül, 512 KiB LittleFS
 └── LICENSE                   # MIT License
 ```
+
+A Wi-Fi beállító weboldal a sketch `CONFIG_FORM` konstansában él, a flash
+`.rodata` szekciójában – nincs külön feltöltendő `data/` mappa. A LittleFS-re
+így csak a négy konfigurációs fájl kerül (`/ssid.txt`, `/pass.txt`, `/ip.txt`,
+`/gateway.txt`).
 
 ## 📦 Szükséges könyvtárak
 
@@ -311,10 +359,14 @@ bazsi-router-reboot/
 2. Telepítsd a szükséges könyvtárakat (Library Manager vagy kézi telepítés)
 3. Válaszd ki a board-ot: **ESP32-C3** (pl. *XIAO_ESP32C3*)
 4. Nyisd meg a `bazsi_router_reboot.ino` fájlt
-5. Töltsd fel a `data/` mappát a LittleFS-re:
-   - **Arduino IDE 2.x**: használj [LittleFS upload plugin](https://github.com/earlephilhower/arduino-littlefs-upload)-t
-   - Vagy: `Tools` → `ESP32 Sketch Data Upload`
+5. Másold a `partitions_custom.csv`-t a sketch mappájába **`partitions.csv`**
+   néven – a core a sketch melletti `partitions.csv`-t automatikusan használja.
+   (Ha inkább gyári sémát választanál a `Tools` → `Partition Scheme` menüből,
+   olyat válassz, amiben van SPIFFS/LittleFS partíció.)
 6. Töltsd fel a sketch-et az ESP-re
+
+Fájlrendszert **nem kell feltölteni**: a weboldal a programban van, a LittleFS-t
+az első indulás formázza meg magától.
 
 ### PlatformIO
 
@@ -328,7 +380,38 @@ lib_deps =
     ESP32Async/AsyncTCP @ ^3.5.0
     dvarrel/ESPping @ ^1.0.5
 board_build.filesystem = littlefs
+board_build.partitions = partitions_custom.csv
 ```
+
+## 🗂️ Partíciós tábla (`partitions_custom.csv`)
+
+A gyári Arduino sémák vagy két app-partíciót tartanak fenn az OTA-nak
+(`default.csv`: 2 × 1,25 MB), vagy ~1,5 MB fájlrendszert adnak. Ez a program
+egyiket sem használja: **OTA nincs benne** (USB-ről flashelünk), a LittleFS-en
+pedig összesen négy rövid szöveges fájl él. A weboldal a programban van, tehát
+a fájlrendszernek nem kell weblapot tárolnia.
+
+| Név | Típus | Cím | Méret | Mire |
+|---|---|---|---|---|
+| `nvs` | data / nvs | `0x9000` | 20 KiB | a core saját kulcs-érték tára |
+| `phy_init` | data / phy | `0xE000` | 4 KiB | rádió kalibrációs adatok |
+| `factory` | app / factory | `0x10000` | **3520 KiB (~3,44 MB)** | a program |
+| `spiffs` | data / spiffs | `0x380000` | **512 KiB** | LittleFS (`/ssid.txt`, `/pass.txt`, `/ip.txt`, `/gateway.txt`) |
+
+A tábla pontosan kitölti a XIAO ESP32-C3 4 MB-os flash-ét. Az app partíció
+kezdőcíme 64 KB-ra, a data partíciók 4 KB-ra igazítottak (a `0xF000`–`0x10000`
+közti 4 KB emiatt marad ki).
+
+Amit ez hoz:
+
+- a program **~3,44 MB**-ot kaphat 1,25 MB helyett,
+- az első indulás LittleFS-formázása 15–20 mp helyett **4–7 mp** (128 szektor
+  × 30–50 ms), ami a watchdog élesedése előtti szakaszt is lerövidíti,
+- cserébe **OTA frissítés nincs** – a program csak USB-n keresztül flashelhető.
+
+> A LittleFS partíció címkéje szándékosan `spiffs`: az Arduino core a
+> `LittleFS.begin()`-ben ezt a címkét keresi. A címke a formátumot nem
+> határozza meg, a partíció tartalma LittleFS.
 
 ## ⏱️ Időzítések
 
@@ -338,8 +421,9 @@ board_build.filesystem = littlefs
 | `SUCCESS_DELAY` | 1 perc | Várakozás sikeres teszt után |
 | `PROBE_DELAY` | 12s | Várakozás sikertelen teszt után (újrapróbálkozás előtt) |
 | `RESET_PULSE` | 90s | Router áramtalanítás időtartama |
-| `RESET_DELAY` | 10 perc | Várakozás a router reset után (bootolási idő) |
-| `firstStartDelay` | 10 perc | Első indítás utáni várakozás |
+| `RESET_DELAY` | **max.** 10 perc | Várakozás a router reset után (bootolási idő) – korábban véget ér, ha a hálózat és az internet is visszajött |
+| `firstStartDelay` | **max.** 10 perc | Első indítás utáni várakozás – ugyanígy korábban is véget érhet |
+| `ONLINE_PROBE_INTERVAL_MS` | 60 mp | Ilyen sűrűn nézzük a két hosszú várakozás alatt, hogy vége lehet-e |
 | `maxfailureEvents` | 5 | A reset esemény számláló határa → **4** tényleges router újraindítás után deep sleep |
 | `wifi_maxRetries` | 3 | Wi-Fi újracsatlakozási próbálkozások |
 | `wifiInterval` | 30s | Szünet a próbálkozások között |
@@ -359,11 +443,18 @@ Connected to: MyNetwork
 IP Address: 192.168.1.200
 Signal strength (RSSI): -45 dBm
 WIFI OK!
-Uptime: 0h 3m 1s
+Ping teszt futtatása (internet - 1.1.1.1)...
+Ping 1 sikeres.
+Ping 2 sikeres.
+✅ Ping teszt sikeres.
+Uptime: 0h 0m 2s
+First start wait end (halozat es internet visszajott).
+Uptime: 0h 0m 2s
 Beginning Test.
-Microsoft Connect Test
-Igaz érték!
+Teszt ciklus index = 1
+Uptime: 0h 3m 1s
 Successful Test
+
 SUCCESS_DELAY delay start.
 ```
 
@@ -373,10 +464,11 @@ SUCCESS_DELAY delay start.
 |---|---|
 | **Board package** | ESP32 Arduino **3.3.11** |
 | **Beágyazott ESP-IDF** | `release_v5.5` (`esp32-arduino-libs-idf-release_v5.5-b774170f`) |
-| **Board** | XIAO ESP32-C3 (`D0`=GPIO2, `D1`=GPIO3, `D3`=GPIO5, `D4`=GPIO6, `D5`=GPIO7) |
+| **Board** | XIAO ESP32-C3 (`D0`=GPIO2, `D1`=GPIO3, `D3`=GPIO5, `D4`=GPIO6, `D10`=GPIO10) |
 | **ESPAsyncWebServer** | ESP32Async fork, **3.12.0** |
 | **AsyncTCP** | ESP32Async fork, **3.5.0** |
 | **ESPping** | dvarrel, **1.0.5** |
+| **Partíciós séma** | `partitions_custom.csv` (OTA nélkül, 512 KiB LittleFS) |
 
 A firmware viselkedését meghatározó feltételezések ezen a konkrét verzión lettek
 ellenőrizve a core, illetve az ESP-IDF forrásában:
@@ -438,13 +530,27 @@ Ezért az `initWatchdog()` mindhármat kifejezetten beállítja:
 
 ### Mikor élesedik
 
-A watchdog a **LittleFS csatolása után, de a Wi-Fi indítása előtt** élesedik:
+A watchdog **a soros port beállása után azonnal** élesedik, még a
+gombellenőrzés és a LittleFS csatolása előtt – vagyis a `setup()` gyakorlatilag
+teljes egészében felügyelet alatt van:
 
-| Szakasz | Felügyelve? | Miért |
+| Szakasz | Felügyelve? | Megjegyzés |
 |---|:---:|---|
-| soros port, gombellenőrzés, LittleFS csatolás/**formázás** | nem | a `LittleFS.begin(true)` első indításkor formáz: ~1,5 MB partíció szektoronként 30–50 ms, összesen 15–20 mp. Ezt szándékosan kihagyjuk, hogy egy első bekapcsolás soha ne fusson watchdog resetbe |
-| `WiFi.persistent()`, `initWiFi()`, AP portál indítása | **igen** | a Wi-Fi init a legvalószínűbb lefagyási pont |
-| `loop()` | **igen** | |
+| `pinMode`-ok, relé hold feloldása, `Serial.begin()` + max. 3 mp várakozás | nem | ide még nem megy ki soros üzenet, tehát az `initWatchdog()` hibajelzése is elveszne |
+| gombellenőrzés, `checkWatchdogResets()` | **igen** | a beragadt gomb 3 mp-et villog, aztán deep sleep |
+| LittleFS csatolás / **formázás** | **igen** | lásd lent |
+| konfiguráció beolvasása | **igen** | négy rövid fájl |
+| `WiFi.persistent()`, `initWiFi()`, AP portál indítása | **igen** | a Wi-Fi init a legvalószínűbb lefagyási pont; a 20 mp-es várakozás magától etet |
+| `loop()` | **igen** | a core minden `loop()` körben etet (`loopTaskWDTEnabled`) |
+
+> **Miért fér bele a formázás?** A `LittleFS.begin(true)` első indításkor
+> formáz, etetés nélkül. A `partitions_custom.csv` 512 KiB-os partíciója
+> **128 szektor**: tipikusan 30–50 ms/szektor, azaz **4–7 mp**, és még a
+> szélsőségesen lassú, 400 ms/szektoros esetben is **~51 mp** – mindkettő a
+> 90 mp-es `WDT_TIMEOUT_MS` alatt marad. A korábbi, ~1,5 MB-os sémánál ez
+> 15–20 mp volt tipikusan, de a rossz esetben **153 mp**, azaz a timeout
+> fölött – **ezért volt ott indokolt kihagyni a formázást a felügyeletből, és
+> ezért fér bele most.** A kisebb partíció tette lehetővé ezt a változtatást.
 
 ### Mit fog el a hardver magától
 
@@ -563,17 +669,39 @@ Egységes politika **minden** ágon: **3 próba, köztük 30 másodperc szünet*
 | Helyzet | Viselkedés |
 |---|---|
 | Nincs mentett SSID | Azonnal **AP beállító portál** |
-| Van SSID, de nem érhető el | **10 perc várakozás** (`firstStartDelay`), majd 3 próba → ha így sem megy: **AP portál** |
+| Van SSID, de nem érhető el | **legfeljebb 10 perc várakozás** (`firstStartDelay`), majd 3 próba → ha így sem megy: **AP portál** |
 
 A 10 perces várakozás a lényeg: áramszünet után az ESP másodpercek alatt
 elindul, a router viszont percekig bootol.
+
+**De nem várunk feleslegesen.** A várakozás alatt 60 mp-enként lefut egy
+kétlépcsős próba: (1) van-e Wi-Fi kapcsolat, (2) ha van, kimegy-e csomag az
+internetre (ping a `1.1.1.1`-re). Ha **mindkettő** sikerül, a várakozás azonnal
+véget ér, és jöhet a rendes tesztsorozat. Ha bármelyik elbukik, a várakozás
+szabályosan végigfut. Ugyanez a próba fut a router reset utáni `RESET_DELAY`
+alatt is – ott ráadásul az újracsatlakozási kört is megspórolja, hiszen a
+kapcsolatot épp az imént mértük.
+
+> **Miért ping, amikor az internettesztek szándékosan HTTP-t használnak?**
+> Mert itt más a tét. A ciklikus tesztnél egy hamis pozitív végzetes: befagyott
+> router-DNS mellett a ping megy, és az eszköz sosem indítaná újra a routert.
+> Itt viszont a ping legrosszabb esetben annyit ér el, hogy a várakozás
+> korábban ér véget – utána **azonnal a rendes HTTP tesztsorozat következik**,
+> ami a befagyott DNS-t így is elbukja. A hamis pozitív itt tehát nem elrejt
+> egy hibát, hanem hamarabb deríti ki. Cserébe a ping olcsó: nincs névfeloldás,
+> nincs TCP, kevés rádióidő.
+
+> **Flash kímélés.** A próba semmit nem ír a fájlrendszerre, és a benne lévő
+> `WiFi.begin()` sem ír NVS-be, mert a `setup()` `WiFi.persistent(false)`-t
+> hívott. A 60 mp-es köz így is korlátoz: egy 10 perces várakozás alatt
+> legfeljebb 10 próba fut.
 
 ### Működés közben megszakad a kapcsolat
 
 ```
 kapcsolatvesztés → 3 próba (30 mp szünetekkel)
                  → sikertelen → ROUTER ÚJRAINDÍTÁS (relé ki 90 mp, be)
-                 → 10 perc várakozás (RESET_DELAY)
+                 → max. 10 perc várakozás (RESET_DELAY, korán is végetérhet)
                  → 3 próba (30 mp szünetekkel)
                  → sikertelen → AP beállító portál
 ```
@@ -656,8 +784,9 @@ beírt adatok sem vesznek el.
 ## 🔒 Biztonság
 
 - A LittleFS-en tárolt Wi-Fi adatok (`/ssid.txt`, `/pass.txt`, `/ip.txt`,
-  `/gateway.txt`) **nem érhetők el a webszerveren keresztül** – a beállító
-  portál csak a `/`, `/style.css` és `/favicon.png` útvonalakat szolgálja ki.
+  `/gateway.txt`) **nem érhetők el a webszerveren keresztül** – a portál a
+  fájlrendszerről semmit nem szolgál ki, a `/` és a `/log` tartalma is a
+  programból megy ki.
 - A jelszó soha nem kerül ki nyílt szövegként a soros portra, csak a hossza.
 - Az AP jelszava (`12345678`) a forráskódban van; éles használat előtt
   érdemes lecserélni az `AP_PASSWORD` konstansban. A hosszát `static_assert`

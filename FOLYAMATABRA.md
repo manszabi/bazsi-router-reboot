@@ -48,7 +48,8 @@ stateDiagram-v2
 flowchart TD
     PWR([Bekapcsolás / reset / ébredés]) --> PINS["GPIO-k beállítása<br>relé = LOW, státusz LED = HIGH<br>relé hold feloldása (gpio_hold_dis)"]
     PINS --> SER["Serial indítása<br>max 3 s várakozás + 0,5 s CDC-beállás"]
-    SER --> STUCK{"Beragadt gomb?<br>reset (D1) vagy wifireset (D0) = LOW"}
+    SER --> WDT["initWatchdog()<br>TWDT: 90 s, trigger_panic = true<br>a loop task feliratkoztatva<br>innentől a setup() is felügyelt"]
+    WDT --> STUCK{"Beragadt gomb?<br>reset (D1) vagy wifireset (D0) = LOW"}
     STUCK -->|igen| SBLOG["EV_BOOT + EV_STUCK_BUTTON naplózása<br>(csak az első körben – az ismétlődő<br>60 s-os ébredések némák)"]
     SBLOG --> SBLINK["3 s: a két LED FELVÁLTVA villog"]
     SBLINK --> SB60["Deep sleep 60 s<br>csak timer ébresztés, gomb NEM<br>(boot loop ellen)"]
@@ -56,12 +57,11 @@ flowchart TD
     STUCK -->|nem| BOOTLOG["EV_BOOT naplózása"]
     BOOTLOG --> WCHK{"checkWatchdogResets()<br>rendellenes reset volt?<br>(TASK_WDT / INT_WDT / PANIC / LOCKUP)"}
     WCHK -->|"igen, sorozatban a 3."| FATAL["enterFatal()<br>MODE_FATAL, EV_FATAL(3)"]
-    WCHK -->|"nem, vagy még 3 alatt"| FS{"initLittleFS()<br>begin(formatOnFail = true)"}
+    WCHK -->|"nem, vagy még 3 alatt"| FS{"initLittleFS()<br>begin(formatOnFail = true)<br>formázás: 128 szektor, 4-7 s"}
     FS -->|"csatolás sikertelen"| FATAL2["enterFatal()<br>EV_FATAL(1)"]
     FS -->|ok| CFG{"Konfig olvasása:<br>/ssid.txt /pass.txt /ip.txt /gateway.txt<br>(jelszó: v1 hexa dekódolás)"}
     CFG -->|"fájl létezik, de olvashatatlan"| FATAL3["enterFatal()<br>EV_FATAL(2)"]
-    CFG -->|"ok vagy hiányzó fájl"| WDT["initWatchdog()<br>TWDT: 90 s, trigger_panic = true<br>a loop task feliratkoztatva"]
-    WDT --> PERS["WiFi.persistent(false)"]
+    CFG -->|"ok vagy hiányzó fájl"| PERS["WiFi.persistent(false)"]
     PERS --> ISFATAL{MODE_FATAL?}
     ISFATAL -->|igen| TOLOOP([loop: hibajelzés])
     ISFATAL -->|nem| WIFI{"initWiFi()<br>statikus IP ha érvényes, különben DHCP<br>csatlakozás max 20 s"}
@@ -78,17 +78,22 @@ flowchart TD
 ## 3. First start – türelmi idő induláskor
 
 Áramszünet után a router lassabban bootol, mint az ESP; ezért mentett SSID
-mellett az eszköz nem megy azonnal AP módba.
+mellett az eszköz nem megy azonnal AP módba. A 10 perc **felső korlát**:
+60 másodpercenként megnézzük, hogy visszajött-e a hálózat és az internet, és
+ha mindkettő megvan, a várakozás azonnal véget ér.
 
 ```mermaid
 flowchart TD
-    IN([SSID mentve, de a WiFi nem jött össze]) --> WAIT{"Eltelt már 10 perc?<br>(firstStartDelay)"}
+    IN([SSID mentve, de a WiFi nem jött össze]) --> PRB{"60 s-onként: onlineProbe()<br>1. WiFi.status() == WL_CONNECTED<br>2. ping 1.1.1.1 (fix IP, DNS nélkül)"}
+    PRB -->|"mindkettő OK"| EARLY["firstStart AZONNAL lezárva<br>(nem várjuk ki a maradékot)"]
+    EARLY --> DONE
+    PRB -->|"bármelyik bukik"| WAIT{"Eltelt már 10 perc?<br>(firstStartDelay)"}
     WAIT -->|nem| BACK([vissza a loop-ba<br>gombok és watchdog élnek])
     WAIT -->|igen| REC{"reconnectWifi()<br>3 próba, 30 s szünetekkel<br>(próbánként 20 s timeout)"}
     REC -->|siker| DONE["firstStart lezárva<br>normál monitor üzem (4. ábra)"]
     REC -->|sikertelen| AUTH{"WL_CONNECT_FAILED?<br>(hitelesítési hiba)"}
     AUTH -->|igen| GU["wifiGiveUp() (6. ábra)"]
-    AUTH -->|nem| RST{"routerResetAndRetry():<br>relé 90 s ki + 10 perc bootvárás<br>+ reconnectWifi()"}
+    AUTH -->|nem| RST{"routerResetAndRetry():<br>relé 90 s ki + max 10 perc bootvárás<br>(60 s-onként onlineProbe, korai kilépéssel)<br>+ reconnectWifi()"}
     RST -->|siker| DONE
     RST -->|sikertelen| GU
 ```
@@ -105,7 +110,7 @@ flowchart TD
     MODE -->|MODE_FATAL| FB["Mindkét LED együtt villog (5 Hz)<br>gombok élnek"] --> F5{"5 perc letelt?"}
     F5 -->|igen| FSL["fatalSleep() – EV_SLEEP(4)<br>alvás timer NÉLKÜL"]
     F5 -->|nem| L
-    MODE -->|MODE_CONFIG| APT{"5 perc tétlenség,<br>nincs mentés, nincs restart?"}
+    MODE -->|MODE_CONFIG| APB["Wi-Fi LED villog 1 Hz<br>státusz LED végig be"] --> APT{"5 perc tétlenség,<br>nincs mentés, nincs restart?"}
     APT -->|igen| ASL["apSleep() – EV_SLEEP(3)<br>alvás timer NÉLKÜL"]
     APT -->|nem| L
     MODE -->|MODE_MONITOR| FST{firstStart?}
@@ -157,9 +162,12 @@ flowchart TD
     GWL --> CNT["resetEvents++<br>EV_ROUTER_RESET"]
     CNT --> MX{"resetEvents >= 5?"}
     MX -->|"igen (már 4 reset volt)"| NFS["internetFailSleep()<br>EV_SLEEP(2)<br>deep sleep 1 óra"]
-    MX -->|nem| P1["Relé = HIGH: router áram nélkül<br>90 s (RESET_PULSE)<br>mindkét LED sötét"]
-    P1 --> P2["Relé = LOW: router bootol<br>10 perc várakozás (RESET_DELAY)<br>gombok + watchdog élnek"]
-    P2 --> P3["WiFi.disconnect(true)<br>reconnectWifi(): 3 próba, 30 s szünet<br>(a statikus IP/DNS újra beáll)"]
+    MX -->|nem| P1["Relé = HIGH: router áram nélkül<br>90 s (RESET_PULSE)<br>státusz LED VILLOG 2 Hz, Wi-Fi LED sötét"]
+    P1 --> P2["Relé = LOW: router bootol<br>max 10 perc várakozás (RESET_DELAY)<br>gombok + watchdog élnek"]
+    P2 --> PRB{"60 s-onként: onlineProbe()<br>Wi-Fi kapcsolat ÉS ping 1.1.1.1"}
+    PRB -->|"mindkettő OK"| GW2
+    PRB -->|"még nem, és letelt a 10 perc"| P3["WiFi.disconnect(true)<br>reconnectWifi(): 3 próba, 30 s szünet<br>(a statikus IP/DNS újra beáll)"]
+    PRB -->|"még nem, és van hátra idő"| P2
     P3 -->|sikertelen| GU["wifiGiveUp() (6. ábra)"]
     P3 -->|siker| GW2{"A gateway továbbra<br>sem pingelhető?"}
     GW2 -->|igen| APX["EV_GW_UNREACHABLE(2) + EV_AP_MODE(4)<br>startConfigPortal()<br>(valószínűleg rossz a statikus IP)"]
@@ -191,10 +199,10 @@ reset + 10 perc bootvárás + 3 próba), a körök között 1 óra alvás:
 
 ```mermaid
 flowchart TD
-    IN([startConfigPortal]) --> AP["WIFI_AP mód<br>SSID: ESP-ESP32-C3, jelszó: 12345678<br>végpontok: GET / , /style.css, /favicon.png,<br>/ping, /log és POST /"]
+    IN([startConfigPortal]) --> AP["WIFI_AP mód<br>SSID: ESP-ESP32-C3, jelszó: 12345678<br>végpontok: GET / , /ping, /log és POST /"]
     AP --> IDLE["5 perces tétlenségi visszaszámlálás<br>MINDEN kérés (404 is) újraindítja;<br>a nyitott lap 60 s-onként /ping-el"]
     IDLE --> REQ{Kérés típusa}
-    REQ -->|"GET /"| FORM["wifimanager.html a LittleFS-ről,<br>ha nincs: beépített tartalék űrlap"]
+    REQ -->|"GET /"| FORM["Beépített beállító űrlap (CONFIG_FORM)<br>a flashből; a LittleFS-ről semmit<br>nem szolgálunk ki"]
     REQ -->|"GET /log"| LOG["Diagnosztikai napló:<br>reset ok, számlálók, 32 esemény"]
     REQ -->|"POST /"| VAL{"1. FÁZIS - validálás:<br>SSID 1-32 (trim), jelszó max 63 (trim),<br>IP és gateway: IPv4, nem 0.0.0.0, trim,<br>statikus IP CSAK párban"}
     VAL -->|hiba| E500["500 + konkrét indok<br>SEMMI nem íródik ki, a futó konfig<br>sem változik, NINCS újraindítás"]

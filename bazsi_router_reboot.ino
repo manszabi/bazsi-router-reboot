@@ -43,14 +43,16 @@ const char PARAM_GATEWAY[] = "gateway";
   "document.onvisibilitychange=()=>document.hidden||f()</script>"
 const char KEEPALIVE_JS[] = KEEPALIVE_JS_LIT;
 
-// Tartalék űrlap arra az esetre, ha a data/ mappa nincs feltöltve a LittleFS-re.
-// Flashben él, RAM-ot nem foglal.
-const char FALLBACK_FORM[] =
+// A beállító űrlap. Programba építve él, a flash .rodata szekciójában: nincs
+// külön feltöltendő data/ mappa, és a LittleFS-re csak a négy konfigurációs
+// fájl kerül. Így a fájlrendszer állapotától FÜGGETLENÜL mindig van használható
+// űrlap - korábban egy elfelejtett LittleFS-feltöltés konfigurálhatatlanná
+// tette az eszközt.
+const char CONFIG_FORM[] =
   "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
   "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
   "<title>ESP Wi-Fi Manager</title></head><body>"
   "<h2>ESP Wi-Fi Manager</h2>"
-  "<p><b>Figyelem:</b> a data/ mappa nincs feltoltve a LittleFS-re.</p>"
   "<form action=\"/\" method=\"POST\">"
   "SSID <input name=\"ssid\" maxlength=\"32\" required><br>"
   "Password <input name=\"pass\" type=\"password\" maxlength=\"63\"><br>"
@@ -98,7 +100,17 @@ constexpr uint8_t ledPin = D4;
 // wifi ok led
 constexpr uint8_t wifiledPin = D3;
 // Set RELAY pin, to router
-constexpr uint8_t relayPin = D5;
+//
+// HARDVER: D10 = GPIO10, KULSO 22k LEHUZO ELLENALLASSAL a GND fele.
+// A korabbi D5 = GPIO7 bekotes nem volt stabil. Amit a D10 ad:
+//   - nem strapping lab (a C3-on GPIO2, GPIO8, GPIO9 az), tehat a reset
+//     alatti szintje a bootot nem befolyasolja;
+//   - tovabbra is a digitalis pad tartomanyban (GPIO6-21) van, igy az alvas
+//     alatti rogziteshez ugyanaz a gpio_hold_en() + gpio_deep_sleep_hold_en()
+//     paros kell, mint eddig (lasd holdRelayForSleep()).
+// A 22k lehuzo NEM elhagyhato: a hold a bekapcsolas es a program indulasa
+// kozti ablakban meg nem el, addig a pad nagyimpedanciasan lebegne.
+constexpr uint8_t relayPin = D10;
 // Set reset pin, esp wifireset pin
 //
 // FIGYELEM (hardver): a D0 = GPIO2 strapping lab! A chip-reset alatti
@@ -159,6 +171,13 @@ constexpr uint32_t FATAL_SLEEP_AFTER_MS = 5 * 60 * 1000;
 // Beragadt gomb jelzése elalvás előtt: a két LED FELVÁLTVA villog, hogy meg
 // lehessen különböztetni a végzetes hibától, ahol EGYÜTT villognak.
 constexpr uint32_t STUCK_BLINK_MS = 3000;
+// AP beállító mód: a Wi-Fi LED villog 1 Hz-cel, a státusz LED végig VILÁGÍT.
+// Lassabb a végzetes hiba 5 Hz-énél, hogy össze ne lehessen téveszteni vele.
+constexpr uint32_t AP_BLINK_MS = 500;
+// Router reset pulzus: a státusz LED villog 2 Hz-cel, a Wi-Fi LED KI marad
+// (a router áram nélkül van, kapcsolat sincs). A két villogó jelzés így a
+// villogó LED-ről és a sebességről is megkülönböztethető.
+constexpr uint32_t RESET_BLINK_MS = 250;
 // Watchdog timeout. Nagyobb kell, mint a leghosszabb olyan blokkolás, amit NEM
 // tudunk etetni - ez a http.GET(). A rossz eset NEM a szerver hallgatasa
 // (5 mp connect + 10 mp valasz = 15 mp), hanem a HALOTT DNS, mert a
@@ -185,6 +204,24 @@ constexpr uint32_t RESTART_GRACE_MS = 2000;  // válasz kiküldése újraindít�
 
 constexpr uint64_t SLEEP_DURATION_US = 3600ULL * 1000000ULL;      // 1 óra
 constexpr uint64_t STUCK_BUTTON_SLEEP_US = 60ULL * 1000000ULL;    // 60 másodperc
+
+// A hosszú várakozások (firstStartDelay, RESET_DELAY) korai lezárása.
+//
+// Mindkét várakozás arra való, hogy a router bootolására időt hagyjunk - de ha
+// a router hamarabb feláll, felesleges a maradékot kivárni. Ennyi időnként
+// megnézzük, hogy visszajött-e a hálózat ÉS az internet; ha mindkettő megvan,
+// a várakozás azonnal véget ér. Ha nem, a várakozás szabályosan végigfut.
+//
+// MIÉRT 60 mp? Egy router bootolása 1-3 perc, tehát ennél sűrűbb kérdezés nem
+// hozna érdemben korábbi kilépést, viszont rádiózna. Egy 10 perces várakozás
+// alatt így legfeljebb 10 próba fut - és mivel a Wi-Fi újracsatlakozás a
+// WiFi.persistent(false) mellett NEM ír NVS-t, ez a flasht sem terheli.
+constexpr uint32_t ONLINE_PROBE_INTERVAL_MS = 60 * 1000;
+// A korai kilépés ping célpontja: fix IP, hogy a névfeloldás ne számítson -
+// itt csak azt kérdezzük, van-e út kifelé. (Cloudflare.) Az IPAddress ~28
+// bájt és virtuális, ezért itt csak a négy oktett él, a cím a hívás helyén
+// jön létre.
+constexpr uint8_t PROBE_PING_IP[4] = { 1, 1, 1, 1 };
 
 // Teszt paraméterek
 constexpr uint8_t PING_ATTEMPTS = 4;
@@ -272,10 +309,17 @@ bool fsReady = false;
 // definíció szerint helyes - ott nincs mit ellenőrizni.
 bool staticConfigActive = false;
 
-// Fut-e már a watchdog. A setup() blokkoló ciklusai (pl. az initWiFi() 20 mp-es
-// várakozása) még az initWatchdog() ELŐTT futnak; ott a feedLoopWDT() hívás
-// ESP_ERR_NOT_FOUND-ot kapna ("task not found"), amire a core log_e()-t hív -
-// ez 20 mp alatt kétezer hibasort jelentene, ha be van kapcsolva a debug log.
+// A FAILURE_STATE-beli RESET_DELAY korai lezárásának órája. Nem a
+// TimingState-ben van, mert az a struct a valódi állapotgép idejeit tartja;
+// ez csak egy sebességkorlátozó számláló.
+uint32_t resetDelayProbeLast = 0;
+
+// Fut-e már a watchdog. Az initWatchdog() a setup() elején fut, de EL IS
+// BUKHAT (kikapcsolt TWDT, sikertelen feliratkozás) - és ilyenkor szándékosan
+// le is iratkozunk. Feliratkozás nélkül a feedLoopWDT() ESP_ERR_NOT_FOUND-ot
+// kapna ("task not found"), amire a core log_e()-t hív: bekapcsolt debug log
+// mellett ez 10 ms-onként egy hibasor a soros porton. Ezért etet minden
+// feedWatchdog() csak ezen a kapcsolón keresztül.
 bool watchdogEnabled = false;
 
 // Watchdog/panic miatti újraindulások számlálója.
@@ -300,7 +344,7 @@ enum EventCode : uint8_t {
   EV_BOOT = 1,          // param: reset ok (esp_reset_reason_t)
   EV_WIFI_OK = 2,       // param: kör sorszám, amiben sikerült
   EV_WIFI_LOST = 3,     // param: WiFi.status()
-  EV_TEST_FAIL = 4,     // param: teszt ciklus index
+  EV_TEST_FAIL = 4,     // param: teszt ciklus index, 1-alapú (1..5)
   EV_ROUTER_RESET = 5,  // param: hányadik reset esemény
   EV_AP_MODE = 6,       // param: ok (1=nincs SSID 2=auth hiba 3=2 nap letelt
                         //           4=statikus IP rossz: a gateway sem elerheto)
@@ -343,6 +387,9 @@ void resetbutton();
 void wifiresetbutton();
 void blockingDelay(uint32_t duration);
 void waitWithButtons(uint32_t duration);
+bool waitWithButtonsUntilOnline(uint32_t duration);
+bool onlineProbe();
+bool onlineProbeDue(uint32_t& lastProbe, uint32_t now);
 void waitForConfigWrite();
 void internetFailSleep();
 void fatalSleep();
@@ -546,8 +593,10 @@ bool initLittleFS() {
     // A begin() csak ESP_FAIL esetén próbál formázni. Ha a partíció egyáltalán
     // nincs meg, ESP_ERR_NOT_FOUND jön, és formázás nélkül elbukik.
     Serial.println("LittleFS mount FAILED (a formázási kísérlet után is).");
-    Serial.println("Valószínű ok: a kiválasztott partíciós séma nem tartalmaz");
-    Serial.println("'spiffs' cimkéju partíciót (Arduino IDE: Tools > Partition Scheme).");
+    Serial.println("Valószínű ok: a használt partíciós séma nem tartalmaz");
+    Serial.println("'spiffs' cimkéju partíciót. Használd a partitions_custom.csv-t,");
+    Serial.println("vagy az Arduino IDE-ben egy SPIFFS-et tartalmazó sémát");
+    Serial.println("(Tools > Partition Scheme).");
     return false;
   }
   Serial.print("LittleFS mounted, used ");
@@ -828,6 +877,75 @@ void waitWithButtons(uint32_t duration) {
   }
 }
 
+// Vissza van-e minden? Két lépés, ebben a sorrendben:
+//   1. van-e Wi-Fi kapcsolat,
+//   2. ha van: kimegy-e csomag az internetre (ping egy fix IP-re).
+// Csak akkor igaz, ha MINDKETTŐ sikerül. Ezt kizárólag a hosszú várakozások
+// korai lezárására használjuk.
+//
+// MIÉRT PING, amikor az internetteszt szándékosan HTTP? Mert itt más a tét.
+// A ciklikus tesztnél egy hamis pozitív VÉGZETES lenne: befagyott router-DNS
+// mellett a ping megy, és az eszköz sosem indítaná újra a routert (mérve: 41
+// bukott HTTP teszt mellett nulla reset). Itt viszont a ping legrosszabb
+// esetben annyit ér el, hogy a várakozás korábban ér véget - utána AZONNAL a
+// rendes HTTP tesztsorozat következik, ami a befagyott DNS-t így is elbukja.
+// Vagyis a hamis pozitív itt nem elrejt egy hibát, hanem hamarabb deríti ki.
+// Cserébe a ping olcsó: nincs névfeloldás, nincs TCP, kevés rádióidő.
+//
+// FLASH: ez a függvény semmit nem ír a fájlrendszerre, és a WiFi.begin() sem
+// ír NVS-be, mert a setup() WiFi.persistent(false)-t hívott. Az esemény-napló
+// RTC RAM-ban van. Tehát tetszőleges gyakorisággal ismételhető.
+bool onlineProbe() {
+  // 1. lépés: hálózat.
+  if (WiFi.status() != WL_CONNECTED) {
+    // Nem várunk rá és nem blokkolunk: egy aszinkron újracsatlakozást
+    // kezdeményezünk, a választ a KÖVETKEZŐ próba status()-a adja meg. A
+    // hívások közt egy teljes ONLINE_PROBE_INTERVAL_MS telik, ami sokszorosa
+    // egy asszociáció idejének - így nem szakítunk félbe egy futó próbát.
+    if (ssid[0] != '\0') {
+      WiFi.begin(ssid, pass);
+    }
+    return false;
+  }
+
+  // 2. lépés: internet.
+  const IPAddress target(PROBE_PING_IP[0], PROBE_PING_IP[1],
+                         PROBE_PING_IP[2], PROBE_PING_IP[3]);
+  return testInternetPing(target, "internet");
+}
+
+// Az onlineProbe() időzített változata: legfeljebb ONLINE_PROBE_INTERVAL_MS
+// -enként enged tényleges próbát, közte azonnal hamissal tér vissza. Így a
+// hívó minden körben hívhatja, a rádió mégsem dolgozik feleslegesen.
+// A lastProbe-ot a hívó tartja, mert minden várakozásnak saját órája van.
+bool onlineProbeDue(uint32_t& lastProbe, uint32_t now) {
+  if (now - lastProbe < ONLINE_PROBE_INTERVAL_MS) {
+    return false;
+  }
+  lastProbe = now;
+  return onlineProbe();
+}
+
+// Ugyanaz, mint a waitWithButtons(), de közben figyeli, hogy visszajött-e a
+// hálózat és az internet. Igazzal tér vissza, ha emiatt lépett ki korábban;
+// hamissal, ha a teljes időt kivárta.
+bool waitWithButtonsUntilOnline(uint32_t duration) {
+  const uint32_t start = millis();
+  uint32_t lastProbe = start;   // az első próba egy teljes intervallum múlva
+  while (millis() - start < duration) {
+    if (onlineProbeDue(lastProbe, millis())) {
+      printUptime();
+      Serial.println("A varakozas korabban veget er: halozat es internet OK.");
+      return true;
+    }
+    resetbutton();
+    wifiresetbutton();
+    feedWatchdog();
+    delay(BUTTON_POLL_MS);
+  }
+  return false;
+}
+
 // Fájlírás közben SEM aludni, SEM újraindulni nem szabad: a félbeszakadt
 // mentés sérült konfigurációt hagyna hátra. A mentést az aszinkron webszerver
 // taskja végzi, az alvásról és az újraindításról viszont a loop() dönt -
@@ -878,7 +996,7 @@ void waitForConfigWrite() {
 // pillanatnyi (LOW) kimenetét rögzíti, a gpio_deep_sleep_hold_en() pedig
 // érvényben tartja a holdot deep sleep alatt is (C3: driver/gpio.h, a
 // gpio_hold_en 3. megjegyzése). A router így alvás közben akkor sem veszít
-// áramot, ha a külső lehúzó ellenállás hiányzik. Az ellenállás ettől még
+// áramot, ha a külső lehúzó ellenállás hiányzik. A 22k lehúzó ettől még
 // kell: a hold a BEKAPCSOLÁS és a program indulása közti ablakban nem él.
 // A hold az ébredés (ami a C3-on reset) után is tart; a setup() oldja fel,
 // miután a lábat már maga hajtja LOW-ra - a relé így ébredéskor sem "villan".
@@ -1052,10 +1170,16 @@ bool reset_device() {
     Serial.println(testState.resetEvents);
     digitalWrite(relayPin, HIGH);
     Serial.println("Relay on.");
+    // A státusz LED a pulzus alatt VILLOG (lásd lent), nem csak kialszik:
+    // 90 mp sötét LED ránézésre nem különböztethető meg a halott eszköztől.
+    // A villogás azt mondja: "épp én kapcsoltam le a routert, dolgozom".
     digitalWrite(ledPin, LOW);
-    // A Wi-Fi LED is le: a router most áram nélkül van, tehát kapcsolat sincs.
-    // Enélkül a LED a teljes pulzus + RESET_DELAY alatt (~11,5 perc) azt
-    // mutatná, hogy van Wi-Fi. Visszakapcsolni a sikeres újracsatlakozás fogja.
+    timing.blinkLast = millis();
+    uiFlags.blinkOn = false;
+    // A Wi-Fi LED viszont KI marad: a router most áram nélkül van, tehát
+    // kapcsolat sincs. Enélkül a LED a teljes pulzus + RESET_DELAY alatt
+    // (~11,5 perc) azt mutatná, hogy van Wi-Fi. Visszakapcsolni a sikeres
+    // újracsatlakozás fogja.
     digitalWrite(wifiledPin, LOW);
     Serial.println("Reset_pulse delay.");
     testState.resetStep = 1;
@@ -1069,20 +1193,28 @@ bool reset_device() {
     Serial.print("Powering ON the router. Instance = ");
     Serial.println(testState.resetEvents);
     digitalWrite(relayPin, LOW);
-    digitalWrite(ledPin, HIGH);
+    digitalWrite(ledPin, HIGH);  // a villogás vége: a jelzés visszaáll folyamatosra
     printUptime();
     testState.resetStep = 0;
     return true;
+  }
+
+  // A pulzus alatt: a státusz LED villog 2 Hz-cel. A hívó ciklusa
+  // BUTTON_POLL_MS-enként hív minket, tehát ez elég sűrű ütem hozzá.
+  if (millis() - timing.blinkLast >= RESET_BLINK_MS) {
+    timing.blinkLast = millis();
+    uiFlags.blinkOn = !uiFlags.blinkOn;
+    digitalWrite(ledPin, uiFlags.blinkOn ? HIGH : LOW);
   }
   return false;
 }
 
 // FIGYELEM (hardver): deep sleep alatt az ESP32-C3 digitális lábai (GPIO6-21)
-// alapból nagyimpedanciás állapotba kerülnek. A relé lábát (D5 = GPIO7) ezért
-// alvás előtt a holdRelayForSleep() rögzíti LOW-ra (gpio_hold_en +
+// alapból nagyimpedanciás állapotba kerülnek. A relé lábát (D10 = GPIO10)
+// ezért alvás előtt a holdRelayForSleep() rögzíti LOW-ra (gpio_hold_en +
 // gpio_deep_sleep_hold_en) - így az alvás alatt sem lebeg. A relé
 // vezérlőbemenetére ettől függetlenül TOVÁBBRA IS kell külső lehúzó ellenállás
-// (aktív-HIGH modulnál 10k GND felé): a hold a bekapcsolás és a program
+// (a jelenlegi bekötésben 22k a GND felé): a hold a bekapcsolás és a program
 // indulása közti ablakban még nem él, és a szoftveres védelem hibája ellen
 // is ez az utolsó háló.
 // Közös elalvás. timerUs = 0 esetén NINCS időzített ébresztés: az eszköz
@@ -1162,7 +1294,12 @@ bool routerResetAndRetry() {
   }
   printUptime();
   Serial.println("Router reset kesz, varakozas a bootolasra.");
-  waitWithButtons(RESET_DELAY);
+  // Ha a router hamarabb feláll, nem várjuk ki a maradékot. A próba a
+  // kapcsolatot már igazolta, tehát a reconnectWifi() is felesleges.
+  if (waitWithButtonsUntilOnline(RESET_DELAY)) {
+    digitalWrite(wifiledPin, HIGH);
+    return true;
+  }
   return reconnectWifi();
 }
 
@@ -1535,9 +1672,9 @@ bool testInternetHTTP(const char* url, const char* expectedResponse) {
     // Ugyanezt a dontest hozza a NetworkManager is (nm-connectivity.c: 204 ->
     // "no content, as expected"; barmi mas -> portal).
     result = (httpCode == HTTP_CODE_NO_CONTENT);
-    if (result) {
-      Serial.println("204 No Content - Igaz érték!");
-    } else {
+    // Sikernel NEM irunk semmit: azt a hivo "Successful Test" sora mondja ki.
+    // A soros portra csak az kerul ki, ami hibakeresesnel szamit.
+    if (!result) {
       Serial.print("Error on HTTP request, code: ");
       Serial.println(httpCode);
     }
@@ -1562,9 +1699,14 @@ bool testInternetHTTP(const char* url, const char* expectedResponse) {
                          : readBounded(client, payload, want, HTTP_READ_TIMEOUT_MS);
       payload[n] = '\0';
       trimInPlace(payload);  // a záró CR/LF ne buktassa el az egyezést
-      Serial.println(payload);
       result = (strcmp(payload, expectedResponse) == 0);
-      Serial.println(result ? "Igaz érték!" : "Hamis érték!");
+      // Csak eltéréskor beszélünk. Ilyenkor viszont a KAPOTT törzs a
+      // legfontosabb információ: abból derül ki, hogy captive portál ült-e
+      // a kérésre, vagy az üzemeltető változtatta meg a választ.
+      if (!result) {
+        Serial.println(payload);
+        Serial.println("Hamis érték!");
+      }
     }
   } else {
     Serial.print("Error on HTTP request, code: ");
@@ -1647,7 +1789,29 @@ bool gatewayUnreachable() {
 }
 
 void handleFirstStart(uint32_t currentMillis) {
-  if (WiFi.status() != WL_CONNECTED) {
+  // A várakozás korai lezárása. A static a loop() körei közt tartja az órát;
+  // hidegindulásnál nulláról indul, ahogy a timing.startMillis is - az első
+  // próba tehát ~egy intervallummal az indulás után fut.
+  //
+  // FIGYELEM, VISELKEDÉSVÁLTOZÁS: korábban a puszta Wi-Fi kapcsolat is azonnal
+  // lezárta a várakozást. Most a ping is kell hozzá. Ha a hálózat megvan, de
+  // az internet nem, a firstStartDelay végigfut - épp erre való: áramszünet
+  // után a router lassabban indul, mint az ESP, és nem akarjuk 2 perccel a
+  // bekapcsolás után újraindítani.
+  static uint32_t lastProbe = 0;
+  static bool probeArmed = false;
+  if (!probeArmed) {
+    probeArmed = true;
+    // Az ELSŐ próba azonnal fusson le, ne csak egy intervallum múlva. A tipikus
+    // eset ugyanis az, hogy a kapcsolat MÁR él (a setup() initWiFi()-je
+    // sikerült) - ilyenkor semmi értelme 60 mp-et várni a továbblépéssel.
+    // Az előjel nélküli kivonás körbefordulása itt szándékos és helyes: a
+    // különbség akkor is pontosan egy intervallum, ha a millis() még kicsi.
+    lastProbe = currentMillis - ONLINE_PROBE_INTERVAL_MS;
+  }
+  const bool online = onlineProbeDue(lastProbe, currentMillis);
+
+  if (!online) {
     if (currentMillis - timing.startMillis < firstStartDelay) {
       if (!uiFlags.firstStartPrinted) {
         printUptime();
@@ -1676,6 +1840,11 @@ void handleFirstStart(uint32_t currentMillis) {
         return;
       }
     }
+  } else {
+    // A próba már igazolta a kapcsolatot: nincs mit újracsatlakoztatni.
+    printUptime();
+    Serial.println("First start wait end (halozat es internet visszajott).");
+    digitalWrite(wifiledPin, HIGH);
   }
   // Innentől a firstStart lezárult: a timing.startMillis-t senki nem olvassa
   // többé, ezért nincs értelme frissíteni.
@@ -1688,7 +1857,13 @@ void startConfigPortal() {
   }
   deviceMode = MODE_CONFIG;
   touchApDeadline();
-  digitalWrite(wifiledPin, LOW);  //led off
+  // Jelzés: a Wi-Fi LED villog (a villogtatást a loop() végzi), a státusz LED
+  // közben végig világít. Az utóbbi azért kell expliciten, mert ide a router
+  // reset ága felől is be lehet érkezni, ahol a státusz LED épp villogott.
+  digitalWrite(wifiledPin, LOW);
+  digitalWrite(ledPin, HIGH);
+  timing.blinkLast = millis();
+  uiFlags.blinkOn = false;
 
   Serial.println("Setting AP (Access Point)");
   char apName[32];
@@ -1700,29 +1875,16 @@ void startConfigPortal() {
   Serial.print("AP IP address: ");
   Serial.println(WiFi.softAPIP());
 
-  // Web Server Root URL. Ha a data/ mappa nem került fel a LittleFS-re, a
-  // send(FS&,...) hibaválaszt adna a kliensnek (a régi AsyncWebServerben a
-  // NULL beginResponse 501-et, az ESP32Async v3.x-ben már 404-et) - egyik sem
-  // használható űrlap, az eszköz konfigurálhatatlan lenne. Ezért beépített
-  // tartalék űrlapot adunk.
+  // Web Server Root URL. Az űrlap a programból megy ki, nem a LittleFS-ről:
+  // nincs se feltöltendő data/ mappa, se olyan eset, hogy a fájlrendszer
+  // állapota miatt ne lenne beállító felület.
+  //
+  // A LittleFS-ről szándékosan NEM szolgálunk ki semmit: egy serveStatic("/")
+  // a teljes fájlrendszert kiadta volna, azaz a /pass.txt-ben tárolt Wi-Fi
+  // jelszót is.
   server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
     touchApDeadline();
-    if (LittleFS.exists("/wifimanager.html")) {
-      request->send(LittleFS, "/wifimanager.html", "text/html");
-    } else {
-      request->send(200, "text/html", FALLBACK_FORM);
-    }
-  });
-
-  // Csak a weboldal statikus elemeit szolgáljuk ki. A serveStatic("/") a teljes
-  // LittleFS-t kiadta volna, azaz a /pass.txt-ben tárolt Wi-Fi jelszót is.
-  server.on("/style.css", HTTP_GET, [](AsyncWebServerRequest* request) {
-    touchApDeadline();
-    request->send(LittleFS, "/style.css", "text/css");
-  });
-  server.on("/favicon.png", HTTP_GET, [](AsyncWebServerRequest* request) {
-    touchApDeadline();
-    request->send(LittleFS, "/favicon.png", "image/png");
+    request->send(200, "text/html", CONFIG_FORM);
   });
   // Keep-alive. A nyitva lévő oldal 60 mp-enként meghívja, így az AP mód
   // visszaszámlálása addig tolódik, amíg tényleg ott vagy a lapon. A válasz
@@ -1802,7 +1964,8 @@ void startConfigPortal() {
       // Nincs értelme menteni: a fájlrendszer nem áll rendelkezésre.
       request->send(500, "text/plain",
                     "LittleFS nem elerheto, a beallitasok nem menthetok. "
-                    "Ellenorizd a particios semat (Tools > Partition Scheme).");
+                    "Ellenorizd a particios semat (partitions_custom.csv, "
+                    "'spiffs' cimkeju particio).");
       return;
     }
 
@@ -2081,6 +2244,28 @@ void setup() {
 
   printUptime();
 
+  // Innentől figyeli a watchdog a programot - a setup() maradékát is.
+  //
+  // MIÉRT ITT? Amint a soros port használható (hogy a hibaüzenete kimenjen),
+  // és minden más ELŐTT. Korábban a LittleFS csatolása után élesedett, mert a
+  // begin(true) első indításkor FORMÁZ, és az etetés nélküli formázás egy
+  // ~1,5 MB-os partíción 15-20 mp volt - az akkori sémával ez indokolt
+  // kihagyás volt. A partitions_custom.csv 512 KiB-os "spiffs" partíciója
+  // viszont csak 128 szektor: tipikusan 4-7 mp (30-50 ms/szektor), és még a
+  // szélsőségesen lassú, 400 ms/szektoros esetben is ~51 mp - mindkettő bőven
+  // a 90 mp-es WDT_TIMEOUT_MS alatt. Így a formázás már felügyelhető, és a
+  // setup() eddig védtelen szakaszai (gombellenőrzés, csatolás, konfig
+  // olvasás) is a watchdog alá kerülnek.
+  //
+  // A setup() etetés nélküli leghosszabb szakaszai innentől: a beragadt gomb
+  // 3 mp-es villogása (utána deep sleep) és a fenti formázás. Az initWiFi()
+  // 20 mp-es várakozása és minden blockingDelay() magától etet.
+  //
+  // A hardveres interrupt watchdog (ESP_INT_WDT, 300 ms) végig aktív, de az
+  // csak a "kemény" megállást fogja meg (letiltott megszakítás, megállt tick).
+  // A csendes, szabályosan blokkoló beragadást csak ez a task watchdog látja.
+  initWatchdog();
+
   // Mindkét gombot ellenőrizzük: ha bármelyik beragadt, nem indulunk el.
   // Spam-védelem: a beragadt gomb 60 mp-es alvás-ébredés köre percenként adna
   // egy BOOT + STUCK BUTTON párt, ami fél óra alatt kiszorítaná a körpufferből
@@ -2146,22 +2331,6 @@ void setup() {
   Serial.println(" chars password loaded");
   Serial.println(ipStr);
   Serial.println(gatewayStr);
-
-  // Innentől figyeli a watchdog a programot.
-  //
-  // MIÉRT ITT? A LittleFS csatolása UTÁN, de a Wi-Fi indítása ELŐTT.
-  //   - A LittleFS.begin(true) első indításkor FORMÁZ. Egy ~1,5 MB-os partíció
-  //     törlése szektoronként 30-50 ms, összesen 15-20 mp, etetés nélkül -
-  //     ezt szándékosan kihagyjuk a felügyeletből, hogy egy első bekapcsolás
-  //     soha ne futhasson watchdog resetbe.
-  //   - Az utána következő Wi-Fi init viszont a legvalószínűbb lefagyási pont,
-  //     és korábban semmi nem védte: az initWatchdog() a setup() legvégén volt,
-  //     tehát egy WiFi.begin() beragadás örökre megállította volna az eszközt.
-  //
-  // A hardveres interrupt watchdog (ESP_INT_WDT, 300 ms) végig aktív, de az
-  // csak a "kemény" megállást fogja meg (letiltott megszakítás, megállt tick).
-  // A csendes, szabályosan blokkoló beragadást csak ez a task watchdog látja.
-  initWatchdog();
 
   // Ne írjuk a hitelesítő adatokat minden WiFi.begin()-nél az NVS-be (flash kímélés)
   WiFi.persistent(false);
@@ -2232,6 +2401,15 @@ void loop() {
   }
 
   if (deviceMode == MODE_CONFIG) {
+    // A Wi-Fi LED villog: "beállító módban vagyok, várom a böngészőt". A
+    // státusz LED közben végig világít - a kettő együtt egyértelműen más,
+    // mint a végzetes hiba (mindkettő 5 Hz) vagy a router reset (csak a
+    // státusz LED, 2 Hz).
+    if (currentMillis - timing.blinkLast >= AP_BLINK_MS) {
+      timing.blinkLast = currentMillis;
+      uiFlags.blinkOn = !uiFlags.blinkOn;
+      digitalWrite(wifiledPin, uiFlags.blinkOn ? HIGH : LOW);
+    }
     // Konfig módban nincs internetteszt. A portál AP_TIMEOUT_MS tétlenségig
     // él; minden kérés és a folyamatban lévő mentés kitolja a határidőt.
     resetbutton();
@@ -2295,10 +2473,16 @@ void loop() {
       }
       printUptime();
       Serial.println("Beginning Test.");
+      // Csak az indexet írjuk ki ITT: az azt mondja meg, MELYIK végpont jön,
+      // tehát a teszt ELŐTT van értelme. A hibaszámláló viszont a teszt
+      // EREDMÉNYE - ezért az a "Test failed." sorra került. Korábban itt állt,
+      // így a sorozat első tesztjénél mindig "0"-t írt ki.
+      //
+      // A KIÍRÁS 1-alapú (1..5), a belső cycleIndex marad 0-alapú: a 0..4
+      // tartomány a végpontválasztó if-lánc és a RESET_TRIGGER_CYCLE
+      // küszöb miatt kötött. Emberi olvasónak viszont nincs "0-dik teszt".
       Serial.print("Teszt ciklus index = ");
-      Serial.print(testState.cycleIndex);
-      Serial.print(" | Hibák száma = ");
-      Serial.println(testState.failedCount);
+      Serial.println(testState.cycleIndex + 1);
 
       // Mind az ot teszt HTTP, mert az ICMP nem bizonyit sem nevfeloldast, sem
       // TCP-t: egy befagyott router-DNS mellett a ping tokeletesen megy, kozben
@@ -2330,10 +2514,18 @@ void loop() {
         // Csak a hibasorozat első tagját naplózzuk: a 12 mp-enként ismétlődő
         // bejegyzések különben percek alatt kiszorítanák a fontos eseményeket.
         if (testState.failedCount == 1) {
-          logEvent(EV_TEST_FAIL, (uint16_t)testState.cycleIndex);
+          // 1-alapú, hogy a /log oldal ugyanazt a számot mutassa, mint a
+          // soros port "Teszt ciklus index" sora.
+          logEvent(EV_TEST_FAIL, (uint16_t)(testState.cycleIndex + 1));
         }
         printUptime();
-        Serial.println("Test failed.");
+        // A már megnövelt számláló: ez a mostani bukással együtt hány
+        // egymás utáni sikertelen teszt van. A nevező az a darabszám, ami
+        // után a router újraindítása következik (mind az öt végpont bukott).
+        Serial.print("Test failed. | Hibák száma = ");
+        Serial.print(testState.failedCount);
+        Serial.print(" / ");
+        Serial.println(MAX_CYCLE_INDEX + 1);
         currentState = FAILURE_STATE;
       }
       // A tesztek percekig futhatnak, ezért friss időbélyeg kell.
@@ -2376,29 +2568,43 @@ void loop() {
           Serial.println("RESET_DELAY start in FAILURE_STATE.");
           timing.stateStart = millis();
           uiFlags.resetPrinted = true;
+          resetDelayProbeLast = millis();  // az első próba egy intervallum múlva
           break;                        // a RESET_DELAY a következő körökben telik
         }
 
-        if (millis() - timing.stateStart >= RESET_DELAY) {
-          printUptime();
-          Serial.println("RESET_DELAY end in FAILURE_STATE.");
-          Serial.println("Reconnect WIFI in FAILURE_STATE.");
-          WiFi.disconnect(true);
-          blockingDelay(100);
+        // A RESET_DELAY korai lezárása: ha a router hamarabb feláll, és az
+        // internet is megvan, nincs mire várni.
+        const bool earlyOnline = onlineProbeDue(resetDelayProbeLast, millis());
 
-          // Egységesen 3 próba 30 mp szünetekkel. A reconnectWifi() minden
-          // próbája teljes initWiFi(), ami újra alkalmazza a statikus IP/DNS
-          // konfigot - a disconnect(true) ugyanis eldobja a netifet.
-          if (!reconnectWifi()) {
-            printUptime();
-            Serial.println("A router reset utan sem jott vissza a WiFi.");
-            digitalWrite(wifiledPin, LOW);
-            wifiGiveUp();
-            break;
+        if (earlyOnline || millis() - timing.stateStart >= RESET_DELAY) {
+          printUptime();
+          if (earlyOnline) {
+            Serial.println("RESET_DELAY korai vege: halozat es internet OK.");
+          } else {
+            Serial.println("RESET_DELAY end in FAILURE_STATE.");
           }
 
-          printUptime();
-          Serial.println("WIFI OK in FAILURE_STATE.");
+          // Korai kilépéskor a kapcsolat MÁR él és mérve is van - a
+          // disconnect(true) épp azt bontaná le, amit az imént igazoltunk.
+          if (!earlyOnline) {
+            Serial.println("Reconnect WIFI in FAILURE_STATE.");
+            WiFi.disconnect(true);
+            blockingDelay(100);
+
+            // Egységesen 3 próba 30 mp szünetekkel. A reconnectWifi() minden
+            // próbája teljes initWiFi(), ami újra alkalmazza a statikus IP/DNS
+            // konfigot - a disconnect(true) ugyanis eldobja a netifet.
+            if (!reconnectWifi()) {
+              printUptime();
+              Serial.println("A router reset utan sem jott vissza a WiFi.");
+              digitalWrite(wifiledPin, LOW);
+              wifiGiveUp();
+              break;
+            }
+
+            printUptime();
+            Serial.println("WIFI OK in FAILURE_STATE.");
+          }
           digitalWrite(wifiledPin, HIGH);
 
           // A router megkapta az esélyét. Ha a gateway még mindig nem

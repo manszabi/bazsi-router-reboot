@@ -35,7 +35,7 @@ Az eszköz mindig pontosan egy üzemmódban van.
 | Van mentett SSID? | Viselkedés |
 |---|---|
 | **Nincs** | Azonnal `MODE_CONFIG` |
-| **Van** | **10 perc** várakozás (`firstStartDelay`), majd **3 próba** (köztük 30 mp) |
+| **Van** | **legfeljebb 10 perc** várakozás (`firstStartDelay`), majd **3 próba** (köztük 30 mp). A várakozás korábban véget ér, ha 60 mp-enkénti próbánál a hálózat **és** az internet is megvan |
 
 A 3 próba után a **hiba oka** dönt, nem az eltelt idő:
 
@@ -64,6 +64,12 @@ indulás → 10,0 perc  firstStartDelay várakozás
         → 60,0 perc  deep sleep
         = 85,5 perc / kör
 ```
+
+> A két 10 perces tétel **felső korlát**. A firmware 60 mp-enként megnézi, hogy
+> visszajött-e a hálózat és az internet, és ha igen, azonnal továbblép. Erre a
+> táblázatra ez mégsem hat: ha a hálózat végig halott – márpedig ez a szakasz
+> pontosan arról szól –, a próbák sosem sikerülnek, és a körök a fenti teljes
+> hosszukban futnak. A 46 órás türelem tehát változatlan.
 
 | | |
 |---|---|
@@ -129,7 +135,7 @@ Minden bejegyzés uptime bélyeget, egy eseménykódot és egy paramétert tarta
 | `BOOT` | az indulás oka (`esp_reset_reason()`) |
 | `WIFI OK` | hányadik újrapróbálkozási körben sikerült |
 | `WIFI LOST` | `WiFi.status()` a kiesés pillanatában |
-| `TEST FAIL` | a teszt ciklus indexe (csak a hibasorozat **első** tagja) |
+| `TEST FAIL` | a teszt sorszáma **1-alapon**, 1–5 (csak a hibasorozat **első** tagja) |
 | `ROUTER RESET` | hányadik reset esemény (1–4) |
 | `AP MODE` | 1 = nincs mentett SSID, 2 = hitelesítési hiba, 3 = letelt a 2 nap, 4 = a gateway sem érhető el |
 | `GW UNREACH` | 1 = a router reset előtt, 2 = a reset után is |
@@ -159,13 +165,17 @@ A `/log` oldal az aktuális állapotot is mutatja: reset ok, watchdog számlál�
 Mind az öt teszt HTTP, öt különböző üzemeltető felé. **Nincs internet = mind
 az öt elbukik**; bármelyik siker nullázza a számlálókat.
 
-| Ciklus | Végpont | Üzemeltető | Elvárás | Max. időtartam |
-|:---:|---|---|---|---|
-| 0 | `msftconnecttest.com/connecttest.txt` | Microsoft | `Microsoft Connect Test` | 15 / 33 mp |
-| 1 | `cp.cloudflare.com/generate_204` | Cloudflare | 204 | 15 / 33 mp |
-| 2 | `detectportal.firefox.com/success.txt` | Mozilla | `success` | 15 / 33 mp |
-| 3 | `nmcheck.gnome.org/check_network_status.txt` | GNOME | `NetworkManager is online` | 15 / 33 mp |
-| 4 | `connectivitycheck.gstatic.com/generate_204` | Google | 204 | 15 / 33 mp |
+| Kiírt sorszám | `cycleIndex` | Végpont | Üzemeltető | Elvárás | Max. időtartam |
+|:---:|:---:|---|---|---|---|
+| 1 | 0 | `msftconnecttest.com/connecttest.txt` | Microsoft | `Microsoft Connect Test` | 15 / 33 mp |
+| 2 | 1 | `cp.cloudflare.com/generate_204` | Cloudflare | 204 | 15 / 33 mp |
+| 3 | 2 | `detectportal.firefox.com/success.txt` | Mozilla | `success` | 15 / 33 mp |
+| 4 | 3 | `nmcheck.gnome.org/check_network_status.txt` | GNOME | `NetworkManager is online` | 15 / 33 mp |
+| 5 | 4 | `connectivitycheck.gstatic.com/generate_204` | Google | 204 | 15 / 33 mp |
+
+A soros port és a `/log` oldal a **kiírt sorszámmal** dolgozik (1–5); a
+`cycleIndex` változó marad 0-alapú, mert ahhoz kötődik a végpontválasztó
+`if`-lánc és a `RESET_TRIGGER_CYCLE` küszöb.
 
 A két szám a bukás két módja. **15 mp**, ha a névfeloldás megy, de a szerver
 hallgat: 5 mp connect + 10 mp válasz timeout. **33 mp**, ha maga a DNS halott
@@ -181,14 +191,18 @@ küldenie.
 névfeloldást: befagyott router-DNS mellett a ping megy, az internet mégsem
 elérhető. A ping csak a saját gateway ellenőrzésére maradt meg (8. pont).
 
-Sikeres teszt → minden számláló nullázódik, a ciklus 0-ról indul.
+Sikeres teszt → minden számláló nullázódik, a ciklus újra az 1. végponttal
+indul. A soros portra ilyenkor csak a `Successful Test` kerül ki: a
+`testInternetHTTP()` siker esetén nem írja ki sem a kapott törzset, sem külön
+nyugtázó sort. Eltéréskor viszont igen (a kapott törzs + `Hamis érték!`), mert
+ott az a kérdés, mi jött vissza a várt válasz helyett.
 
 ---
 
 ## 4. Az internet kiesik – router újraindítás
 
-Akkor indul, ha `cycleIndex > 3`, vagyis ha a 4-es indexű teszt (Google) is
-elbukott. Mivel a két számláló együtt lép (`failedCount == cycleIndex + 1`),
+Akkor indul, ha `cycleIndex > 3`, vagyis ha az **5. teszt** (Google,
+`cycleIndex == 4`) is elbukott. Mivel a két számláló együtt lép (`failedCount == cycleIndex + 1`),
 ez pontosan **5 egymás utáni sikertelen teszt** – de a feltétel szándékosan a
 **végpont-lefedettséget** mondja ki, nem az időt: mind az öt üzemeltetőt
 végig kell próbálni, hogy egyetlen szolgáltató kiesése soha ne látszódjon
@@ -213,10 +227,10 @@ a `SUCCESS_DELAY` hátralévő része, tehát a **legrosszabb felismerési idő
 
 | Lépés | Időtartam |
 |---|---|
-| Relé **be** → router áramtalanítva, státusz LED ki | |
+| Relé **be** → router áramtalanítva, státusz LED **villog 2 Hz** | 90 mp sötét LED ránézésre a halott eszköztől sem különbözne |
 | Áramtalanítás | **90 mp** (`RESET_PULSE`) |
 | Relé **ki** → router visszakap áramot, státusz LED be | |
-| Várakozás a router bootolására | **10 perc** (`RESET_DELAY`) |
+| Várakozás a router bootolására | **legfeljebb 10 perc** (`RESET_DELAY`) – 60 mp-enként megnézzük, hogy visszajött-e a hálózat és az internet; ha igen, a várakozás azonnal véget ér |
 | Wi-Fi újracsatlakozás: 3 próba, köztük 30 mp | max. ~2 perc |
 
 **Egy teljes reset ciklus:** 5 teszt (123–213 mp) + 90 mp + 10 perc +
@@ -265,7 +279,7 @@ internet nem, tehát érdemes később újrapróbálni.
 
 | Lépés | Időtartam |
 |---|---|
-| Wi-Fi LED ki | azonnal |
+| Wi-Fi LED **villog 1 Hz**, státusz LED végig **be** | azonnal |
 | **3 újracsatlakozási próba**, köztük 30 mp | max. ~2 perc |
 | Sikertelen → azonnal **router újraindítás** (4. pont szerint) | |
 
@@ -278,6 +292,7 @@ Nem várunk további teszt ciklusokat: ha nincs Wi-Fi, a tesztnek nincs értelme
 | Esemény | Időtartam |
 |---|---|
 | Portál elérhető: `192.168.4.1` | |
+| A beállító űrlap forrása | a programba fordítva (`CONFIG_FORM`), nincs feltöltendő `data/` mappa – a portál a LittleFS-ről semmit nem szolgál ki |
 | Tétlenség után deep sleep | **5 perc** (`AP_TIMEOUT_MS`) az utolsó kéréstől |
 | A nyitva lévő lap keep-alive-ja | **60 mp**-enként `GET /ping` (1 bájt válasz) |
 | Elfogadott IP / gateway | **csak IPv4**, nem `0.0.0.0`, és csak együtt |
@@ -361,7 +376,8 @@ történik, és soha nem tér vissza. Kívülről nézve a viselkedés azonos.
 | Paraméter | Érték |
 |---|---|
 | Timeout | **90 mp** |
-| Élesedés | a LittleFS csatolása után, a Wi-Fi indítása **előtt** |
+| Élesedés | a soros port beállása után **azonnal**, a gombellenőrzés és a LittleFS csatolása **előtt** |
+| Etetés nélküli leghosszabb `setup()`-szakasz | a LittleFS formázása: 4–7 mp (rossz esetben ~51 mp), 512 KiB = 128 szektor |
 | Leghosszabb etetés nélküli szakasz (mérve) | **33 mp** (egy halott DNS-be futó HTTP kérés; hallgató szerver mellett 15 mp) |
 | Etetés a hosszú várakozások alatt | ~10 ms-onként |
 | Timeoutkor | panic → újraindulás |
@@ -447,12 +463,14 @@ Minden alvás előtt a **relé `LOW`**, tehát a router kap áramot.
 > nem RTC-képes lábra teszi a reset gombot), az eszköz a „csak gombbal" alvások
 > esetén is armol egy 1 órás időzítőt – így nem válhat elérhetetlenné.
 
-> ⚠️ Deep sleep alatt az ESP32-C3 `GPIO6–21` lábai alapból nagyimpedanciásak.
-> A firmware ezért minden elalvás előtt **rögzíti a relé lábát LOW-ra**
-> (`gpio_hold_en` + `gpio_deep_sleep_hold_en`), és ébredés után – miután a
-> lábat már maga hajtja – oldja fel. Külső 10 kΩ lehúzó ellenállás a GND felé
-> **ettől még ajánlott** aktív-HIGH relémodulnál: a bekapcsolás és a program
-> indulása közti ablakban a hold még nem él.
+> ⚠️ A relé a `D10` = **GPIO10** lábon van, **22 kΩ lehúzó ellenállással a GND
+> felé** (a korábbi `D5` = GPIO7 bekötés nem volt stabil; a `D10` nem strapping
+> láb). Deep sleep alatt az ESP32-C3 `GPIO6–21` lábai – köztük a GPIO10 –
+> alapból nagyimpedanciásak. A firmware ezért minden elalvás előtt **rögzíti a
+> relé lábát LOW-ra** (`gpio_hold_en` + `gpio_deep_sleep_hold_en`), és ébredés
+> után – miután a lábat már maga hajtja – oldja fel. A 22 kΩ lehúzó ettől még
+> **nem elhagyható**: a bekapcsolás és a program indulása közti ablakban a hold
+> még nem él.
 
 ---
 
@@ -461,7 +479,13 @@ Minden alvás előtt a **relé `LOW`**, tehát a router kap áramot.
 | Státusz LED (`D4`) | Wi-Fi LED (`D3`) | Jelentés |
 |---|---|---|
 | be | be | Minden rendben, van Wi-Fi |
-| be | ki | Nincs Wi-Fi kapcsolat |
-| ki | ki | Router áramtalanítva (reset pulzus alatt), vagy alvás |
+| be | ki | Nincs Wi-Fi kapcsolat (pl. a router bootolására várunk) |
+| ki | ki | Alvás |
+| be | **villog 1 Hz** | **AP beállító mód** – várja a böngészőt (`AP_BLINK_MS`) |
+| **villog 2 Hz** | ki | **Router reset pulzus** – a router épp áram nélkül (`RESET_BLINK_MS`) |
 | **együtt villog 5 Hz** | **együtt villog 5 Hz** | **Végzetes hiba** (LittleFS / konfig / watchdog) |
 | **felváltva villog 5 Hz** | **felváltva villog 5 Hz** | **Beragadt gomb** induláskor |
+
+A négy villogó jelzés szándékosan elkülönül: az **AP mód** és a **router reset**
+csak az egyik LED-et villogtatja (a másik állapota is más), a két hibajelzés
+pedig mindkettőt, gyorsabban – az egyik együtt, a másik ellenfázisban.
