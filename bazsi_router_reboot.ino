@@ -312,7 +312,7 @@ enum EventCode : uint8_t {
   EV_BOOT = 1,          // param: reset ok (esp_reset_reason_t)
   EV_WIFI_OK = 2,       // param: kör sorszám, amiben sikerült
   EV_WIFI_LOST = 3,     // param: WiFi.status()
-  EV_TEST_FAIL = 4,     // param: teszt ciklus index
+  EV_TEST_FAIL = 4,     // param: teszt ciklus index, 1-alapú (1..5)
   EV_ROUTER_RESET = 5,  // param: hányadik reset esemény
   EV_AP_MODE = 6,       // param: ok (1=nincs SSID 2=auth hiba 3=2 nap letelt
                         //           4=statikus IP rossz: a gateway sem elerheto)
@@ -1549,9 +1549,9 @@ bool testInternetHTTP(const char* url, const char* expectedResponse) {
     // Ugyanezt a dontest hozza a NetworkManager is (nm-connectivity.c: 204 ->
     // "no content, as expected"; barmi mas -> portal).
     result = (httpCode == HTTP_CODE_NO_CONTENT);
-    if (result) {
-      Serial.println("204 No Content - Igaz érték!");
-    } else {
+    // Sikernel NEM irunk semmit: azt a hivo "Successful Test" sora mondja ki.
+    // A soros portra csak az kerul ki, ami hibakeresesnel szamit.
+    if (!result) {
       Serial.print("Error on HTTP request, code: ");
       Serial.println(httpCode);
     }
@@ -1576,9 +1576,14 @@ bool testInternetHTTP(const char* url, const char* expectedResponse) {
                          : readBounded(client, payload, want, HTTP_READ_TIMEOUT_MS);
       payload[n] = '\0';
       trimInPlace(payload);  // a záró CR/LF ne buktassa el az egyezést
-      Serial.println(payload);
       result = (strcmp(payload, expectedResponse) == 0);
-      Serial.println(result ? "Igaz érték!" : "Hamis érték!");
+      // Csak eltéréskor beszélünk. Ilyenkor viszont a KAPOTT törzs a
+      // legfontosabb információ: abból derül ki, hogy captive portál ült-e
+      // a kérésre, vagy az üzemeltető változtatta meg a választ.
+      if (!result) {
+        Serial.println(payload);
+        Serial.println("Hamis érték!");
+      }
     }
   } else {
     Serial.print("Error on HTTP request, code: ");
@@ -2298,13 +2303,16 @@ void loop() {
       }
       printUptime();
       Serial.println("Beginning Test.");
-      // Csak az indexet írjuk ki ITT: az azt mondja meg, MELYIK végpont jön
-      // (0..MAX_CYCLE_INDEX), tehát a teszt ELŐTT van értelme. A hibaszámláló
-      // viszont a teszt EREDMÉNYE - ezért az a "Test failed." sorra került.
-      // Korábban itt állt, így a sorozat első tesztjénél mindig "0"-t írt ki,
-      // és eggyel le volt maradva a tényleges állapothoz képest.
+      // Csak az indexet írjuk ki ITT: az azt mondja meg, MELYIK végpont jön,
+      // tehát a teszt ELŐTT van értelme. A hibaszámláló viszont a teszt
+      // EREDMÉNYE - ezért az a "Test failed." sorra került. Korábban itt állt,
+      // így a sorozat első tesztjénél mindig "0"-t írt ki.
+      //
+      // A KIÍRÁS 1-alapú (1..5), a belső cycleIndex marad 0-alapú: a 0..4
+      // tartomány a végpontválasztó if-lánc és a RESET_TRIGGER_CYCLE
+      // küszöb miatt kötött. Emberi olvasónak viszont nincs "0-dik teszt".
       Serial.print("Teszt ciklus index = ");
-      Serial.println(testState.cycleIndex);
+      Serial.println(testState.cycleIndex + 1);
 
       // Mind az ot teszt HTTP, mert az ICMP nem bizonyit sem nevfeloldast, sem
       // TCP-t: egy befagyott router-DNS mellett a ping tokeletesen megy, kozben
@@ -2336,7 +2344,9 @@ void loop() {
         // Csak a hibasorozat első tagját naplózzuk: a 12 mp-enként ismétlődő
         // bejegyzések különben percek alatt kiszorítanák a fontos eseményeket.
         if (testState.failedCount == 1) {
-          logEvent(EV_TEST_FAIL, (uint16_t)testState.cycleIndex);
+          // 1-alapú, hogy a /log oldal ugyanazt a számot mutassa, mint a
+          // soros port "Teszt ciklus index" sora.
+          logEvent(EV_TEST_FAIL, (uint16_t)(testState.cycleIndex + 1));
         }
         printUptime();
         // A már megnövelt számláló: ez a mostani bukással együtt hány

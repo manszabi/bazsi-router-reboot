@@ -129,7 +129,7 @@ Minden bejegyzés uptime bélyeget, egy eseménykódot és egy paramétert tarta
 | `BOOT` | az indulás oka (`esp_reset_reason()`) |
 | `WIFI OK` | hányadik újrapróbálkozási körben sikerült |
 | `WIFI LOST` | `WiFi.status()` a kiesés pillanatában |
-| `TEST FAIL` | a teszt ciklus indexe (csak a hibasorozat **első** tagja) |
+| `TEST FAIL` | a teszt sorszáma **1-alapon**, 1–5 (csak a hibasorozat **első** tagja) |
 | `ROUTER RESET` | hányadik reset esemény (1–4) |
 | `AP MODE` | 1 = nincs mentett SSID, 2 = hitelesítési hiba, 3 = letelt a 2 nap, 4 = a gateway sem érhető el |
 | `GW UNREACH` | 1 = a router reset előtt, 2 = a reset után is |
@@ -159,13 +159,17 @@ A `/log` oldal az aktuális állapotot is mutatja: reset ok, watchdog számlál�
 Mind az öt teszt HTTP, öt különböző üzemeltető felé. **Nincs internet = mind
 az öt elbukik**; bármelyik siker nullázza a számlálókat.
 
-| Ciklus | Végpont | Üzemeltető | Elvárás | Max. időtartam |
-|:---:|---|---|---|---|
-| 0 | `msftconnecttest.com/connecttest.txt` | Microsoft | `Microsoft Connect Test` | 15 / 33 mp |
-| 1 | `cp.cloudflare.com/generate_204` | Cloudflare | 204 | 15 / 33 mp |
-| 2 | `detectportal.firefox.com/success.txt` | Mozilla | `success` | 15 / 33 mp |
-| 3 | `nmcheck.gnome.org/check_network_status.txt` | GNOME | `NetworkManager is online` | 15 / 33 mp |
-| 4 | `connectivitycheck.gstatic.com/generate_204` | Google | 204 | 15 / 33 mp |
+| Kiírt sorszám | `cycleIndex` | Végpont | Üzemeltető | Elvárás | Max. időtartam |
+|:---:|:---:|---|---|---|---|
+| 1 | 0 | `msftconnecttest.com/connecttest.txt` | Microsoft | `Microsoft Connect Test` | 15 / 33 mp |
+| 2 | 1 | `cp.cloudflare.com/generate_204` | Cloudflare | 204 | 15 / 33 mp |
+| 3 | 2 | `detectportal.firefox.com/success.txt` | Mozilla | `success` | 15 / 33 mp |
+| 4 | 3 | `nmcheck.gnome.org/check_network_status.txt` | GNOME | `NetworkManager is online` | 15 / 33 mp |
+| 5 | 4 | `connectivitycheck.gstatic.com/generate_204` | Google | 204 | 15 / 33 mp |
+
+A soros port és a `/log` oldal a **kiírt sorszámmal** dolgozik (1–5); a
+`cycleIndex` változó marad 0-alapú, mert ahhoz kötődik a végpontválasztó
+`if`-lánc és a `RESET_TRIGGER_CYCLE` küszöb.
 
 A két szám a bukás két módja. **15 mp**, ha a névfeloldás megy, de a szerver
 hallgat: 5 mp connect + 10 mp válasz timeout. **33 mp**, ha maga a DNS halott
@@ -181,14 +185,18 @@ küldenie.
 névfeloldást: befagyott router-DNS mellett a ping megy, az internet mégsem
 elérhető. A ping csak a saját gateway ellenőrzésére maradt meg (8. pont).
 
-Sikeres teszt → minden számláló nullázódik, a ciklus 0-ról indul.
+Sikeres teszt → minden számláló nullázódik, a ciklus újra az 1. végponttal
+indul. A soros portra ilyenkor csak a `Successful Test` kerül ki: a
+`testInternetHTTP()` siker esetén nem írja ki sem a kapott törzset, sem külön
+nyugtázó sort. Eltéréskor viszont igen (a kapott törzs + `Hamis érték!`), mert
+ott az a kérdés, mi jött vissza a várt válasz helyett.
 
 ---
 
 ## 4. Az internet kiesik – router újraindítás
 
-Akkor indul, ha `cycleIndex > 3`, vagyis ha a 4-es indexű teszt (Google) is
-elbukott. Mivel a két számláló együtt lép (`failedCount == cycleIndex + 1`),
+Akkor indul, ha `cycleIndex > 3`, vagyis ha az **5. teszt** (Google,
+`cycleIndex == 4`) is elbukott. Mivel a két számláló együtt lép (`failedCount == cycleIndex + 1`),
 ez pontosan **5 egymás utáni sikertelen teszt** – de a feltétel szándékosan a
 **végpont-lefedettséget** mondja ki, nem az időt: mind az öt üzemeltetőt
 végig kell próbálni, hogy egyetlen szolgáltató kiesése soha ne látszódjon

@@ -132,17 +132,23 @@ Az eszköz három állapotban működik:
 
 #### Tesztelési módszerek (ciklikusan váltakoznak)
 
-| Ciklus index | Végpont | Üzemeltető | Elvárt válasz |
-|:---:|---|---|---|
-| 0 | `msftconnecttest.com/connecttest.txt` | Microsoft | `Microsoft Connect Test` |
-| 1 | `cp.cloudflare.com/generate_204` | Cloudflare | **204 No Content** |
-| 2 | `detectportal.firefox.com/success.txt` | Mozilla | `success` |
-| 3 | `nmcheck.gnome.org/check_network_status.txt` | GNOME / NetworkManager | `NetworkManager is online` |
-| 4 | `connectivitycheck.gstatic.com/generate_204` | Google | **204 No Content** |
+| Kiírt sorszám | `cycleIndex` | Végpont | Üzemeltető | Elvárt válasz |
+|:---:|:---:|---|---|---|
+| 1 | 0 | `msftconnecttest.com/connecttest.txt` | Microsoft | `Microsoft Connect Test` |
+| 2 | 1 | `cp.cloudflare.com/generate_204` | Cloudflare | **204 No Content** |
+| 3 | 2 | `detectportal.firefox.com/success.txt` | Mozilla | `success` |
+| 4 | 3 | `nmcheck.gnome.org/check_network_status.txt` | GNOME / NetworkManager | `NetworkManager is online` |
+| 5 | 4 | `connectivitycheck.gstatic.com/generate_204` | Google | **204 No Content** |
 
-> Öt index van, `0`–`4` (`MAX_CYCLE_INDEX`), és a 4-es bukása után indul a
+> **Két számozás, szándékosan.** A soros port és a `/log` oldal **1-től**
+> számol (`Teszt ciklus index = 1`…`5`), mert emberi olvasónak nincs „0-dik
+> teszt". A `cycleIndex` változó viszont marad **0-alapú**: a `0`–`4`
+> tartományhoz kötődik a végpontválasztó `if`-lánc és a `RESET_TRIGGER_CYCLE`
+> küszöb is. A kódban tehát `0`–`4`, a kimeneten `1`–`5`.
+>
+> Öt végpont van (`MAX_CYCLE_INDEX + 1`), és az ötödik bukása után indul a
 > router újraindítás. A `testInternetHTTP()` diszpécserében a Microsoft ága
-> `else`-ként szerepel, tehát a 0-s indexet is az szolgálja ki.
+> `else`-ként szerepel, tehát a `cycleIndex == 0`-t is az szolgálja ki.
 
 **Nincs internet = mind az öt teszt elbukik.** Öt különböző végpont, öt
 független üzemeltető, két ellenőrzési mód. Bármelyik siker nullázza a
@@ -161,17 +167,24 @@ egy téves reset ára ~11,5 perc kiesés, a plusz szigorúságé viszont csak
 > *fakenews-gambling-porn-social* változata sem – de a szűkebb, vendor-specifikus
 > listák eltérnek, ezért a sajátodat nézd meg. Egy blokkolt név `0.0.0.0`-ra
 > oldódik vagy NXDOMAIN-t ad, tehát az adott teszt **mindig elbukik**. Ez
-> önmagában nem okoz téves resetet – a 2-es indexig csak akkor jutunk el, ha a
-> 0-s és az 1-es is elbukott –, de elveszíted a redundancia egy részét. A soros
-> naplóban a `Teszt ciklus index = N` sor és a `/log` oldal `TEST FAIL`
-> bejegyzésének paramétere is megmondja, melyik végpont bukott el.
+> önmagában nem okoz téves resetet – a **3.** tesztre (Mozilla) csak akkor
+> kerül sor, ha az 1. és a 2. is elbukott –, de elveszíted a redundancia egy
+> részét. A soros naplóban a `Teszt ciklus index = N` sor és a `/log` oldal
+> `TEST FAIL` bejegyzésének paramétere is megmondja, melyik végpont bukott el
+> (mindkettő 1-alapú, a fenti táblázat szerint).
 
-> A soros kimenet két számot ír ki a teszt körül, és a **helyük is jelentés**:
-> a `Teszt ciklus index = N` a teszt **előtt** áll, mert azt mondja meg, melyik
-> végpont következik (`0`…`4`); a `Test failed. | Hibák száma = N / 5` viszont a
-> teszt **után**, mert az már az eredmény – hány egymás utáni bukás van, és
-> hány után jön a router újraindítása. (Korábban a hibaszámláló is a teszt előtt
+> **A soros kimenet két száma, és hogy miért ott áll, ahol.**
+> A `Teszt ciklus index = N` a teszt **előtt** áll, mert azt mondja meg, melyik
+> végpont következik (`1`…`5`). A `Test failed. | Hibák száma = N / 5` viszont a
+> teszt **után**, mert az már az eredmény – hány egymás utáni bukás van, és hány
+> után jön a router újraindítása. (Korábban a hibaszámláló is a teszt előtt
 > állt, így a sorozat első tesztjénél mindig `0`-t mutatott.)
+>
+> **Sikeres teszt csak a `Successful Test` sort adja.** A `testInternetHTTP()`
+> siker esetén hallgat: sem a kapott törzset, sem külön nyugtázó sort nem ír ki.
+> Eltéréskor viszont kiírja a **kapott törzset** és a `Hamis érték!` sort – ott
+> ugyanis épp az a kérdés, mi jött vissza a várt válasz helyett (captive portál,
+> megváltozott végpont).
 
 #### Miért nincs ping az internettesztek között
 
@@ -411,10 +424,10 @@ Signal strength (RSSI): -45 dBm
 WIFI OK!
 Uptime: 0h 3m 1s
 Beginning Test.
-Teszt ciklus index = 0
-Microsoft Connect Test
-Igaz érték!
+Teszt ciklus index = 1
+Uptime: 0h 3m 1s
 Successful Test
+
 SUCCESS_DELAY delay start.
 ```
 
