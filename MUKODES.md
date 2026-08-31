@@ -448,12 +448,14 @@ Minden alvás előtt a **relé `LOW`**, tehát a router kap áramot.
 > nem RTC-képes lábra teszi a reset gombot), az eszköz a „csak gombbal" alvások
 > esetén is armol egy 1 órás időzítőt – így nem válhat elérhetetlenné.
 
-> ⚠️ Deep sleep alatt az ESP32-C3 `GPIO6–21` lábai alapból nagyimpedanciásak.
-> A firmware ezért minden elalvás előtt **rögzíti a relé lábát LOW-ra**
-> (`gpio_hold_en` + `gpio_deep_sleep_hold_en`), és ébredés után – miután a
-> lábat már maga hajtja – oldja fel. Külső 10 kΩ lehúzó ellenállás a GND felé
-> **ettől még ajánlott** aktív-HIGH relémodulnál: a bekapcsolás és a program
-> indulása közti ablakban a hold még nem él.
+> ⚠️ A relé a `D10` = **GPIO10** lábon van, **22 kΩ lehúzó ellenállással a GND
+> felé** (a korábbi `D5` = GPIO7 bekötés nem volt stabil; a `D10` nem strapping
+> láb). Deep sleep alatt az ESP32-C3 `GPIO6–21` lábai – köztük a GPIO10 –
+> alapból nagyimpedanciásak. A firmware ezért minden elalvás előtt **rögzíti a
+> relé lábát LOW-ra** (`gpio_hold_en` + `gpio_deep_sleep_hold_en`), és ébredés
+> után – miután a lábat már maga hajtja – oldja fel. A 22 kΩ lehúzó ettől még
+> **nem elhagyható**: a bekapcsolás és a program indulása közti ablakban a hold
+> még nem él.
 
 ---
 

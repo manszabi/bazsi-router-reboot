@@ -45,7 +45,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
   időben (1 mp, illetve 15 mp), etetés nélkül – enélkül a watchdog etetési
   közének mérése semmit nem érne.
 - A pin-számok a valódi `variants/XIAO_ESP32C3/pins_arduino.h`-ból jönnek
-  (`D0`=GPIO2, `D1`=GPIO3, `D3`=GPIO5, `D4`=GPIO6, `D5`=GPIO7).
+  (`D0`=GPIO2, `D1`=GPIO3, `D3`=GPIO5, `D4`=GPIO6, `D10`=GPIO10).
 - A stub `millis()`-e **`uint32_t`**, nem `unsigned long`: a hoston az utóbbi 64 bites
   lenne, és akkor a `millis() - start` körbefordulás-biztos idiómák másképp
   viselkednének, mint az ESP32-C3-on (ahol `unsigned long` = 32 bit).

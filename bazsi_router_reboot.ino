@@ -100,7 +100,17 @@ constexpr uint8_t ledPin = D4;
 // wifi ok led
 constexpr uint8_t wifiledPin = D3;
 // Set RELAY pin, to router
-constexpr uint8_t relayPin = D5;
+//
+// HARDVER: D10 = GPIO10, KULSO 22k LEHUZO ELLENALLASSAL a GND fele.
+// A korabbi D5 = GPIO7 bekotes nem volt stabil. Amit a D10 ad:
+//   - nem strapping lab (a C3-on GPIO2, GPIO8, GPIO9 az), tehat a reset
+//     alatti szintje a bootot nem befolyasolja;
+//   - tovabbra is a digitalis pad tartomanyban (GPIO6-21) van, igy az alvas
+//     alatti rogziteshez ugyanaz a gpio_hold_en() + gpio_deep_sleep_hold_en()
+//     paros kell, mint eddig (lasd holdRelayForSleep()).
+// A 22k lehuzo NEM elhagyhato: a hold a bekapcsolas es a program indulasa
+// kozti ablakban meg nem el, addig a pad nagyimpedanciasan lebegne.
+constexpr uint8_t relayPin = D10;
 // Set reset pin, esp wifireset pin
 //
 // FIGYELEM (hardver): a D0 = GPIO2 strapping lab! A chip-reset alatti
@@ -882,7 +892,7 @@ void waitForConfigWrite() {
 // pillanatnyi (LOW) kimenetét rögzíti, a gpio_deep_sleep_hold_en() pedig
 // érvényben tartja a holdot deep sleep alatt is (C3: driver/gpio.h, a
 // gpio_hold_en 3. megjegyzése). A router így alvás közben akkor sem veszít
-// áramot, ha a külső lehúzó ellenállás hiányzik. Az ellenállás ettől még
+// áramot, ha a külső lehúzó ellenállás hiányzik. A 22k lehúzó ettől még
 // kell: a hold a BEKAPCSOLÁS és a program indulása közti ablakban nem él.
 // A hold az ébredés (ami a C3-on reset) után is tart; a setup() oldja fel,
 // miután a lábat már maga hajtja LOW-ra - a relé így ébredéskor sem "villan".
@@ -1082,11 +1092,11 @@ bool reset_device() {
 }
 
 // FIGYELEM (hardver): deep sleep alatt az ESP32-C3 digitális lábai (GPIO6-21)
-// alapból nagyimpedanciás állapotba kerülnek. A relé lábát (D5 = GPIO7) ezért
-// alvás előtt a holdRelayForSleep() rögzíti LOW-ra (gpio_hold_en +
+// alapból nagyimpedanciás állapotba kerülnek. A relé lábát (D10 = GPIO10)
+// ezért alvás előtt a holdRelayForSleep() rögzíti LOW-ra (gpio_hold_en +
 // gpio_deep_sleep_hold_en) - így az alvás alatt sem lebeg. A relé
 // vezérlőbemenetére ettől függetlenül TOVÁBBRA IS kell külső lehúzó ellenállás
-// (aktív-HIGH modulnál 10k GND felé): a hold a bekapcsolás és a program
+// (a jelenlegi bekötésben 22k a GND felé): a hold a bekapcsolás és a program
 // indulása közti ablakban még nem él, és a szoftveres védelem hibája ellen
 // is ez az utolsó háló.
 // Közös elalvás. timerUs = 0 esetén NINCS időzített ébresztés: az eszköz

@@ -18,7 +18,7 @@ ESP32-C3 alapú automatikus router újraindító rendszer. Az eszköz folyamatos
 | Komponens | Leírás |
 |-----------|--------|
 | **Mikrokontroller** | ESP32-C3 (pl. XIAO ESP32-C3) |
-| **Relé modul** | 1 csatornás relé (router tápellátásának kapcsolására) |
+| **Relé modul** | 1 csatornás relé (router tápellátásának kapcsolására), a vezérlőbemenetén 22 kΩ lehúzó ellenállás a GND felé |
 | **LED #1** | Állapot LED (D4 pin) |
 | **LED #2** | Wi-Fi állapot LED (D3 pin) |
 | **Nyomógomb #1** | Reset gomb (D1 pin) – ESP újraindítás |
@@ -38,7 +38,7 @@ ESP32-C3 alapú automatikus router újraindító rendszer. Az eszköz folyamatos
 | `D1` | Reset / ébresztő gomb (INPUT_PULLUP) – RTC GPIO, deep sleepből is ébreszt |
 | `D3` | Wi-Fi állapot LED |
 | `D4` | Állapot LED |
-| `D5` | Relé vezérlés (router tápellátás) |
+| `D10` | Relé vezérlés (router tápellátás) – **külső 22 kΩ lehúzó a GND felé** |
 
 ## ⚙️ Működés
 
@@ -264,15 +264,20 @@ az újrapróbálkozási körök száma (`rtcRetryRounds`, csak a deep sleepet é
 a watchdog-újraindulások számlálója és a 32 bejegyzéses diagnosztikai napló
 (mindkettő `RTC_NOINIT`, a resetet is túléli – csak az áramtalanítás törli).
 
-> ⚠️ **Hardver ajánlás a relére.** Deep sleep alatt az ESP32-C3 digitális lábai
-> (GPIO6–21) alapból nagyimpedanciás állapotba kerülnek. A firmware ezért
-> minden elalvás előtt **rögzíti a relé lábát** (`D5` = GPIO7) LOW-ra a
-> `gpio_hold_en()` + `gpio_deep_sleep_hold_en()` párossal, és ébredés után –
-> miután a lábat már maga hajtja – oldja fel, így a relé alvás alatt sem lebeg.
-> A relé vezérlőbemenetére **külső lehúzó ellenállás továbbra is ajánlott**
-> (aktív-HIGH modulnál 10 kΩ a GND felé): a bekapcsolás és a program indulása
-> közti ablakban a hold még nem él, és a szoftveres védelem esetleges hibája
-> ellen is ez az utolsó háló.
+> ⚠️ **Hardver: a relé lába és a lehúzó ellenállás.** A relé vezérlése a
+> `D10` = **GPIO10** lábon van, **22 kΩ lehúzó ellenállással a GND felé**.
+> (A korábbi `D5` = GPIO7 bekötés nem bizonyult stabilnak. A `D10` nem
+> strapping láb – a C3-on `GPIO2`, `GPIO8`, `GPIO9` az –, tehát a reset alatti
+> szintje a bootot nem befolyásolja.)
+>
+> Deep sleep alatt az ESP32-C3 digitális lábai (GPIO6–21, köztük a GPIO10)
+> alapból nagyimpedanciás állapotba kerülnek. A firmware ezért minden elalvás
+> előtt **rögzíti a relé lábát** LOW-ra a `gpio_hold_en()` +
+> `gpio_deep_sleep_hold_en()` párossal, és ébredés után – miután a lábat már
+> maga hajtja – oldja fel, így a relé alvás alatt sem lebeg.
+> A 22 kΩ lehúzó ettől függetlenül **nem elhagyható**: a bekapcsolás és a
+> program indulása közti ablakban a hold még nem él, és a szoftveres védelem
+> esetleges hibája ellen is ez az utolsó háló.
 > (Forrás: ESP-IDF `driver/gpio.h` – a `gpio_hold_en` C3-ra vonatkozó
 > megjegyzése és a `gpio_deep_sleep_hold_en` leírása.)
 
@@ -411,7 +416,7 @@ SUCCESS_DELAY delay start.
 |---|---|
 | **Board package** | ESP32 Arduino **3.3.11** |
 | **Beágyazott ESP-IDF** | `release_v5.5` (`esp32-arduino-libs-idf-release_v5.5-b774170f`) |
-| **Board** | XIAO ESP32-C3 (`D0`=GPIO2, `D1`=GPIO3, `D3`=GPIO5, `D4`=GPIO6, `D5`=GPIO7) |
+| **Board** | XIAO ESP32-C3 (`D0`=GPIO2, `D1`=GPIO3, `D3`=GPIO5, `D4`=GPIO6, `D10`=GPIO10) |
 | **ESPAsyncWebServer** | ESP32Async fork, **3.12.0** |
 | **AsyncTCP** | ESP32Async fork, **3.5.0** |
 | **ESPping** | dvarrel, **1.0.5** |
