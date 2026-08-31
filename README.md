@@ -215,8 +215,18 @@ ping mindig sikerült és nullázta a számlálókat. Nem véletlen, hogy egyetl
 nagy implementáció sem ICMP-vel validál: a NetworkManager (libcurl HTTP), a
 Firefox (`detectportal`), a Windows NCSI (DNS + HTTP) mind HTTP-t használ.
 
-A ping megmaradt, de **csak a saját gateway ellenőrzésére** (`gatewayUnreachable()`),
-ahol pont az a kérdés, hogy a 3. rétegben elérünk-e egyáltalán valamit.
+A ping két helyen maradt meg, és **egyik sem szavazhat** az internettesztben:
+
+1. **A saját gateway ellenőrzése** (`gatewayUnreachable()`), ahol pont az a
+   kérdés, hogy a 3. rétegben elérünk-e egyáltalán valamit.
+2. **A hosszú várakozások korai lezárása** (`onlineProbe()`, lásd a
+   „Ha nem sikerül csatlakozni a Wi-Fihez" szakaszt). Itt a ping legrosszabb
+   esetben annyit ér el, hogy a várakozás korábban ér véget – utána **azonnal
+   a rendes HTTP tesztsorozat következik**, ami a befagyott DNS-t így is
+   elbukja. A fenti hibát tehát nem hozza vissza: a `H9` teszt épp azt méri,
+   hogy sikeres ping mellett is lefut a router újraindítás.
+
+Az internetteszt maga továbbra is **kizárólag HTTP** – ezt a `H8` teszt őrzi.
 
 #### A két ellenőrzési mód
 

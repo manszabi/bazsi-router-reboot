@@ -130,6 +130,9 @@ constexpr uint8_t resetPin = D1;
 // interval to wait for Wi-Fi connection (milliseconds)
 constexpr uint32_t interval = 20 * 1000;
 constexpr uint32_t SUCCESS_DELAY = 1 * 60 * 1000;
+// Szünet KÉT BUKOTT internetteszt között (az eszkaláció üteme). Ne keverd az
+// ONLINE_PROBE_INTERVAL_MS-sel: az a hosszú VÁRAKOZÁSOK korai lezárásának
+// üteme, és teljesen más állapotokban fut.
 constexpr uint32_t PROBE_DELAY = 12 * 1000;
 constexpr uint32_t RESET_DELAY = 10 * 60 * 1000;
 constexpr uint32_t RESET_PULSE = 90 * 1000;
@@ -309,10 +312,12 @@ bool fsReady = false;
 // definíció szerint helyes - ott nincs mit ellenőrizni.
 bool staticConfigActive = false;
 
-// A FAILURE_STATE-beli RESET_DELAY korai lezárásának órája. Nem a
-// TimingState-ben van, mert az a struct a valódi állapotgép idejeit tartja;
-// ez csak egy sebességkorlátozó számláló.
-uint32_t resetDelayProbeLast = 0;
+// A korai kilépés próbáinak sebességkorlátozó órái. Nem a TimingState-ben
+// vannak, mert az a struct a valódi állapotgép idejeit tartja; ez csak
+// "mikor pingettünk utoljára". Kettő kell belőlük: a két várakozás egymás
+// után is lefuthat ugyanabban a körben.
+uint32_t resetDelayProbeLast = 0;   // FAILURE_STATE, RESET_DELAY
+uint32_t firstStartProbeLast = 0;   // handleFirstStart(), firstStartDelay
 
 // Fut-e már a watchdog. Az initWatchdog() a setup() elején fut, de EL IS
 // BUKHAT (kikapcsolt TWDT, sikertelen feliratkozás) - és ilyenkor szándékosan
@@ -1392,7 +1397,8 @@ void fatalSleep() {
 //
 // Az enterFatal() csak beállítja a módot, a jelzést pedig a loop() végzi. A
 // gombkezelők viszont mély blokkoló ciklusokból is futnak - a
-// waitWithButtons(RESET_DELAY) például 10 percig nem ad vissza a loop()-nak.
+// waitWithButtonsUntilOnline(RESET_DELAY) például akár 10 percig nem ad
+// vissza a loop()-nak.
 // Addig az eszköz vidáman tovább működne: tesztelne, relét kapcsolna, aludna.
 // Ezért itt helyben, blokkolva jelzünk, és SOHA nem térünk vissza - pontosan
 // úgy, ahogy az eddigi ESP.restart() sem tért vissza ebből az ágból.
@@ -1585,8 +1591,14 @@ size_t readBounded(WiFiClient& stream, char* buf, size_t maxLen, uint32_t timeou
   return n;
 }
 
-// Egy hexa számjegy értéke, vagy -1.
-int hexValue(int c) {
+// Egy hexa számjegy értéke, vagy -1. NAGYBETŰT IS elfogad, mert a chunked
+// keretezés méret-sorai az RFC 9112 szerint bármelyik alakban jöhetnek.
+//
+// Ne keverd a hexVal()-lal: az a MI saját jelszó-kódolásunkat olvassa vissza,
+// és szándékosan csak kisbetűset fogad el (azt írjuk ki). A két függvény
+// neve korábban csak egy betűben tért el, a viselkedésük viszont nem -
+// ezért kapott ez beszédesebb nevet.
+int hexDigitAnyCase(int c) {
   if (c >= '0' && c <= '9') return c - '0';
   if (c >= 'a' && c <= 'f') return c - 'a' + 10;
   if (c >= 'A' && c <= 'F') return c - 'A' + 10;
@@ -1614,7 +1626,7 @@ size_t readChunked(WiFiClient& stream, char* buf, size_t maxLen, uint32_t timeou
       if (c == '\n') break;
       if (c == '\r' || inExt) continue;
       if (c == ';') { inExt = true; continue; }
-      const int d = hexValue(c);
+      const int d = hexDigitAnyCase(c);
       // Nem hexa a méret helyén: ez nem chunked keret. Nem találgatunk,
       // a teszt elbukik - ez a biztonságos irány.
       if (d < 0) return n;
@@ -1789,27 +1801,17 @@ bool gatewayUnreachable() {
 }
 
 void handleFirstStart(uint32_t currentMillis) {
-  // A várakozás korai lezárása. A static a loop() körei közt tartja az órát;
-  // hidegindulásnál nulláról indul, ahogy a timing.startMillis is - az első
-  // próba tehát ~egy intervallummal az indulás után fut.
+  // A várakozás korai lezárása. Az órát a setup() állítja be úgy, hogy az ELSŐ
+  // próba azonnal esedékes legyen: a tipikus eset ugyanis az, hogy a kapcsolat
+  // MÁR él (a setup() initWiFi()-je sikerült), és ilyenkor semmi értelme
+  // 60 mp-et várni a továbblépéssel.
   //
   // FIGYELEM, VISELKEDÉSVÁLTOZÁS: korábban a puszta Wi-Fi kapcsolat is azonnal
   // lezárta a várakozást. Most a ping is kell hozzá. Ha a hálózat megvan, de
   // az internet nem, a firstStartDelay végigfut - épp erre való: áramszünet
   // után a router lassabban indul, mint az ESP, és nem akarjuk 2 perccel a
   // bekapcsolás után újraindítani.
-  static uint32_t lastProbe = 0;
-  static bool probeArmed = false;
-  if (!probeArmed) {
-    probeArmed = true;
-    // Az ELSŐ próba azonnal fusson le, ne csak egy intervallum múlva. A tipikus
-    // eset ugyanis az, hogy a kapcsolat MÁR él (a setup() initWiFi()-je
-    // sikerült) - ilyenkor semmi értelme 60 mp-et várni a továbblépéssel.
-    // Az előjel nélküli kivonás körbefordulása itt szándékos és helyes: a
-    // különbség akkor is pontosan egy intervallum, ha a millis() még kicsi.
-    lastProbe = currentMillis - ONLINE_PROBE_INTERVAL_MS;
-  }
-  const bool online = onlineProbeDue(lastProbe, currentMillis);
+  const bool online = onlineProbeDue(firstStartProbeLast, currentMillis);
 
   if (!online) {
     if (currentMillis - timing.startMillis < firstStartDelay) {
@@ -2220,6 +2222,11 @@ void startConfigPortal() {
 
 void setup() {
   timing.startMillis = millis();
+  // A first start próbájának órája egy teljes intervallummal "hátra" áll, hogy
+  // az ELSŐ próba azonnal esedékes legyen. Az előjel nélküli kivonás
+  // körbefordulása itt szándékos és helyes: a különbség akkor is pontosan egy
+  // intervallum, ha a millis() még kicsi.
+  firstStartProbeLast = timing.startMillis - ONLINE_PROBE_INTERVAL_MS;
 
   pinMode(wifiresetPin, INPUT_PULLUP);
   pinMode(resetPin, INPUT_PULLUP);
@@ -2352,8 +2359,10 @@ void setup() {
     } else {
       // Van mentett hálózat, csak most nem érhető el. NEM megyünk azonnal AP
       // módba: áramszünet után a router jóval lassabban indul, mint az ESP.
-      // A handleFirstStart() kivárja a firstStartDelay-t (10 perc), majd
-      // egységesen 3 próbát tesz 30 mp szünetekkel.
+      // A handleFirstStart() kivárja a firstStartDelay-t (legfeljebb 10 perc -
+      // 60 mp-enként megnézi, hogy visszajött-e a hálózat ÉS az internet, és
+      // akkor korábban lép tovább), majd egységesen 3 próbát tesz 30 mp
+      // szünetekkel.
       printUptime();
       Serial.println("Nem sikerult csatlakozni - first start varakozas kovetkezik.");
       deviceMode = MODE_MONITOR;

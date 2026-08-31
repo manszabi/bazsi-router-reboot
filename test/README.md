@@ -45,7 +45,9 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
   időben (1 mp, illetve 15 mp), etetés nélkül – enélkül a watchdog etetési
   közének mérése semmit nem érne.
 - A pin-számok a valódi `variants/XIAO_ESP32C3/pins_arduino.h`-ból jönnek
-  (`D0`=GPIO2, `D1`=GPIO3, `D3`=GPIO5, `D4`=GPIO6, `D10`=GPIO10).
+  (`D0`=GPIO2, `D1`=GPIO3, `D3`=GPIO5, `D4`=GPIO6, `D10`=GPIO10). A tesztekben
+  ezek **nevesítve** vannak (`PIN_RELAY`, `PIN_LED`, `PIN_WIFILED`,
+  `RELAY_HIGH`/`RELAY_LOW`), hogy egy hardveres átkötés egyetlen sor legyen.
 - A stub `millis()`-e **`uint32_t`**, nem `unsigned long`: a hoston az utóbbi 64 bites
   lenne, és akkor a `millis() - start` körbefordulás-biztos idiómák másképp
   viselkednének, mint az ESP32-C3-on (ahol `unsigned long` = 32 bit).
@@ -59,20 +61,20 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 
 ## Lefedett esetek
 
-**183 forgatókönyv, 593 ellenőrzés. Sorlefedettség: 98,33%.**
+**195 forgatókönyv, 636 ellenőrzés. Sorlefedettség: 98,48%.**
 
 | | |
 |---|---|
 | `W1`–`W9` | Wi-Fi: konfig portál, DHCP vs. statikus IP, DNS, timeout, újracsatlakozás, netif-elvesztés |
-| `S1`–`S6` | Deep sleep: beragadt gomb, kimenetek állapota alvás előtt, ébresztőforrások, RTC-láb megkötés, **a relé láb hold-ja alvás alatt és a feloldása ébredéskor** |
+| `S1`–`S6` | Deep sleep: beragadt gomb, kimenetek állapota alvás előtt, ébresztőforrások, RTC-láb megkötés, **a relé láb (`D10` = GPIO10) hold-ja alvás alatt és a feloldása ébredéskor** |
 | `RL1`–`RL2` | Relé: a 90 másodperces reset pulzus hossza, elalvás N reset után |
 | `R6`–`R8` | **A dokumentált idők mérése**: egy újrapróbálkozási kör ébren töltött 25,5 perce, a felismerési idő 123 mp (élő DNS) / 213 mp (halott DNS), és mind a 33 kör végigjátszása (46,0 óra türelem) |
 | `H1`–`H9` | HTTP teszt: CR/LF vágás, hibás státusz, captive portal, Content-Length nélküli válasz, beragadt szerver, **204-es ellenőrzés**, az eszkaláció végpont-sorrendje, **befagyott router-DNS** |
 | `CH1`–`CH5` | **Chunked keretezés**: egy és több darab, darab-kiterjesztés, nagybetűs hexa, szabálytalan és túlcsorduló méret, 50 kB-os darabfolyam |
-| `PG1`–`PG2` | Ping (csak a gateway-ellenőrzéshez): 2-a-4-ből szabály és korai kilépés |
+| `PG1`–`PG2` | Ping (a gateway-ellenőrzéshez és a várakozások korai lezárásához): 2-a-4-ből szabály és korai kilépés |
 | `C1` | Konfig fájlok írása/olvasása, csonkítás, hiányzó fájl |
 | `B1` | Gomb debounce: zajtüske vs. tartós nyomás |
-| `F1`–`F4` | Webszerver: tartalék űrlap **feltöltetlen `data/` mellett**, feltöltött `data/`, hiányzó fájlok, 404, AP-határidő kitolása |
+| `F1`–`F4` | Webszerver: a **programba fordított** beállító űrlap üres fájlrendszer mellett is, **a LittleFS-ről semmit nem szolgál ki** (akkor sem, ha ott vannak a régi fájlok), 404, AP-határidő kitolása |
 | `WDT1`–`WDT8` | Watchdog: konfiguráció, etetés a hosszú blokkolások alatt, `delay()` vs. CPU-pörgetés, a feliratkozás tényleges ellenőrzése |
 | `SN1`–`SN2` | Biztonsági háló: ha a gomb-ébresztés armolása hibázik, időzítő |
 | `FS1`–`FS10` | LittleFS hibák: csatolás, írásvédettség, megtelt tár, **néma írási hiba**, csonka olvasás, törlés tartalék útvonala |
@@ -85,31 +87,35 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 | `X1`–`X14` | Határesetek: gomb a relé pulzus közben, nyílt hálózat, SSID/jelszó határértékek, wifireset törlési sorrend és **sikertelen törlés → végzetes hiba**, query-paraméter, 1 napnál hosszabb uptime |
 | `PO1`–`PO3` | Áramszünet: mekkora router-indulási késést tolerál |
 | `R1`–`R4` | Újrapróbálkozási politika: rossz jelszó vs. hiányzó hálózat, 2 napos határ |
-| `L1`–`L7` | Diagnosztikai napló: rögzítés, /log oldal, körpuffer, spam-védelem, esemény-kódok, minden címke, üres napló |
+| `L1`–`L7` | Diagnosztikai napló: rögzítés, /log oldal, körpuffer, spam-védelem, esemény-kódok, **mind a 12 címke**, üres napló |
 | `SB1`–`SB5` | Beragadt gomb: mindkét gomb, váltakozó LED-villogás, naplózás, **az ismétlődő kör spam-védelme** |
-| `SER1`–`SER3` | Soros kimenet terhelése: nem árasztja el a konzolt |
+| `SER1`–`SER5` | Soros kimenet: terhelés (nem árasztja el a konzolt), **1-alapú teszt sorszám**, a hibaszámláló a teszt **után**, sikernél csak `Successful Test`, eltérésnél a kapott törzs is |
 | `OV1` | Számlálók korlátosak több reset cikluson át |
 | `IP1`–`IP3` | Csak IPv4 fogadható el (IPv6 és `0.0.0.0` nem) |
-| `LED1` | A router áramtalanításakor egyik LED sem hazudik |
+| `LED1`–`LED3` | LED-jelzések: a reset pulzus alatt a **státusz LED villog** (2 Hz) és a Wi-Fi LED sötét, **AP módban** a Wi-Fi LED villog (1 Hz) és a státusz LED végig világít, a villogás üteme és határa |
+| `OP1`–`OP6` | **Korai kilépés a hosszú várakozásokból**: a `firstStartDelay` korán zárul, ha a hálózat *és* az internet is megvan; csak hálózatnál végigfut; ép induláskor az első próba azonnal fut; **flash kímélés** (nincs fájlírás, percenként max egy `WiFi.begin()`, kapcsolat nélkül nincs ping); a `RESET_DELAY` korai zárása nem bontja le az igazolt kapcsolatot; **a próba órái túlélik a `millis()` körbefordulását** |
+| `WDT7` | A watchdog már a LittleFS csatolása **előtt** élesedik |
+| `EVT1` | A `/log` `TEST FAIL` paramétere is 1-alapú – ugyanaz a szám, mint a soros porton |
 
 A név-előtag **prefix**, nem pontos egyezés: a `P1` így a `P1`, `P10`–`P19`
 eseteket is futtatja.
 
 ### Ami szándékosan fedetlen
 
-A `make cov` nyolc ágat jelez, mindegyik védekező vagy bizonyíthatóan
+A `make cov` tíz sort jelez, mindegyik védekező vagy bizonyíthatóan
 elérhetetlen – ezeket **nem** kell tesztelni:
 
 | Hol | Miért nem érhető el |
 |---|---|
-| `eventName()` `default` ága | minden létező eseménykódnak van címkéje (az `L6` ezt ellenőrzi) |
+| `eventName()` `default` ága | mind a 12 eseménykódnak van címkéje – az `L6` most már **mindet** ellenőrzi (korábban a `GW UNREACH` kimaradt belőle, miközben a doksi az ellenkezőjét állította) |
 | `readConfigValue()` `file.close()` a könyvtár-ágon | a stub nem tud könyvtárat adni |
-| `readBounded()` két `break`-je | védekező ág arra, ha az `available()` hazudik |
+| `readChunked()` záró `return n`-je | csak akkor érhető el, ha a záró CRLF olvasása közben szakad meg a stream – a `CH*` esetek a többi ágon lépnek ki |
 | `testInternetPing()` záró `return`-je | a ciklus minden ága korábban visszatér (az utolsó körben `remaining == 0`) |
+| `gatewayUnreachable()` cím-értelmezési ága | a `staticConfigActive` csak akkor igaz, ha az `initWiFi()` már sikeresen értelmezte a gateway-t, és azt csak a POST kezelő írja át – az viszont újraindít |
 | POST `!fsReady` ága | ha a LittleFS nem csatolható, a `setup()` `MODE_FATAL`-ba megy, és a portál el sem indul |
-| A jelszókódolás puffer-hiba ága | a POST már ellenőrzi a hosszt, a puffer pedig pontosan 63 karakterre méretezett – nem tud elbukni |
+| A jelszókódolás puffer-hiba ága (3 sor) | a POST már ellenőrzi a hosszt, a puffer pedig pontosan 63 karakterre méretezett – nem tud elbukni |
 | A wifireset zár-ütközési `return`-je | a `savingConfig` kapu és a zárszerzés közé egyszálú futásban nem ékelődhet másik író – ez pont a valódi kéttaskos versenyhelyzet védőága |
-| `FAILURE_STATE` záró `break`-je | előtte `wifiGiveUp()` vagy módváltás történik |
+| `FAILURE_STATE` záró `break`-je | előtte `wifiGiveUp()` deep sleepbe vagy AP módba visz |
 
 ## Fontos
 
