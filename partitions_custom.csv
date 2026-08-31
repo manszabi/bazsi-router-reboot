@@ -1,0 +1,29 @@
+# Egyedi particios tabla a bazsi_router_reboot-hoz (XIAO ESP32-C3, 4 MB flash).
+#
+# MIERT EGYEDI? Az Arduino gyari semai vagy ket app-particiot tartanak fenn az
+# OTA-nak (default.csv: 2 x 1,25 MB), vagy ~1,5 MB LittleFS-t adnak. Ez a program
+# egyiket sem hasznalja: OTA nincs benne, a fajlrendszeren pedig osszesen negy
+# rovid szoveges fajl el (/ssid.txt, /pass.txt, /ip.txt, /gateway.txt), a
+# beallito weboldal a programba van forditva (CONFIG_FORM). Igy az OTA-nak
+# fenntartott hely a programe lehet, a fajlrendszer pedig fel megabajt.
+#
+# Kovetkezmenyek:
+#   - a program ~3,44 MB-ot kaphat 1,25 MB helyett,
+#   - az elso indulaskori LittleFS formazas 15-20 mp helyett 4-7 mp,
+#   - OTA frissites NINCS: a program csak USB-n keresztul flashelheto.
+#
+# Igazitas: az app particio kezdocime 64 KB-ra (0x10000), a data particiake
+# 4 KB-ra (0x1000) igazitott. A tabla pontosan kitolti a 4 MB-os flash-t.
+#
+# HASZNALAT
+#   Arduino IDE 2.x : masold be a sketch mappajaba "partitions.csv" neven
+#                     (a core a sketch melletti partitions.csv-t automatikusan
+#                     hasznalja), majd forditsd ujra.
+#   arduino-cli     : ugyanigy, vagy --build-property build.partitions=... -szal.
+#   PlatformIO      : platformio.ini -> board_build.partitions = partitions_custom.csv
+#
+# Name,     Type, SubType,  Offset,   Size,     Flags
+nvs,        data, nvs,      0x9000,   0x5000,
+phy_init,   data, phy,      0xE000,   0x1000,
+factory,    app,  factory,  0x10000,  0x370000,
+spiffs,     data, spiffs,   0x380000, 0x80000,

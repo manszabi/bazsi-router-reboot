@@ -7,6 +7,7 @@ ESP32-C3 alapú automatikus router újraindító rendszer. Az eszköz folyamatos
 - **Automatikus internetkapcsolat-figyelés** – öt HTTP teszt, öt különböző üzemeltető felé
 - **Automatikus router újraindítás** – relé segítségével áramtalanítja, majd visszakapcsolja a routert
 - **Wi-Fi Manager** – böngészőből konfigurálható SSID, jelszó, IP-cím és gateway
+- **Beépített beállító weboldal** – a programba fordítva, nincs feltöltendő fájlrendszer-tartalom
 - **LittleFS** – a beállítások áramszünet után is megmaradnak
 - **Deep Sleep védelem** – túl sok sikertelen próbálkozás után az ESP alvó módba lép (1 óra), majd újrapróbálkozik
 - **Fizikai gombok** – reset és Wi-Fi reset gombok debounce-szal
@@ -279,13 +280,15 @@ a watchdog-újraindulások számlálója és a 32 bejegyzéses diagnosztikai nap
 
 ```
 bazsi-router-reboot/
-├── bazsi_router_reboot.ino   # Fő Arduino sketch
-├── data/
-│   ├── wifimanager.html      # Wi-Fi beállító weboldal
-│   ├── style.css             # Weboldal stílus
-│   └── favicon.png           # Favicon
+├── bazsi_router_reboot.ino   # Fő Arduino sketch (a beállító weboldal is ebben van)
+├── partitions_custom.csv     # Egyedi partíciós tábla: OTA nélkül, 512 KiB LittleFS
 └── LICENSE                   # MIT License
 ```
+
+A Wi-Fi beállító weboldal a sketch `CONFIG_FORM` konstansában él, a flash
+`.rodata` szekciójában – nincs külön feltöltendő `data/` mappa. A LittleFS-re
+így csak a négy konfigurációs fájl kerül (`/ssid.txt`, `/pass.txt`, `/ip.txt`,
+`/gateway.txt`).
 
 ## 📦 Szükséges könyvtárak
 
@@ -311,10 +314,14 @@ bazsi-router-reboot/
 2. Telepítsd a szükséges könyvtárakat (Library Manager vagy kézi telepítés)
 3. Válaszd ki a board-ot: **ESP32-C3** (pl. *XIAO_ESP32C3*)
 4. Nyisd meg a `bazsi_router_reboot.ino` fájlt
-5. Töltsd fel a `data/` mappát a LittleFS-re:
-   - **Arduino IDE 2.x**: használj [LittleFS upload plugin](https://github.com/earlephilhower/arduino-littlefs-upload)-t
-   - Vagy: `Tools` → `ESP32 Sketch Data Upload`
+5. Másold a `partitions_custom.csv`-t a sketch mappájába **`partitions.csv`**
+   néven – a core a sketch melletti `partitions.csv`-t automatikusan használja.
+   (Ha inkább gyári sémát választanál a `Tools` → `Partition Scheme` menüből,
+   olyat válassz, amiben van SPIFFS/LittleFS partíció.)
 6. Töltsd fel a sketch-et az ESP-re
+
+Fájlrendszert **nem kell feltölteni**: a weboldal a programban van, a LittleFS-t
+az első indulás formázza meg magától.
 
 ### PlatformIO
 
@@ -328,7 +335,38 @@ lib_deps =
     ESP32Async/AsyncTCP @ ^3.5.0
     dvarrel/ESPping @ ^1.0.5
 board_build.filesystem = littlefs
+board_build.partitions = partitions_custom.csv
 ```
+
+## 🗂️ Partíciós tábla (`partitions_custom.csv`)
+
+A gyári Arduino sémák vagy két app-partíciót tartanak fenn az OTA-nak
+(`default.csv`: 2 × 1,25 MB), vagy ~1,5 MB fájlrendszert adnak. Ez a program
+egyiket sem használja: **OTA nincs benne** (USB-ről flashelünk), a LittleFS-en
+pedig összesen négy rövid szöveges fájl él. A weboldal a programban van, tehát
+a fájlrendszernek nem kell weblapot tárolnia.
+
+| Név | Típus | Cím | Méret | Mire |
+|---|---|---|---|---|
+| `nvs` | data / nvs | `0x9000` | 20 KiB | a core saját kulcs-érték tára |
+| `phy_init` | data / phy | `0xE000` | 4 KiB | rádió kalibrációs adatok |
+| `factory` | app / factory | `0x10000` | **3520 KiB (~3,44 MB)** | a program |
+| `spiffs` | data / spiffs | `0x380000` | **512 KiB** | LittleFS (`/ssid.txt`, `/pass.txt`, `/ip.txt`, `/gateway.txt`) |
+
+A tábla pontosan kitölti a XIAO ESP32-C3 4 MB-os flash-ét. Az app partíció
+kezdőcíme 64 KB-ra, a data partíciók 4 KB-ra igazítottak (a `0xF000`–`0x10000`
+közti 4 KB emiatt marad ki).
+
+Amit ez hoz:
+
+- a program **~3,44 MB**-ot kaphat 1,25 MB helyett,
+- az első indulás LittleFS-formázása 15–20 mp helyett **4–7 mp** (128 szektor
+  × 30–50 ms), ami a watchdog élesedése előtti szakaszt is lerövidíti,
+- cserébe **OTA frissítés nincs** – a program csak USB-n keresztül flashelhető.
+
+> A LittleFS partíció címkéje szándékosan `spiffs`: az Arduino core a
+> `LittleFS.begin()`-ben ezt a címkét keresi. A címke a formátumot nem
+> határozza meg, a partíció tartalma LittleFS.
 
 ## ⏱️ Időzítések
 
@@ -377,6 +415,7 @@ SUCCESS_DELAY delay start.
 | **ESPAsyncWebServer** | ESP32Async fork, **3.12.0** |
 | **AsyncTCP** | ESP32Async fork, **3.5.0** |
 | **ESPping** | dvarrel, **1.0.5** |
+| **Partíciós séma** | `partitions_custom.csv` (OTA nélkül, 512 KiB LittleFS) |
 
 A firmware viselkedését meghatározó feltételezések ezen a konkrét verzión lettek
 ellenőrizve a core, illetve az ESP-IDF forrásában:
@@ -442,7 +481,7 @@ A watchdog a **LittleFS csatolása után, de a Wi-Fi indítása előtt** élesed
 
 | Szakasz | Felügyelve? | Miért |
 |---|:---:|---|
-| soros port, gombellenőrzés, LittleFS csatolás/**formázás** | nem | a `LittleFS.begin(true)` első indításkor formáz: ~1,5 MB partíció szektoronként 30–50 ms, összesen 15–20 mp. Ezt szándékosan kihagyjuk, hogy egy első bekapcsolás soha ne fusson watchdog resetbe |
+| soros port, gombellenőrzés, LittleFS csatolás/**formázás** | nem | a `LittleFS.begin(true)` első indításkor formáz: a 512 KiB-os partíció 128 szektora szektoronként 30–50 ms, azaz 4–7 mp (a régi ~1,5 MB-os sémánál 15–20 mp volt). Ezt szándékosan kihagyjuk, hogy egy első bekapcsolás soha ne fusson watchdog resetbe |
 | `WiFi.persistent()`, `initWiFi()`, AP portál indítása | **igen** | a Wi-Fi init a legvalószínűbb lefagyási pont |
 | `loop()` | **igen** | |
 
@@ -656,8 +695,9 @@ beírt adatok sem vesznek el.
 ## 🔒 Biztonság
 
 - A LittleFS-en tárolt Wi-Fi adatok (`/ssid.txt`, `/pass.txt`, `/ip.txt`,
-  `/gateway.txt`) **nem érhetők el a webszerveren keresztül** – a beállító
-  portál csak a `/`, `/style.css` és `/favicon.png` útvonalakat szolgálja ki.
+  `/gateway.txt`) **nem érhetők el a webszerveren keresztül** – a portál a
+  fájlrendszerről semmit nem szolgál ki, a `/` és a `/log` tartalma is a
+  programból megy ki.
 - A jelszó soha nem kerül ki nyílt szövegként a soros portra, csak a hossza.
 - Az AP jelszava (`12345678`) a forráskódban van; éles használat előtt
   érdemes lecserélni az `AP_PASSWORD` konstansban. A hosszát `static_assert`

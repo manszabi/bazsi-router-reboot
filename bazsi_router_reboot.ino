@@ -43,14 +43,16 @@ const char PARAM_GATEWAY[] = "gateway";
   "document.onvisibilitychange=()=>document.hidden||f()</script>"
 const char KEEPALIVE_JS[] = KEEPALIVE_JS_LIT;
 
-// Tartalék űrlap arra az esetre, ha a data/ mappa nincs feltöltve a LittleFS-re.
-// Flashben él, RAM-ot nem foglal.
-const char FALLBACK_FORM[] =
+// A beállító űrlap. Programba építve él, a flash .rodata szekciójában: nincs
+// külön feltöltendő data/ mappa, és a LittleFS-re csak a négy konfigurációs
+// fájl kerül. Így a fájlrendszer állapotától FÜGGETLENÜL mindig van használható
+// űrlap - korábban egy elfelejtett LittleFS-feltöltés konfigurálhatatlanná
+// tette az eszközt.
+const char CONFIG_FORM[] =
   "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
   "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
   "<title>ESP Wi-Fi Manager</title></head><body>"
   "<h2>ESP Wi-Fi Manager</h2>"
-  "<p><b>Figyelem:</b> a data/ mappa nincs feltoltve a LittleFS-re.</p>"
   "<form action=\"/\" method=\"POST\">"
   "SSID <input name=\"ssid\" maxlength=\"32\" required><br>"
   "Password <input name=\"pass\" type=\"password\" maxlength=\"63\"><br>"
@@ -546,8 +548,10 @@ bool initLittleFS() {
     // A begin() csak ESP_FAIL esetén próbál formázni. Ha a partíció egyáltalán
     // nincs meg, ESP_ERR_NOT_FOUND jön, és formázás nélkül elbukik.
     Serial.println("LittleFS mount FAILED (a formázási kísérlet után is).");
-    Serial.println("Valószínű ok: a kiválasztott partíciós séma nem tartalmaz");
-    Serial.println("'spiffs' cimkéju partíciót (Arduino IDE: Tools > Partition Scheme).");
+    Serial.println("Valószínű ok: a használt partíciós séma nem tartalmaz");
+    Serial.println("'spiffs' cimkéju partíciót. Használd a partitions_custom.csv-t,");
+    Serial.println("vagy az Arduino IDE-ben egy SPIFFS-et tartalmazó sémát");
+    Serial.println("(Tools > Partition Scheme).");
     return false;
   }
   Serial.print("LittleFS mounted, used ");
@@ -1700,29 +1704,16 @@ void startConfigPortal() {
   Serial.print("AP IP address: ");
   Serial.println(WiFi.softAPIP());
 
-  // Web Server Root URL. Ha a data/ mappa nem került fel a LittleFS-re, a
-  // send(FS&,...) hibaválaszt adna a kliensnek (a régi AsyncWebServerben a
-  // NULL beginResponse 501-et, az ESP32Async v3.x-ben már 404-et) - egyik sem
-  // használható űrlap, az eszköz konfigurálhatatlan lenne. Ezért beépített
-  // tartalék űrlapot adunk.
+  // Web Server Root URL. Az űrlap a programból megy ki, nem a LittleFS-ről:
+  // nincs se feltöltendő data/ mappa, se olyan eset, hogy a fájlrendszer
+  // állapota miatt ne lenne beállító felület.
+  //
+  // A LittleFS-ről szándékosan NEM szolgálunk ki semmit: egy serveStatic("/")
+  // a teljes fájlrendszert kiadta volna, azaz a /pass.txt-ben tárolt Wi-Fi
+  // jelszót is.
   server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
     touchApDeadline();
-    if (LittleFS.exists("/wifimanager.html")) {
-      request->send(LittleFS, "/wifimanager.html", "text/html");
-    } else {
-      request->send(200, "text/html", FALLBACK_FORM);
-    }
-  });
-
-  // Csak a weboldal statikus elemeit szolgáljuk ki. A serveStatic("/") a teljes
-  // LittleFS-t kiadta volna, azaz a /pass.txt-ben tárolt Wi-Fi jelszót is.
-  server.on("/style.css", HTTP_GET, [](AsyncWebServerRequest* request) {
-    touchApDeadline();
-    request->send(LittleFS, "/style.css", "text/css");
-  });
-  server.on("/favicon.png", HTTP_GET, [](AsyncWebServerRequest* request) {
-    touchApDeadline();
-    request->send(LittleFS, "/favicon.png", "image/png");
+    request->send(200, "text/html", CONFIG_FORM);
   });
   // Keep-alive. A nyitva lévő oldal 60 mp-enként meghívja, így az AP mód
   // visszaszámlálása addig tolódik, amíg tényleg ott vagy a lapon. A válasz
@@ -1802,7 +1793,8 @@ void startConfigPortal() {
       // Nincs értelme menteni: a fájlrendszer nem áll rendelkezésre.
       request->send(500, "text/plain",
                     "LittleFS nem elerheto, a beallitasok nem menthetok. "
-                    "Ellenorizd a particios semat (Tools > Partition Scheme).");
+                    "Ellenorizd a particios semat (partitions_custom.csv, "
+                    "'spiffs' cimkeju particio).");
       return;
     }
 
@@ -2150,10 +2142,11 @@ void setup() {
   // Innentől figyeli a watchdog a programot.
   //
   // MIÉRT ITT? A LittleFS csatolása UTÁN, de a Wi-Fi indítása ELŐTT.
-  //   - A LittleFS.begin(true) első indításkor FORMÁZ. Egy ~1,5 MB-os partíció
-  //     törlése szektoronként 30-50 ms, összesen 15-20 mp, etetés nélkül -
-  //     ezt szándékosan kihagyjuk a felügyeletből, hogy egy első bekapcsolás
-  //     soha ne futhasson watchdog resetbe.
+  //   - A LittleFS.begin(true) első indításkor FORMÁZ. A partitions_custom.csv
+  //     512 KiB-os "spiffs" partíciója 128 szektor, szektoronként 30-50 ms,
+  //     azaz 4-7 mp etetés nélkül - ezt szándékosan kihagyjuk a felügyeletből,
+  //     hogy egy első bekapcsolás soha ne futhasson watchdog resetbe. (A régi,
+  //     ~1,5 MB-os sémánál ez 15-20 mp volt.)
   //   - Az utána következő Wi-Fi init viszont a legvalószínűbb lefagyási pont,
   //     és korábban semmi nem védte: az initWatchdog() a setup() legvégén volt,
   //     tehát egy WiFi.begin() beragadás örökre megállította volna az eszközt.

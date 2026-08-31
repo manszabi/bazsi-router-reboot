@@ -278,6 +278,7 @@ Nem várunk további teszt ciklusokat: ha nincs Wi-Fi, a tesztnek nincs értelme
 | Esemény | Időtartam |
 |---|---|
 | Portál elérhető: `192.168.4.1` | |
+| A beállító űrlap forrása | a programba fordítva (`CONFIG_FORM`), nincs feltöltendő `data/` mappa – a portál a LittleFS-ről semmit nem szolgál ki |
 | Tétlenség után deep sleep | **5 perc** (`AP_TIMEOUT_MS`) az utolsó kéréstől |
 | A nyitva lévő lap keep-alive-ja | **60 mp**-enként `GET /ping` (1 bájt válasz) |
 | Elfogadott IP / gateway | **csak IPv4**, nem `0.0.0.0`, és csak együtt |

@@ -191,10 +191,10 @@ reset + 10 perc bootvárás + 3 próba), a körök között 1 óra alvás:
 
 ```mermaid
 flowchart TD
-    IN([startConfigPortal]) --> AP["WIFI_AP mód<br>SSID: ESP-ESP32-C3, jelszó: 12345678<br>végpontok: GET / , /style.css, /favicon.png,<br>/ping, /log és POST /"]
+    IN([startConfigPortal]) --> AP["WIFI_AP mód<br>SSID: ESP-ESP32-C3, jelszó: 12345678<br>végpontok: GET / , /ping, /log és POST /"]
     AP --> IDLE["5 perces tétlenségi visszaszámlálás<br>MINDEN kérés (404 is) újraindítja;<br>a nyitott lap 60 s-onként /ping-el"]
     IDLE --> REQ{Kérés típusa}
-    REQ -->|"GET /"| FORM["wifimanager.html a LittleFS-ről,<br>ha nincs: beépített tartalék űrlap"]
+    REQ -->|"GET /"| FORM["Beépített beállító űrlap (CONFIG_FORM)<br>a flashből; a LittleFS-ről semmit<br>nem szolgálunk ki"]
     REQ -->|"GET /log"| LOG["Diagnosztikai napló:<br>reset ok, számlálók, 32 esemény"]
     REQ -->|"POST /"| VAL{"1. FÁZIS - validálás:<br>SSID 1-32 (trim), jelszó max 63 (trim),<br>IP és gateway: IPv4, nem 0.0.0.0, trim,<br>statikus IP CSAK párban"}
     VAL -->|hiba| E500["500 + konkrét indok<br>SEMMI nem íródik ki, a futó konfig<br>sem változik, NINCS újraindítás"]
