@@ -2298,10 +2298,13 @@ void loop() {
       }
       printUptime();
       Serial.println("Beginning Test.");
+      // Csak az indexet írjuk ki ITT: az azt mondja meg, MELYIK végpont jön
+      // (0..MAX_CYCLE_INDEX), tehát a teszt ELŐTT van értelme. A hibaszámláló
+      // viszont a teszt EREDMÉNYE - ezért az a "Test failed." sorra került.
+      // Korábban itt állt, így a sorozat első tesztjénél mindig "0"-t írt ki,
+      // és eggyel le volt maradva a tényleges állapothoz képest.
       Serial.print("Teszt ciklus index = ");
-      Serial.print(testState.cycleIndex);
-      Serial.print(" | Hibák száma = ");
-      Serial.println(testState.failedCount);
+      Serial.println(testState.cycleIndex);
 
       // Mind az ot teszt HTTP, mert az ICMP nem bizonyit sem nevfeloldast, sem
       // TCP-t: egy befagyott router-DNS mellett a ping tokeletesen megy, kozben
@@ -2336,7 +2339,13 @@ void loop() {
           logEvent(EV_TEST_FAIL, (uint16_t)testState.cycleIndex);
         }
         printUptime();
-        Serial.println("Test failed.");
+        // A már megnövelt számláló: ez a mostani bukással együtt hány
+        // egymás utáni sikertelen teszt van. A nevező az a darabszám, ami
+        // után a router újraindítása következik (mind az öt végpont bukott).
+        Serial.print("Test failed. | Hibák száma = ");
+        Serial.print(testState.failedCount);
+        Serial.print(" / ");
+        Serial.println(MAX_CYCLE_INDEX + 1);
         currentState = FAILURE_STATE;
       }
       // A tesztek percekig futhatnak, ezért friss időbélyeg kell.

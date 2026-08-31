@@ -166,6 +166,13 @@ egy téves reset ára ~11,5 perc kiesés, a plusz szigorúságé viszont csak
 > naplóban a `Teszt ciklus index = N` sor és a `/log` oldal `TEST FAIL`
 > bejegyzésének paramétere is megmondja, melyik végpont bukott el.
 
+> A soros kimenet két számot ír ki a teszt körül, és a **helyük is jelentés**:
+> a `Teszt ciklus index = N` a teszt **előtt** áll, mert azt mondja meg, melyik
+> végpont következik (`0`…`4`); a `Test failed. | Hibák száma = N / 5` viszont a
+> teszt **után**, mert az már az eredmény – hány egymás utáni bukás van, és
+> hány után jön a router újraindítása. (Korábban a hibaszámláló is a teszt előtt
+> állt, így a sorozat első tesztjénél mindig `0`-t mutatott.)
+
 #### Miért nincs ping az internettesztek között
 
 Az ICMP nem bizonyít sem névfeloldást, sem TCP-t. A leggyakoribb valós hiba
@@ -404,6 +411,7 @@ Signal strength (RSSI): -45 dBm
 WIFI OK!
 Uptime: 0h 3m 1s
 Beginning Test.
+Teszt ciklus index = 0
 Microsoft Connect Test
 Igaz érték!
 Successful Test
