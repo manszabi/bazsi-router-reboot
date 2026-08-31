@@ -35,7 +35,7 @@ Az eszköz mindig pontosan egy üzemmódban van.
 | Van mentett SSID? | Viselkedés |
 |---|---|
 | **Nincs** | Azonnal `MODE_CONFIG` |
-| **Van** | **legfeljebb 10 perc** várakozás (`firstStartDelay`), majd **3 próba** (köztük 30 mp). A várakozás korábban véget ér, ha 60 mp-enkénti próbánál a hálózat **és** az internet is megvan |
+| **Van** | **legfeljebb 10 perc** várakozás (`firstStartDelay`), majd **3 próba** (köztük 30 mp). A várakozás korábban véget ér, ha a 60 mp-enkénti próbánál a hálózat **és** az internet is megvan – lásd lent |
 
 A 3 próba után a **hiba oka** dönt, nem az eltelt idő:
 
@@ -108,6 +108,18 @@ Teszttel kimérve (`PO1`–`PO3`):
 | 20 perc | A router reset utáni második ablak elkapja – **még az első körben** |
 | ennél tovább | Óránként új kör, mindegyikben egy router újraindítással |
 | **~46 óránál tovább** | Feladja: AP mód, majd 5 perc után alvás |
+
+**A két hosszú várakozás 60 mp-enkénti próbája** (`onlineProbe()`) két lépésből
+áll, ebben a sorrendben:
+
+1. **Wi-Fi – kísérlet, nem teszt.** Kapcsolat híján csak *kezdeményez* egyet
+   (aszinkron `WiFi.begin()`, nem vár rá), és kilép. A kudarcnak **nincs
+   következménye**: nem nő számláló, nem változik állapot. A „3 próba, aztán
+   router reset" eszkaláció ettől független, az a várakozás *lejárta után* jön.
+2. **Internet – csak meglévő kapcsolat mellett.** Ping a `1.1.1.1`-re. Hálózat
+   nélkül el sem indul, mert értelmetlen lenne.
+
+A várakozás csak akkor zárul korábban, ha **mindkét lépés** sikerül.
 
 Egy kör két próbálkozási ablakot ad (a router reset előtt és után), így az első
 kör önmagában ~25 percet fed le. Ami ebből kimarad, azt a következő körök

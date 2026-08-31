@@ -84,7 +84,7 @@ ha mindkettő megvan, a várakozás azonnal véget ér.
 
 ```mermaid
 flowchart TD
-    IN([SSID mentve, de a WiFi nem jött össze]) --> PRB{"60 s-onként: onlineProbe()<br>1. WiFi.status() == WL_CONNECTED<br>2. ping 1.1.1.1 (fix IP, DNS nélkül)"}
+    IN([SSID mentve, de a WiFi nem jött össze]) --> PRB{"60 s-onként: onlineProbe()<br>1. Wi-Fi: van kapcsolat? (ha nincs: csak<br>aszinkron begin(), következmény nélkül)<br>2. CSAK ha van: ping 1.1.1.1 (DNS nélkül)"}
     PRB -->|"mindkettő OK"| EARLY["firstStart AZONNAL lezárva<br>(nem várjuk ki a maradékot)"]
     EARLY --> DONE
     PRB -->|"bármelyik bukik"| WAIT{"Eltelt már 10 perc?<br>(firstStartDelay)"}
@@ -164,7 +164,7 @@ flowchart TD
     MX -->|"igen (már 4 reset volt)"| NFS["internetFailSleep()<br>EV_SLEEP(2)<br>deep sleep 1 óra"]
     MX -->|nem| P1["Relé = HIGH: router áram nélkül<br>90 s (RESET_PULSE)<br>státusz LED VILLOG 2 Hz, Wi-Fi LED sötét"]
     P1 --> P2["Relé = LOW: router bootol<br>max 10 perc várakozás (RESET_DELAY)<br>gombok + watchdog élnek"]
-    P2 --> PRB{"60 s-onként: onlineProbe()<br>Wi-Fi kapcsolat ÉS ping 1.1.1.1"}
+    P2 --> PRB{"60 s-onként: onlineProbe()<br>1. Wi-Fi: van kapcsolat? (ha nincs: csak<br>aszinkron begin(), következmény nélkül)<br>2. CSAK ha van: ping 1.1.1.1"}
     PRB -->|"mindkettő OK"| GW2
     PRB -->|"még nem, és letelt a 10 perc"| P3["WiFi.disconnect(true)<br>reconnectWifi(): 3 próba, 30 s szünet<br>(a statikus IP/DNS újra beáll)"]
     PRB -->|"még nem, és van hátra idő"| P2

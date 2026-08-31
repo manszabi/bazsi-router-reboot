@@ -882,9 +882,12 @@ void waitWithButtons(uint32_t duration) {
   }
 }
 
-// Vissza van-e minden? Két lépés, ebben a sorrendben:
-//   1. van-e Wi-Fi kapcsolat,
-//   2. ha van: kimegy-e csomag az internetre (ping egy fix IP-re).
+// Vissza van-e minden? Két lépés, ebben a sorrendben - és a SORREND a lényeg:
+//   1. Wi-Fi: van-e kapcsolat? Ha nincs, csak KEZDEMÉNYEZÜNK egyet (aszinkron,
+//      nem várunk rá), és kilépünk. Ez kísérlet, nem teszt: a kudarcnak nincs
+//      következménye.
+//   2. Internet: CSAK ha az 1. lépés szerint van kapcsolat, pingelünk egy fix
+//      IP-t. Hálózat nélkül ennek nem lenne értelme, ezért el sem indul.
 // Csak akkor igaz, ha MINDKETTŐ sikerül. Ezt kizárólag a hosszú várakozások
 // korai lezárására használjuk.
 //
@@ -901,7 +904,11 @@ void waitWithButtons(uint32_t duration) {
 // ír NVS-be, mert a setup() WiFi.persistent(false)-t hívott. Az esemény-napló
 // RTC RAM-ban van. Tehát tetszőleges gyakorisággal ismételhető.
 bool onlineProbe() {
-  // 1. lépés: hálózat.
+  // 1. LÉPÉS - Wi-Fi. Ez NEM teszt, hanem CSATLAKOZÁSI KÍSÉRLET, és nincs
+  // következménye: ha nem sikerül, semmilyen számláló nem nő, semmilyen
+  // állapot nem változik, és a hívó egyszerűen várakozik tovább. (A "3 próba,
+  // aztán router reset" eszkalációhoz ennek semmi köze - az a firstStartDelay
+  // LEJÁRTA után, a reconnectWifi()-ben kezdődik.)
   if (WiFi.status() != WL_CONNECTED) {
     // Nem várunk rá és nem blokkolunk: egy aszinkron újracsatlakozást
     // kezdeményezünk, a választ a KÖVETKEZŐ próba status()-a adja meg. A
@@ -910,10 +917,14 @@ bool onlineProbe() {
     if (ssid[0] != '\0') {
       WiFi.begin(ssid, pass);
     }
+    // ITT VISSZATÉRÜNK: pingelni ilyenkor értelmetlen (és pazarlás) lenne,
+    // hiszen hálózat nélkül a csomag el sem indulna. A 2. lépés tehát CSAK
+    // meglévő kapcsolat mellett fut - ezt az OP4 teszt őrzi.
     return false;
   }
 
-  // 2. lépés: internet.
+  // 2. LÉPÉS - internet. Csak idáig eljutva van értelme: a kapcsolat megvan,
+  // a kérdés már csak az, hogy kifelé is van-e út.
   const IPAddress target(PROBE_PING_IP[0], PROBE_PING_IP[1],
                          PROBE_PING_IP[2], PROBE_PING_IP[3]);
   return testInternetPing(target, "internet");
