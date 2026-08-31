@@ -48,7 +48,8 @@ stateDiagram-v2
 flowchart TD
     PWR([Bekapcsolás / reset / ébredés]) --> PINS["GPIO-k beállítása<br>relé = LOW, státusz LED = HIGH<br>relé hold feloldása (gpio_hold_dis)"]
     PINS --> SER["Serial indítása<br>max 3 s várakozás + 0,5 s CDC-beállás"]
-    SER --> STUCK{"Beragadt gomb?<br>reset (D1) vagy wifireset (D0) = LOW"}
+    SER --> WDT["initWatchdog()<br>TWDT: 90 s, trigger_panic = true<br>a loop task feliratkoztatva<br>innentől a setup() is felügyelt"]
+    WDT --> STUCK{"Beragadt gomb?<br>reset (D1) vagy wifireset (D0) = LOW"}
     STUCK -->|igen| SBLOG["EV_BOOT + EV_STUCK_BUTTON naplózása<br>(csak az első körben – az ismétlődő<br>60 s-os ébredések némák)"]
     SBLOG --> SBLINK["3 s: a két LED FELVÁLTVA villog"]
     SBLINK --> SB60["Deep sleep 60 s<br>csak timer ébresztés, gomb NEM<br>(boot loop ellen)"]
@@ -56,12 +57,11 @@ flowchart TD
     STUCK -->|nem| BOOTLOG["EV_BOOT naplózása"]
     BOOTLOG --> WCHK{"checkWatchdogResets()<br>rendellenes reset volt?<br>(TASK_WDT / INT_WDT / PANIC / LOCKUP)"}
     WCHK -->|"igen, sorozatban a 3."| FATAL["enterFatal()<br>MODE_FATAL, EV_FATAL(3)"]
-    WCHK -->|"nem, vagy még 3 alatt"| FS{"initLittleFS()<br>begin(formatOnFail = true)"}
+    WCHK -->|"nem, vagy még 3 alatt"| FS{"initLittleFS()<br>begin(formatOnFail = true)<br>formázás: 128 szektor, 4-7 s"}
     FS -->|"csatolás sikertelen"| FATAL2["enterFatal()<br>EV_FATAL(1)"]
     FS -->|ok| CFG{"Konfig olvasása:<br>/ssid.txt /pass.txt /ip.txt /gateway.txt<br>(jelszó: v1 hexa dekódolás)"}
     CFG -->|"fájl létezik, de olvashatatlan"| FATAL3["enterFatal()<br>EV_FATAL(2)"]
-    CFG -->|"ok vagy hiányzó fájl"| WDT["initWatchdog()<br>TWDT: 90 s, trigger_panic = true<br>a loop task feliratkoztatva"]
-    WDT --> PERS["WiFi.persistent(false)"]
+    CFG -->|"ok vagy hiányzó fájl"| PERS["WiFi.persistent(false)"]
     PERS --> ISFATAL{MODE_FATAL?}
     ISFATAL -->|igen| TOLOOP([loop: hibajelzés])
     ISFATAL -->|nem| WIFI{"initWiFi()<br>statikus IP ha érvényes, különben DHCP<br>csatlakozás max 20 s"}

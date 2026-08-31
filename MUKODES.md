@@ -370,7 +370,8 @@ történik, és soha nem tér vissza. Kívülről nézve a viselkedés azonos.
 | Paraméter | Érték |
 |---|---|
 | Timeout | **90 mp** |
-| Élesedés | a LittleFS csatolása után, a Wi-Fi indítása **előtt** |
+| Élesedés | a soros port beállása után **azonnal**, a gombellenőrzés és a LittleFS csatolása **előtt** |
+| Etetés nélküli leghosszabb `setup()`-szakasz | a LittleFS formázása: 4–7 mp (rossz esetben ~51 mp), 512 KiB = 128 szektor |
 | Leghosszabb etetés nélküli szakasz (mérve) | **33 mp** (egy halott DNS-be futó HTTP kérés; hallgató szerver mellett 15 mp) |
 | Etetés a hosszú várakozások alatt | ~10 ms-onként |
 | Timeoutkor | panic → újraindulás |

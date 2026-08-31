@@ -284,10 +284,12 @@ bool fsReady = false;
 // definíció szerint helyes - ott nincs mit ellenőrizni.
 bool staticConfigActive = false;
 
-// Fut-e már a watchdog. A setup() blokkoló ciklusai (pl. az initWiFi() 20 mp-es
-// várakozása) még az initWatchdog() ELŐTT futnak; ott a feedLoopWDT() hívás
-// ESP_ERR_NOT_FOUND-ot kapna ("task not found"), amire a core log_e()-t hív -
-// ez 20 mp alatt kétezer hibasort jelentene, ha be van kapcsolva a debug log.
+// Fut-e már a watchdog. Az initWatchdog() a setup() elején fut, de EL IS
+// BUKHAT (kikapcsolt TWDT, sikertelen feliratkozás) - és ilyenkor szándékosan
+// le is iratkozunk. Feliratkozás nélkül a feedLoopWDT() ESP_ERR_NOT_FOUND-ot
+// kapna ("task not found"), amire a core log_e()-t hív: bekapcsolt debug log
+// mellett ez 10 ms-onként egy hibasor a soros porton. Ezért etet minden
+// feedWatchdog() csak ezen a kapcsolón keresztül.
 bool watchdogEnabled = false;
 
 // Watchdog/panic miatti újraindulások számlálója.
@@ -2088,6 +2090,28 @@ void setup() {
 
   printUptime();
 
+  // Innentől figyeli a watchdog a programot - a setup() maradékát is.
+  //
+  // MIÉRT ITT? Amint a soros port használható (hogy a hibaüzenete kimenjen),
+  // és minden más ELŐTT. Korábban a LittleFS csatolása után élesedett, mert a
+  // begin(true) első indításkor FORMÁZ, és az etetés nélküli formázás egy
+  // ~1,5 MB-os partíción 15-20 mp volt - az akkori sémával ez indokolt
+  // kihagyás volt. A partitions_custom.csv 512 KiB-os "spiffs" partíciója
+  // viszont csak 128 szektor: tipikusan 4-7 mp (30-50 ms/szektor), és még a
+  // szélsőségesen lassú, 400 ms/szektoros esetben is ~51 mp - mindkettő bőven
+  // a 90 mp-es WDT_TIMEOUT_MS alatt. Így a formázás már felügyelhető, és a
+  // setup() eddig védtelen szakaszai (gombellenőrzés, csatolás, konfig
+  // olvasás) is a watchdog alá kerülnek.
+  //
+  // A setup() etetés nélküli leghosszabb szakaszai innentől: a beragadt gomb
+  // 3 mp-es villogása (utána deep sleep) és a fenti formázás. Az initWiFi()
+  // 20 mp-es várakozása és minden blockingDelay() magától etet.
+  //
+  // A hardveres interrupt watchdog (ESP_INT_WDT, 300 ms) végig aktív, de az
+  // csak a "kemény" megállást fogja meg (letiltott megszakítás, megállt tick).
+  // A csendes, szabályosan blokkoló beragadást csak ez a task watchdog látja.
+  initWatchdog();
+
   // Mindkét gombot ellenőrizzük: ha bármelyik beragadt, nem indulunk el.
   // Spam-védelem: a beragadt gomb 60 mp-es alvás-ébredés köre percenként adna
   // egy BOOT + STUCK BUTTON párt, ami fél óra alatt kiszorítaná a körpufferből
@@ -2153,23 +2177,6 @@ void setup() {
   Serial.println(" chars password loaded");
   Serial.println(ipStr);
   Serial.println(gatewayStr);
-
-  // Innentől figyeli a watchdog a programot.
-  //
-  // MIÉRT ITT? A LittleFS csatolása UTÁN, de a Wi-Fi indítása ELŐTT.
-  //   - A LittleFS.begin(true) első indításkor FORMÁZ. A partitions_custom.csv
-  //     512 KiB-os "spiffs" partíciója 128 szektor, szektoronként 30-50 ms,
-  //     azaz 4-7 mp etetés nélkül - ezt szándékosan kihagyjuk a felügyeletből,
-  //     hogy egy első bekapcsolás soha ne futhasson watchdog resetbe. (A régi,
-  //     ~1,5 MB-os sémánál ez 15-20 mp volt.)
-  //   - Az utána következő Wi-Fi init viszont a legvalószínűbb lefagyási pont,
-  //     és korábban semmi nem védte: az initWatchdog() a setup() legvégén volt,
-  //     tehát egy WiFi.begin() beragadás örökre megállította volna az eszközt.
-  //
-  // A hardveres interrupt watchdog (ESP_INT_WDT, 300 ms) végig aktív, de az
-  // csak a "kemény" megállást fogja meg (letiltott megszakítás, megállt tick).
-  // A csendes, szabályosan blokkoló beragadást csak ez a task watchdog látja.
-  initWatchdog();
 
   // Ne írjuk a hitelesítő adatokat minden WiFi.begin()-nél az NVS-be (flash kímélés)
   WiFi.persistent(false);

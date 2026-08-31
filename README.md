@@ -503,13 +503,27 @@ Ezért az `initWatchdog()` mindhármat kifejezetten beállítja:
 
 ### Mikor élesedik
 
-A watchdog a **LittleFS csatolása után, de a Wi-Fi indítása előtt** élesedik:
+A watchdog **a soros port beállása után azonnal** élesedik, még a
+gombellenőrzés és a LittleFS csatolása előtt – vagyis a `setup()` gyakorlatilag
+teljes egészében felügyelet alatt van:
 
-| Szakasz | Felügyelve? | Miért |
+| Szakasz | Felügyelve? | Megjegyzés |
 |---|:---:|---|
-| soros port, gombellenőrzés, LittleFS csatolás/**formázás** | nem | a `LittleFS.begin(true)` első indításkor formáz: a 512 KiB-os partíció 128 szektora szektoronként 30–50 ms, azaz 4–7 mp (a régi ~1,5 MB-os sémánál 15–20 mp volt). Ezt szándékosan kihagyjuk, hogy egy első bekapcsolás soha ne fusson watchdog resetbe |
-| `WiFi.persistent()`, `initWiFi()`, AP portál indítása | **igen** | a Wi-Fi init a legvalószínűbb lefagyási pont |
-| `loop()` | **igen** | |
+| `pinMode`-ok, relé hold feloldása, `Serial.begin()` + max. 3 mp várakozás | nem | ide még nem megy ki soros üzenet, tehát az `initWatchdog()` hibajelzése is elveszne |
+| gombellenőrzés, `checkWatchdogResets()` | **igen** | a beragadt gomb 3 mp-et villog, aztán deep sleep |
+| LittleFS csatolás / **formázás** | **igen** | lásd lent |
+| konfiguráció beolvasása | **igen** | négy rövid fájl |
+| `WiFi.persistent()`, `initWiFi()`, AP portál indítása | **igen** | a Wi-Fi init a legvalószínűbb lefagyási pont; a 20 mp-es várakozás magától etet |
+| `loop()` | **igen** | a core minden `loop()` körben etet (`loopTaskWDTEnabled`) |
+
+> **Miért fér bele a formázás?** A `LittleFS.begin(true)` első indításkor
+> formáz, etetés nélkül. A `partitions_custom.csv` 512 KiB-os partíciója
+> **128 szektor**: tipikusan 30–50 ms/szektor, azaz **4–7 mp**, és még a
+> szélsőségesen lassú, 400 ms/szektoros esetben is **~51 mp** – mindkettő a
+> 90 mp-es `WDT_TIMEOUT_MS` alatt marad. A korábbi, ~1,5 MB-os sémánál ez
+> 15–20 mp volt tipikusan, de a rossz esetben **153 mp**, azaz a timeout
+> fölött – **ezért volt ott indokolt kihagyni a formázást a felügyeletből, és
+> ezért fér bele most.** A kisebb partíció tette lehetővé ezt a változtatást.
 
 ### Mit fog el a hardver magától
 
