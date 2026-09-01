@@ -303,6 +303,7 @@ Nem várunk további teszt ciklusokat: ha nincs Wi-Fi, a tesztnek nincs értelme
 |---|---|
 | Portál elérhető: `192.168.4.1` | |
 | Jelzés: **Wi-Fi LED villog 1 Hz**, státusz LED végig **be** | azonnal |
+| Az űrlap előkitöltése | SSID, IP, gateway a mentett értékkel (HTML-escape-elve); **a jelszó soha** |
 | A beállító űrlap forrása | a programba fordítva (`CONFIG_FORM`), nincs feltöltendő `data/` mappa – a portál a LittleFS-ről semmit nem szolgál ki |
 | Tétlenség után deep sleep | **5 perc** (`AP_TIMEOUT_MS`) az utolsó kéréstől |
 | A nyitva lévő lap keep-alive-ja | **60 mp**-enként `GET /ping` (1 bájt válasz) |
@@ -574,5 +575,12 @@ Minden bejegyzés uptime bélyeget, egy eseménykódot és egy paramétert tarta
 | `WDT RESET` | hányadik rendellenes újraindulás |
 | `STUCK BUTTON` | 0 = reset gomb, 1 = wifireset gomb (csak az **első** kör – az ismétlődő 60 mp-es alvás-ébredés körök nem íródnak be újra) |
 
-A `/log` oldal az aktuális állapotot is mutatja: reset ok, watchdog számláló,
-újrapróbálkozási körök, uptime.
+A `/log` oldal az aktuális állapotot is mutatja: **az indulás oka szövegesen**
+(a nyers enum-szám zárójelben marad, hibajelentéshez), watchdog számláló,
+újrapróbálkozási körök, és az **uptime nap/óra/perc/mp alakban** – ugyanúgy,
+ahogy a soros porton. A `Param` oszlop jelentését a lap alján lévő
+jelmagyarázat írja le, tehát a naplóhoz nem kell forráskód.
+
+A naplóoldalon **semmilyen konfigurációs érték nem jelenik meg** – sem az SSID,
+sem az IP, sem a jelszó (nyíltan vagy kódolva). A mentés *ténye* viszont igen
+(`CONFIG SAVED`), mert az a diagnózishoz kell. (Mérve: `LOG2`.)

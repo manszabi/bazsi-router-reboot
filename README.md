@@ -73,13 +73,23 @@ Ha nincs mentett Wi-Fi adat (vagy a Wi-Fi reset gombot megnyomtad):
 1. Az ESP **Access Point módba** lép
 2. Az AP neve: `ESP-<chipmodel>`, jelszó: `12345678`
 3. Csatlakozz az AP-hez, majd nyisd meg a böngészőben: `192.168.4.1`
-4. Töltsd ki az űrlapot:
+4. Töltsd ki az űrlapot (az **SSID, IP és Gateway előkitöltve** jelenik meg a
+   mentett értékekkel – a **jelszó soha nem**, azt mindig újra kell írni):
    - **SSID** – a Wi-Fi hálózat neve (max. 32 karakter)
    - **Password** – a Wi-Fi jelszó (max. 63 karakter)
    - **IP Address** – az ESP kívánt statikus IP-je (opcionális, ha üres → DHCP)
    - **Gateway** – a router IP-je (opcionális, ha üres → DHCP)
 5. Küldés után az ESP újraindul és csatlakozik a megadott hálózathoz
 
+> **Az üres címmező törlést jelent.** Ez a DHCP-re való visszatérés útja – és
+> pontosan ezért van a két címmező előkitöltve: enélkül aki csak a jelszót
+> akarja átírni, a böngésző által üresen küldött mezőkkel csendben elveszítené
+> a statikus IP-jét (mérve: `AP1`, `AP4`).
+>
+> **A jelszó mező viszont mindig üres**, mert azt nem küldjük ki a böngészőnek
+> (`AP2`). Következmény: minden mentésnél újra be kell írni – üresen hagyva
+> nyílt hálózatként mentődik, amit az űrlap ki is ír.
+>
 > **Statikus IP-hez mindkét mezőt ki kell tölteni.** Gateway nélkül a firmware
 > DHCP-re esne vissza, ezért a beállító portál a félig kitöltött párost
 > visszautasítja, ahelyett hogy sikert jelentene egy olyan fix címre, amit az
@@ -859,6 +869,13 @@ beírt adatok sem vesznek el.
   fájlrendszerről semmit nem szolgál ki, a `/` és a `/log` tartalma is a
   programból megy ki.
 - A jelszó soha nem kerül ki nyílt szövegként a soros portra, csak a hossza.
+- **A mentett jelszó semmilyen weboldalon nem érhető el**: sem az űrlap
+  előkitöltésében (`AP2`), sem a naplóoldalon (`LOG2`), sem a hibaüzenetekben –
+  azok fix szövegek, sosem a beírt érték. A beírás `type="password"` mezőben
+  történik, `POST` metódussal, tehát a böngésző előzményeibe sem kerül be.
+- **Az előkitöltött értékek HTML-escape-elve mennek ki** (`AP3`). Az SSID
+  tetszőleges 32 bájt lehet, idézőjelet és `<` jelet is: escape nélkül az
+  előkitöltés maga nyitna XSS-t a saját portálunkon.
 - Az AP jelszava (`12345678`) a forráskódban van; éles használat előtt
   érdemes lecserélni az `AP_PASSWORD` konstansban. A hosszát `static_assert`
   őrzi (WPA2: 8–63 karakter), mert a core rövidebbnél nem indítana AP-t, és a

@@ -213,7 +213,7 @@ flowchart TD
     IN([startConfigPortal]) --> AP["WIFI_AP mód<br>SSID: ESP-ESP32-C3, jelszó: 12345678<br>végpontok: GET / , /ping, /log és POST /"]
     AP --> IDLE["5 perces tétlenségi visszaszámlálás<br>MINDEN kérés (404 is) újraindítja;<br>a nyitott lap 60 s-onként /ping-el"]
     IDLE --> REQ{Kérés típusa}
-    REQ -->|"GET /"| FORM["Beépített beállító űrlap (CONFIG_FORM)<br>a flashből; a LittleFS-ről semmit<br>nem szolgálunk ki"]
+    REQ -->|"GET /"| FORM["Beépített beállító űrlap (sendConfigForm)<br>SSID/IP/gateway ELŐKITÖLTVE, escape-elve;<br>a jelszó SOHA. A LittleFS-ről semmit<br>nem szolgálunk ki"]
     REQ -->|"GET /log"| LOG["Diagnosztikai napló:<br>reset ok, számlálók, 32 esemény"]
     REQ -->|"POST /"| VAL{"1. FÁZIS - validálás:<br>SSID 1-32 (trim), jelszó max 63 (trim),<br>IP és gateway: IPv4, nem 0.0.0.0, trim,<br>statikus IP CSAK párban"}
     VAL -->|hiba| E500["500 + konkrét indok<br>SEMMI nem íródik ki, a futó konfig<br>sem változik, NINCS újraindítás"]
@@ -280,4 +280,4 @@ számláló és a diagnosztikai napló él túl.
 
 *Az ábrák a `bazsi_router_reboot.ino` aktuális állapotát dokumentálják.
 Módosításkor a kóddal együtt frissítendők – a viselkedést a `test/` alatti
-222 forgatókönyves (733 ellenőrzéses) tesztkészlet rögzíti.*
+229 forgatókönyves (779 ellenőrzéses) tesztkészlet rögzíti.*

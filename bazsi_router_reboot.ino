@@ -43,21 +43,16 @@ const char PARAM_GATEWAY[] = "gateway";
   "document.onvisibilitychange=()=>document.hidden||f()</script>"
 const char KEEPALIVE_JS[] = KEEPALIVE_JS_LIT;
 
-// A beállító űrlap. Programba építve él, a flash .rodata szekciójában: nincs
-// külön feltöltendő data/ mappa, és a LittleFS-re csak a négy konfigurációs
-// fájl kerül. Így a fájlrendszer állapotától FÜGGETLENÜL mindig van használható
-// űrlap - korábban egy elfelejtett LittleFS-feltöltés konfigurálhatatlanná
-// tette az eszközt.
-const char CONFIG_FORM[] =
+// A beállító űrlap FEJLÉCE és LÁBLÉCE. A középső, mezőket tartalmazó rész
+// futásidőben generálódik, mert a mentett SSID-t, IP-t és gateway-t
+// ELŐKITÖLTVE mutatjuk - lásd sendConfigForm().
+const char FORM_HEAD[] =
   "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
   "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
   "<title>ESP Wi-Fi Manager</title></head><body>"
   "<h2>ESP Wi-Fi Manager</h2>"
-  "<form action=\"/\" method=\"POST\">"
-  "SSID <input name=\"ssid\" maxlength=\"32\" required><br>"
-  "Password <input name=\"pass\" type=\"password\" maxlength=\"63\"><br>"
-  "IP <input name=\"ip\" maxlength=\"15\" placeholder=\"opcionalis\"><br>"
-  "Gateway <input name=\"gateway\" maxlength=\"15\" placeholder=\"opcionalis\"><br>"
+  "<form action=\"/\" method=\"POST\">";
+const char FORM_TAIL[] =
   "<small>Statikus IP-hez mindket cimmezot toltsd ki, csak IPv4. "
   "DHCP-hez hagyd mindkettot uresen.</small><br>"
   "<input type=\"submit\" value=\"Submit\"></form>"
@@ -436,6 +431,9 @@ bool reset_device();
 void logEvent(EventCode code, uint16_t param);
 bool beginConfigWrite();
 void startConfigPortal();
+const char* resetReasonName(esp_reset_reason_t r);
+void sendConfigForm(AsyncWebServerRequest* request);
+void printHtmlEscaped(AsyncResponseStream* r, const char* s);
 void enterFatal(const char* reason);
 void fatalHalt(const char* reason);
 void enterDeepSleep(uint64_t timerUs);
@@ -472,6 +470,27 @@ void logEvent(EventCode code, uint16_t param) {
   e.reserved = 0;
   rtcEvNext++;
   portEXIT_CRITICAL(&evLogMux);
+}
+
+// Az indulás okának EMBERI neve. A /log oldalon eddig a nyers enum-szám
+// szerepelt ("Utolso indulas oka: 8"), amihez a felhasználónak az ESP-IDF
+// fejlécét kellett volna kikeresnie - épp azt a diagnózist nehezítve, amiért
+// az oldal egyáltalán van. A számot zárójelben megtartjuk, hogy egy
+// hibajelentés továbbra is egyértelmű legyen.
+const char* resetReasonName(esp_reset_reason_t r) {
+  switch (r) {
+    case ESP_RST_POWERON:    return "bekapcsolas / aramtalanitas";
+    case ESP_RST_EXT:        return "kulso reset lab";
+    case ESP_RST_SW:         return "szoftveres ujrainditas (ESP.restart)";
+    case ESP_RST_PANIC:      return "PANIC - a program osszeomlott";
+    case ESP_RST_INT_WDT:    return "megszakitas-watchdog";
+    case ESP_RST_TASK_WDT:   return "TASK WATCHDOG - a loop megallt";
+    case ESP_RST_WDT:        return "egyeb watchdog";
+    case ESP_RST_DEEPSLEEP:  return "ebredes deep sleepbol";
+    case ESP_RST_BROWNOUT:   return "BROWNOUT - leesett a tapfeszultseg";
+    case ESP_RST_CPU_LOCKUP: return "CPU lefagyas";
+    default:                 return "ismeretlen";
+  }
 }
 
 const char* eventName(uint8_t code) {
@@ -1085,6 +1104,59 @@ void waitForConfigWrite() {
   } else {
     Serial.println("A fajliras befejezodott.");
   }
+}
+
+// HTML-escape egy attribútumérték számára.
+//
+// MIÉRT KELL: az SSID tetszőleges 32 bájt lehet - idézőjelet, `<`-t és `&`-et
+// is tartalmazhat. Escape NÉLKÜL az előkitöltés maga nyitna biztonsági rést a
+// saját portálunkon: egy idézőjel kitörne a value="..." attribútumból, egy
+// <script> pedig a lapba kerülne. A mentett SSID ráadásul a POST kezelőn át
+// bármi lehet, tehát ez nem elméleti.
+void printHtmlEscaped(AsyncResponseStream* r, const char* s) {
+  for (const char* p = s; *p != '\0'; p++) {
+    switch (*p) {
+      case '&':  r->print(F("&amp;"));  break;
+      case '<':  r->print(F("&lt;"));   break;
+      case '>':  r->print(F("&gt;"));   break;
+      case '"':  r->print(F("&quot;")); break;
+      case '\'': r->print(F("&#39;"));  break;
+      default:   r->write((uint8_t)*p); break;
+    }
+  }
+}
+
+// A beállító űrlap kiszolgálása, a mentett értékekkel ELŐKITÖLTVE.
+//
+// MIÉRT ELŐKITÖLTVE? Mert az üres címmező TÖRLÉST jelent. Aki statikus IP-vel
+// üzemel és csak a jelszót akarja átírni, annak a böngésző üresen küldené a
+// cím mezőket - és a mentés csendben DHCP-re váltana. (Mérve: AP1.)
+//
+// A JELSZÓT SOHA NEM töltjük elő: az az egyetlen titok ezen a lapon, és a
+// portál WPA2 kulcsa nyilvános, tehát a lap tartalma nem tekinthető védettnek.
+void sendConfigForm(AsyncWebServerRequest* request) {
+  AsyncResponseStream* r = request->beginResponseStream("text/html", 1024);
+  r->print(FORM_HEAD);
+
+  r->print(F("SSID <input name=\"ssid\" maxlength=\"32\" required value=\""));
+  printHtmlEscaped(r, ssid);
+  r->print(F("\"><br>"));
+
+  // A jelszó mező ÜRESEN indul, és a következménye ki van írva: enélkül a
+  // felhasználó azt hinné, hogy a mentett jelszó megmarad.
+  r->print(F("Password <input name=\"pass\" type=\"password\" maxlength=\"63\">"
+             " <small>(ures = nyilt halozat)</small><br>"));
+
+  r->print(F("IP <input name=\"ip\" maxlength=\"15\" placeholder=\"opcionalis\" value=\""));
+  printHtmlEscaped(r, ipStr);
+  r->print(F("\"><br>"));
+
+  r->print(F("Gateway <input name=\"gateway\" maxlength=\"15\" placeholder=\"opcionalis\" value=\""));
+  printHtmlEscaped(r, gatewayStr);
+  r->print(F("\"><br>"));
+
+  r->print(FORM_TAIL);
+  request->send(r);
 }
 
 // A relé lábának rögzítése az alvás idejére. Deep sleep alatt a digitális
@@ -2033,7 +2105,7 @@ void startConfigPortal() {
   // jelszót is.
   server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
     touchApDeadline();
-    request->send(200, "text/html", CONFIG_FORM);
+    sendConfigForm(request);
   });
   // Keep-alive. A nyitva lévő oldal 60 mp-enként meghívja, így az AP mód
   // visszaszámlálása addig tolódik, amíg tényleg ott vagy a lapon. A válasz
@@ -2049,18 +2121,28 @@ void startConfigPortal() {
     touchApDeadline();
     // A stream puffere igény szerint nő (resizeAdd), de akkor soronként
     // újraallokálna. Egy bőséges kezdőmérettel ez egyetlen foglalás lesz:
-    // fejléc + állapot + 32 sor x ~70 bájt + lábléc alatta marad.
-    AsyncResponseStream* r = request->beginResponseStream("text/html", 4096);
+    // fejléc + állapot + 32 sor x ~70 bájt + a ~900 bájtos jelmagyarázat +
+    // lábléc alatta marad.
+    AsyncResponseStream* r = request->beginResponseStream("text/html", 6144);
     r->print(F("<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
                "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
                "<title>Naplo</title></head><body><h2>Diagnosztikai naplo</h2>"));
 
-    r->printf("<p>Utolso indulas oka: %d<br>", (int)esp_reset_reason());
-    r->printf("Watchdog ujraindulasok: %u / %u<br>",
+    const esp_reset_reason_t rr = esp_reset_reason();
+    r->printf("<p><b>Utolso indulas oka:</b> %s (%d)<br>",
+              resetReasonName(rr), (int)rr);
+    r->printf("<b>Watchdog ujraindulasok:</b> %u / %u<br>",
               (unsigned)rtcWdtResets, (unsigned)MAX_WDT_RESETS);
-    r->printf("Ujraprobalkozasi korok: %u / %u<br>",
+    r->printf("<b>Ujraprobalkozasi korok:</b> %u / %u<br>",
               (unsigned)rtcRetryRounds, (unsigned)MAX_RETRY_ROUNDS);
-    r->printf("Uptime: %u mp</p>", (unsigned)(esp_timer_get_time() / 1000000));
+    // Az uptime ugyanabban az alakban, mint a soros porton - a nyers
+    // masodpercbol (pl. "165600 mp") ranezesre semmi nem latszik.
+    {
+      const uint32_t up = (uint32_t)(esp_timer_get_time() / 1000000);
+      r->printf("<b>Uptime:</b> %ud %uh %um %us</p>",
+                (unsigned)(up / 86400), (unsigned)((up % 86400) / 3600),
+                (unsigned)((up % 3600) / 60), (unsigned)(up % 60));
+    }
 
     // Pillanatkép a naplóról a mux alatt: az író (logEvent) a loop taskból
     // fut, ez a kezelő az async_tcp taskból - enélkül félig kiírt bejegyzést
@@ -2087,6 +2169,30 @@ void startConfigPortal() {
       }
       r->print(F("</table>"));
     }
+    // Jelmagyarazat: a Param oszlop szamai kulonben csak a forraskodbol
+    // fejthetok meg - epp az az informacio veszne el, amiert az oldal van.
+    // FIGYELEM a jelolesre: az esemenyneveket SZANDEKOSAN nem tesszuk <b> koze.
+    // A tablazat cellai ">NEV<" alaku szoveget adnak, es a naplo tartalmara
+    // pontosan erre a mintara lehet illeszteni (igy teszi az L2 teszt is).
+    // Egy <b>BOOT</b> ugyanezt a mintat allitana elo a jelmagyarazatban, es
+    // elmosna a kulonbseget "a naplóban VAN ilyen esemeny" es "a lap emliti
+    // ezt az esemenyt" kozott.
+    r->print(F("<h3>Param jelentese</h3><ul>"
+               "<li>BOOT: az indulas oka (lasd fent)</li>"
+               "<li>WIFI OK: hanyadik ujraprobalkozasi korben sikerult</li>"
+               "<li>WIFI LOST: a WiFi.status() erteke</li>"
+               "<li>TEST FAIL: a bukott teszt sorszama (1-5)</li>"
+               "<li>ROUTER RESET: hanyadik ujrainditas (1-4)</li>"
+               "<li>AP MODE: 1 = nincs SSID, 2 = rossz jelszo, "
+               "3 = letelt a 2 nap, 4 = a gateway sem erheto el</li>"
+               "<li>GW UNREACH: 1 = a router reset elott, 2 = utana is</li>"
+               "<li>SLEEP: 1 = ujraprobalkozas, 2 = tartos internetkieses, "
+               "3 = AP idotullepes, 4 = vegzetes hiba</li>"
+               "<li>FATAL: 1 = LittleFS, 2 = konfig olvasas, "
+               "3 = watchdog, 4 = wifireset torles</li>"
+               "<li>WDT RESET: hanyadik rendellenes ujraindulas</li>"
+               "<li>STUCK BUTTON: 0 = reset gomb, 1 = wifireset gomb</li>"
+               "</ul>"));
     r->print(F("<p><i>Az uptime minden indulaskor nullarol indul, ezert a "
                "BOOT sorok jelzik az ujraindulasokat. A naplo az "
                "aramtalanitast nem eli tul.</i></p>"

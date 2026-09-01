@@ -61,7 +61,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 
 ## Lefedett esetek
 
-**222 forgatókönyv, 733 ellenőrzés. Sorlefedettség: 98,48%.**
+**229 forgatókönyv, 779 ellenőrzés. Sorlefedettség: 98,48%.**
 
 | | |
 |---|---|
@@ -79,6 +79,8 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 | `F1`–`F4` | Webszerver: a **programba fordított** beállító űrlap üres fájlrendszer mellett is, **a LittleFS-ről semmit nem szolgál ki** (akkor sem, ha ott vannak a régi fájlok), 404, AP-határidő kitolása |
 | `WDT1`–`WDT8` | Watchdog: konfiguráció, etetés a hosszú blokkolások alatt, `delay()` vs. CPU-pörgetés, a feliratkozás tényleges ellenőrzése |
 | `SN1`–`SN2` | Biztonsági háló: ha a gomb-ébresztés armolása hibázik, időzítő |
+| `AP1`–`AP4` | **AP portál űrlap**: az üres címmező törlést jelent (a DHCP-re váltás útja); az előkitöltés **soha nem tartalmazza a jelszót**; az SSID **HTML-escape-elve** kerül a lapra (XSS ellen); az előkitöltéssel a statikus IP megmarad jelszócserénél |
+| `LOG1`–`LOG3` | **Naplóoldal**: emberi olvasásra készül (szöveges reset ok, nap/óra/perc/mp uptime, `Param` jelmagyarázat, ami nem ütközik a táblázatcella-mintával); **semmilyen konfigurációs érték nem jelenik meg**; a körpuffer körbefordulása után is pontosan 32 sor |
 | `FS11`–`FS14` | **Fájlkezelés hibainjektálással**: sorvégek (CRLF) és csupa-whitespace tartalom, bináris szemét és beágyazott NUL, a puffernél hosszabb fájl (csonkolás túlcsordulás nélkül), menet közben megtelő fájlrendszer (a **zár felszabadul**, a gombok tovább működnek), és a félbeszakadt mentés rögzített viselkedése |
 | `FS1`–`FS10` | LittleFS hibák: csatolás, írásvédettség, megtelt tár, **néma írási hiba**, csonka olvasás, törlés tartalék útvonala |
 | `FT1`–`FT8` | Végzetes hiba: betölthetetlen konfig vs. „nincs még konfig", LED-villogás, gombok |

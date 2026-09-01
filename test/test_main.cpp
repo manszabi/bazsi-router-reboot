@@ -3611,6 +3611,174 @@ static void gombNyomas(int pin, uint32_t tartasMs) {
 // FAJLKEZELES: hibainjektalas a meg nem fedett eshetosegekre
 // ===========================================================================
 
+static void scAP2() {
+  // BIZTONSAG: az elokitoltes SOSEM tartalmazhatja a jelszot - se nyiltan, se
+  // a "v1:" kodolt alakban. A portal WPA2 kulcsa nyilvanos, tehat a lap
+  // tartalma nem tekintheto vedettnek.
+  coldBoot(false, "", "", "", "");
+  setup();
+  CHECK(postConfig("Halozat", "SzuperTitkos42", "192.168.1.200", "192.168.1.1") == 200,
+        "mentes");
+  AsyncWebServerRequest g; g_handlers["/#1"](&g);
+  CHECK(g._code == 200, "a / 200-at ad");
+  CHECK(g._body.find("SzuperTitkos42") == std::string::npos,
+        "a NYILT jelszo NINCS a lapon");
+  CHECK(g._body.find("v1:") == std::string::npos,
+        "a KODOLT jelszo sincs a lapon");
+  CHECK(g._body.find("type=\"password\"") != std::string::npos,
+        "a jelszo mezo type=password (nem latszik gepeles kozben)");
+  // A jelszo mezonek NINCS value attributuma - ezt ugy ellenorizzuk, hogy a
+  // "pass" mezo es a kovetkezo mezo koze nem kerul value=".
+  const size_t pw = g._body.find("name=\"pass\"");
+  const size_t ipm = g._body.find("name=\"ip\"");
+  CHECK(pw != std::string::npos && ipm != std::string::npos && pw < ipm, "a mezok sorrendje");
+  CHECK(g._body.substr(pw, ipm - pw).find("value=") == std::string::npos,
+        "a jelszo mezonek NINCS elokitoltott erteke");
+  // A tobbi mezo VISZONT elo van toltve.
+  CHECK(g._body.find("value=\"Halozat\"") != std::string::npos, "az SSID elokitoltve");
+  CHECK(g._body.find("value=\"192.168.1.200\"") != std::string::npos, "az IP elokitoltve");
+  CHECK(g._body.find("value=\"192.168.1.1\"") != std::string::npos, "a gateway elokitoltve");
+}
+
+static void scAP3() {
+  // BIZTONSAG: az SSID barmilyen 32 bajt lehet. Ha escape nelkul irnank ki egy
+  // value="..." attributumba, egy idezojel kitorne belole, egy <script> pedig
+  // a lapba kerulne - vagyis az elokitoltessel SAJAT MAGUNK nyitnank XSS-t a
+  // sajat portalunkon. Ez a teszt ezt zarja ki.
+  coldBoot(false, "", "", "", "");
+  setup();
+  const char* gonosz = "a\"><script>x</script>&b";
+  CHECK(postConfig(gonosz, "jelszo123", "", "") == 200, "a gonosz SSID elmentheto");
+  AsyncWebServerRequest g; g_handlers["/#1"](&g);
+  // FIGYELEM: a lapon JOGOSAN van egy <script> - a keep-alive. Ezert nem
+  // arra keresunk, hanem konkretan a BEINJEKTALT tartalomra. (A teszt elso
+  // valtozata epp ezen bukott el.)
+  CHECK(g._body.find("<script>x</script>") == std::string::npos,
+        "a beinjektalt <script>x</script> NEM kerul nyersen a lapba");
+  CHECK(g._body.find("\"><script") == std::string::npos,
+        "es az attributumbol sem lehet kitorni");
+  CHECK(g._body.find("&lt;script&gt;") != std::string::npos, "hanem escape-elve");
+  CHECK(g._body.find("&quot;") != std::string::npos, "az idezojel is escape-elve");
+  CHECK(g._body.find("&amp;b") != std::string::npos, "es az & is");
+  // A lap tovabbra is ep marad: a form es a submit gomb megvan.
+  CHECK(g._body.find("</form>") != std::string::npos, "az urlap szerkezete ep");
+}
+
+static void scAP4() {
+  // A JAVITAS ELLENORZESE: az elokitoltott urlappal a bongeszo visszakuldi a
+  // mentett cimeket, tehat a "csak a jelszot irom at" eset NEM torli a
+  // statikus IP-t. (Az AP1 a javitas ELOTTI viselkedest rogziti.)
+  coldBoot(false, "", "", "", "");
+  setup();
+  CHECK(postConfig("Halozat", "jelszo123", "192.168.1.200", "192.168.1.1") == 200, "elso mentes");
+  restartPending = false;
+
+  // A bongeszo azt kuldi vissza, amit a lapon LAT - ezt olvassuk ki.
+  AsyncWebServerRequest g; g_handlers["/#1"](&g);
+  const size_t vi = g._body.find("name=\"ip\"");
+  const size_t vv = g._body.find("value=\"", vi) + 7;
+  const std::string lathatoIp = g._body.substr(vv, g._body.find('"', vv) - vv);
+  CHECK(lathatoIp == "192.168.1.200", "a lapon a mentett IP latszik");
+
+  CHECK(postConfig("Halozat", "ujJelszo456", lathatoIp.c_str(), "192.168.1.1") == 200,
+        "a felhasznalo csak a jelszot irja at, a cimeket a lap kitoltve adta");
+  CHECK(g_fs["/ip.txt"] == "192.168.1.200", "a statikus IP MEGMARADT");
+  CHECK(g_fs["/gateway.txt"] == "192.168.1.1", "es a gateway is");
+}
+
+static void scLOG1() {
+  // A /log oldal EMBERI olvasasra keszul. Eddig a nyers enum-szamot irta ki
+  // ("Utolso indulas oka: 8"), amihez az ESP-IDF fejlecet kellett kikeresni,
+  // es az uptime-ot nyers masodpercben - epp azt a diagnozist neheziti, amiert
+  // az oldal egyaltalan van.
+  // SSID NELKUL, hogy AP modba jussunk (kulonben a portal el sem indul, es
+  // nincs /log kezelo), de deep sleep ebredeskent - igy a reset ok beszedes.
+  coldBoot(false, "", "", "", "", 500, true);
+  setup();
+  CHECK(deviceMode == (DeviceMode)1, "AP modban vagyunk, a portal fut");
+  AsyncWebServerRequest req; g_handlers["/log#1"](&req);
+  const std::string& b = req._body;
+  CHECK(req._code == 200, "a /log 200-at ad");
+  CHECK(b.find("ebredes deep sleepbol") != std::string::npos,
+        "az indulas oka SZOVEGESEN is szerepel");
+  CHECK(b.find("(8)") != std::string::npos,
+        "a nyers szam zarojelben megmarad (hibajelenteshez)");
+  CHECK(b.find("Uptime:</b> 0d 0h") != std::string::npos,
+        "az uptime nap/ora/perc/mp alakban, nem nyers masodpercben");
+  CHECK(b.find("Param jelentese") != std::string::npos,
+        "a Param oszlop jelmagyarazata ott van a lapon");
+  CHECK(b.find("4 = a gateway sem erheto el") != std::string::npos,
+        "es tenyleg megfejtheto belole egy kod");
+  // A jelmagyarazat NEM allithatja elo a tablazatcella ">NEV<" mintajat -
+  // kulonben elmosodna a "van ilyen esemeny a naplóban" es a "a lap emliti"
+  // kozotti kulonbseg. (Ezen bukott el az L2 teszt az elso valtozatnal, ahol
+  // a jelmagyarazat meg <b>BOOT</b>-ot irt.)
+  //
+  // URES naplóval merunk: itt a BOOT sor jogosan lenne benne a tablazatban.
+  rtcEvMagic = 0; rtcEvNext = 0;
+  AsyncWebServerRequest ures; g_handlers["/log#1"](&ures);
+  CHECK(ures._body.find("Param jelentese") != std::string::npos,
+        "a jelmagyarazat ures naplónal is ott van");
+  CHECK(ures._body.find(">BOOT<") == std::string::npos,
+        "de NEM allitja elo a tablazatcella-mintat");
+}
+
+static void scLOG2() {
+  // BIZTONSAG: a naplooldalon SEMMILYEN konfiguracios ertek nem jelenhet meg -
+  // se a jelszo (nyiltan vagy kodolva), se az SSID.
+  coldBoot(false, "", "", "", "");
+  setup();
+  CHECK(postConfig("TitkosHalozat", "SzuperTitkos42", "192.168.1.200", "192.168.1.1") == 200,
+        "mentes");
+  AsyncWebServerRequest req; g_handlers["/log#1"](&req);
+  const std::string& b = req._body;
+  CHECK(b.find("SzuperTitkos42") == std::string::npos, "a nyilt jelszo NINCS a naplon");
+  CHECK(b.find("v1:") == std::string::npos, "a kodolt jelszo sincs");
+  CHECK(b.find("TitkosHalozat") == std::string::npos, "az SSID sincs");
+  CHECK(b.find("192.168.1.200") == std::string::npos, "es a mentett IP sem");
+  // A CONFIG SAVED esemeny viszont latszik - az a diagnozishoz kell.
+  CHECK(b.find("CONFIG SAVED") != std::string::npos, "a mentes TENYE viszont igen");
+}
+
+static void scLOG3() {
+  // A korpuffer korbefordulasa: 40 esemeny utan is pontosan a LEGUTOBBI 32
+  // latszik, a legregebbi felul, es a tabla nem szakad meg.
+  coldBoot(false, "", "", "", "");
+  rtcEvMagic = 0; rtcEvNext = 0;
+  setup();
+  for (int i = 0; i < 40; i++) logEvent((EventCode)2, (uint16_t)i);
+  AsyncWebServerRequest req; g_handlers["/log#1"](&req);
+  const std::string& b = req._body;
+  size_t sorok = 0, tol = 0;
+  while ((tol = b.find("<tr><td>", tol)) != std::string::npos) { sorok++; tol += 8; }
+  CHECK(sorok == 32, "pontosan 32 sor (a korpuffer merete)");
+  CHECK(b.find("<td>39</td>") != std::string::npos, "a LEGUJABB esemeny benne van");
+  CHECK(b.find("<td>7</td>") == std::string::npos, "a kiszorult regi mar nincs");
+  CHECK(b.find("</table>") != std::string::npos, "a tabla rendesen lezarul");
+}
+
+static void scAP1() {
+  // GYANU: az urlap NINCS elokitoltve (a jelszo miatt szandekosan), viszont a
+  // mentes az URES IP/gateway mezot TORLESKENT ertelmezi. Aki statikus IP-vel
+  // uzemel es csak a jelszot akarja atirni, az a bongeszo altal kuldott ures
+  // cimmezokkel csendben DHCP-re valt.
+  coldBoot(false, "", "", "", "");
+  setup();
+  CHECK(postConfig("Halozat", "jelszo123", "192.168.1.200", "192.168.1.1") == 200,
+        "elso mentes statikus IP-vel");
+  CHECK(g_fs["/ip.txt"] == "192.168.1.200", "az IP elmentve");
+  CHECK(g_fs["/gateway.txt"] == "192.168.1.1", "a gateway elmentve");
+  restartPending = false;
+
+  // Most a felhasznalo CSAK a jelszot irja at. A bongeszo mind a negy mezot
+  // elkuldi - a cimmezoket uresen, mert az urlap nem mutatta a mentett erteket.
+  CHECK(postConfig("Halozat", "ujJelszo456", "", "") == 200, "masodik mentes");
+  printf("     [info] a masodik mentes utan /ip.txt='%s' /gateway.txt='%s'\n",
+         g_fs["/ip.txt"].c_str(), g_fs["/gateway.txt"].c_str());
+  CHECK(g_fs["/ip.txt"].empty() && g_fs["/gateway.txt"].empty(),
+        "ures cimmezok -> torles, azaz DHCP (ez a SZANDEKOLT ut vissza DHCP-re)");
+}
+
 static void scFS11() {
   // Sorvegek es csupa-whitespace tartalom. A readConfigValue() az ELSO sort
   // veszi, majd trimInPlace()-t hiv - ami isspace()-t hasznal, tehat a CRLF
@@ -4522,6 +4690,13 @@ static const Scenario kScenarios[] = {
   { "RR1: befagyott DNS – 4 reset, két újraindítás közt legalább 3 perc", scRR1 },
   { "RR2: teljes kiesésnél a 10 perces bootvárakozás érintetlen marad", scRR2 },
   { "RR3: egyetlen sikeres teszt nullázza a reset-számlálót", scRR3 },
+  { "LOG1: a /log emberi olvasásra készül (reset ok, uptime, jelmagyarázat)", scLOG1 },
+  { "LOG2: a naplóoldalon semmilyen konfigurációs érték nem jelenik meg", scLOG2 },
+  { "LOG3: a körpuffer körbefordulása után is pontosan 32 sor", scLOG3 },
+  { "AP1: üres címmező törlésként értelmeződik (a DHCP-re váltás útja)", scAP1 },
+  { "AP2: az előkitöltés SOHA nem tartalmazza a jelszót", scAP2 },
+  { "AP3: az SSID HTML-escape-elve kerül a lapra (XSS ellen)", scAP3 },
+  { "AP4: az előkitöltéssel a statikus IP megmarad jelszócserénél", scAP4 },
   { "FS11: sorvégek és whitespace a konfigfájlban", scFS11 },
   { "FS12: bináris szemét és túl hosszú fájl - nincs túlcsordulás", scFS12 },
   { "FS13: menet közben megtelő fájlrendszer - a zár felszabadul", scFS13 },
