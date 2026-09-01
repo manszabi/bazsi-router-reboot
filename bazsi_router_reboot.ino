@@ -637,6 +637,24 @@ void decodeSecretInPlace(char* buf);
 // csak a legelső híváskor fut), a megszakítás-tiltás belefér.
 portMUX_TYPE evLogMux = portMUX_INITIALIZER_UNLOCKED;
 void logEvent(EventCode code, uint16_t param) {
+  // A KET IDOBELYEGET A KRITIKUS SZAKASZON KIVUL keszitjuk el.
+  //
+  // MIERT? A portENTER_CRITICAL a C3-on letiltja a megszakitasokat, tehat
+  // odabent minden extra munka kozvetlen koltseg. Az uptime egy 64 bites
+  // osztas, a nowEpoch() pedig time()-ot hiv - az ESP-IDF-ben ez a
+  // rendszerora sajat zarjat is megfoghatja. Idegen zarat felvenni letiltott
+  // megszakitasok mellett nem az a minta, amit egy naplozo fuggvenytol
+  // varunk; a struktura sajat kommentje is azt allitja, hogy a szakasz
+  // "rovid". Igy viszont odabent tenyleg csak ertekadasok maradnak.
+  //
+  // Az idobelyegek nehany mikromasodperccel korabbrol szarmaznak - ez a
+  // masodperces felbontas mellett nem szamit.
+  const uint32_t uptimeSec = (uint32_t)(esp_timer_get_time() / 1000000);
+  // Ha az NTP mar szinkronizalt, a valos idot is eltesszuk. Enelkul csak
+  // uptime van, ami minden indulaskor nullarol kezd - ket bootolas esemenyei
+  // igy nem rendezhetok egymashoz.
+  const uint32_t epoch = nowEpoch();
+
   portENTER_CRITICAL(&evLogMux);
   if (rtcEvMagic != EVLOG_MAGIC) {
     rtcEvMagic = EVLOG_MAGIC;
@@ -645,11 +663,8 @@ void logEvent(EventCode code, uint16_t param) {
     memset(rtcEvents, 0, sizeof(rtcEvents));
   }
   EventEntry& e = rtcEvents[rtcEvNext % EVLOG_SIZE];
-  e.uptimeSec = (uint32_t)(esp_timer_get_time() / 1000000);
-  // Ha az NTP mar szinkronizalt, a valos idot is eltesszuk. Enelkul csak
-  // uptime van, ami minden indulaskor nullarol kezd - ket bootolas esemenyei
-  // igy nem rendezhetok egymashoz. A time() nem blokkol es nem allokal.
-  e.epoch = nowEpoch();
+  e.uptimeSec = uptimeSec;
+  e.epoch = epoch;
   e.code = (uint8_t)code;
   e.param = param;
   e.reserved = 0;
@@ -1544,7 +1559,6 @@ void initWatchdog() {
   Serial.println(" s");
 }
 
-// Csak akkor etetünk, ha a loop task már fel van iratkozva.
 // A ket megszakitas-kezelo. IRAM_ATTR: a flash epp foglalt lehet (SPI olvasas),
 // ezert az ISR nem elhet flashben. Mindketto CSAK jelzoket allit - semmi mas.
 // A millis() ISR-bol is hivhato: a core-ban esp_timer_get_time()-ra epul, ami
@@ -1588,6 +1602,7 @@ void armButtonLatches() {
   attachInterrupt(digitalPinToInterrupt(wifiresetPin), onWifiResetButtonEdge, CHANGE);
 }
 
+// Csak akkor etetünk, ha a loop task már fel van iratkozva.
 void feedWatchdog() {
   if (watchdogEnabled) {
     feedLoopWDT();
@@ -3591,8 +3606,8 @@ void loop() {
   // (Mérve: WDT9.)
   //
   // A FELTETEL ALAKJA. Ez volt az EGYETLEN abszolut millis() osszehasonlitas a
-  // programban (a masik 23 mind kulonbseg-alaku). Ket okbol lett belole is
-  // kulonbseg:
+  // programban (az osszes tobbi idozites kulonbseg-alaku). Ket okbol lett
+  // belole is kulonbseg:
   //
   // 1. KORBEFORDULAS. A millis() 49,7 naponta nullara fordul. Abszolut alakban
   //    a feltetel a fordulas utan egy oran at hamis lenne. (Ma nem okozna

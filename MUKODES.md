@@ -1124,7 +1124,13 @@ szándékos:
 
 A puffer két különböző taskból is íródik – a `loop()`-ból és az AsyncTCP
 webszerver taskjából –, ezért minden írás és olvasás `portENTER_CRITICAL`
-kritikus szakaszban történik. A szakaszok **nincsenek egymásba ágyazva**
+kritikus szakaszban történik. A **két időbélyeg viszont a szakaszon kívül**
+készül el: a kritikus szakasz a C3-on letiltja a megszakításokat, tehát odabent
+minden extra munka közvetlen költség – az uptime egy 64 bites osztás, a valós
+idő pedig `time()`-ot hív, ami az ESP-IDF-ben a rendszeróra saját zárját is
+megfoghatja. Idegen zárat felvenni letiltott megszakítások mellett nem az a
+minta, amit egy naplózó függvénytől várunk; így odabent tényleg csak
+értékadások maradnak. A szakaszok **nincsenek egymásba ágyazva**
 (mérve: `LOG5`), így nem tudnak megakadni.
 
 ### Túlcsordulhat-e?
