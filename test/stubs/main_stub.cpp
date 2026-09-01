@@ -29,6 +29,7 @@ bool   g_fsRemoveOk = true;
 bool   g_fsReadable = true;
 bool   g_fsSilentWriteFail = false;
 bool   g_fsShortRead = false;
+int  g_fsShortReadSkip = 0;
 esp_reset_reason_t g_resetReason = ESP_RST_POWERON;
 esp_reset_reason_t esp_reset_reason(void) { return g_resetReason; }
 size_t g_fsUsed() { size_t n = 0; for (auto& kv : g_fs) n += kv.second.size(); return n; }

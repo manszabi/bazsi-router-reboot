@@ -61,7 +61,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 
 ## Lefedett esetek
 
-**278 forgatókönyv, 1025 ellenőrzés. Sorlefedettség: 96,95%.**
+**286 forgatókönyv, 1065 ellenőrzés. Sorlefedettség: 98,64%.**
 
 | | |
 |---|---|
@@ -96,6 +96,8 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 | `HP1`–`HP9` | **Heap felügyelet**: az állapotsor félóránként megy ki (nem körönként), a figyelmeztetés csak a küszöb átlépésekor; egyetlen mélypont **nem** indít újra, tartós kritikus szint igen; a router reset számláló **túléli** az újraindulást és pontosan egyszer használódik fel; AP módban, relé-impulzus és fájlírás közben nincs újraindulás; három sikertelen kör után `MODE_FATAL`, nem boot loop; és egy valódi lassú szivárgás végponttól végpontig |
 | `GWH1`–`GWH5` | **Mi marad meg egy heap-újraindulás után**: a router reset utáni **ellenőrző ablakban** nincs önkéntes újraindulás (a gateway-eszkaláció kétfázisú, és a fázisokat összekötő állapot nem vinne át) – mutációval ellenőrizve; az ablak végén a döntés rendesen megszületik (AP mód a helyes indoklással); a teljes leltár arról, mi vész el, és miért olcsó újraszámolni; és a **2 napos ablak** számlálója (`RTC_DATA_ATTR`, tehát szoftveres resetre nullázódna) szintén átmegy – de csak a saját újraindulásunkon, gombnyomásnál marad a tiszta lap |
 | `NV1`–`NV11` | **A napló mentése a fájlrendszerre**: kimegy a három fontos pillanatban (és a relé kapcsolása **előtt**); az írás sikerességét visszaolvasás ellenőrzi, a néma írási hibát is elkapva; a mentés atomikusan szerzi meg a zárat és fel is oldja, foglalt zárnál kimarad; mentés közben nincs gombos újraindulás és másik írás; a lap a **frissebbet** tölti be (élő RTC → RTC, áramszünet után → fájl); hiányzó, üres, csonka, rossz magic-ű és hazudós fejlécű fájl **egyike sem okoz gondot**, mindkettő üresnél nincs napló a lapon; NTP időbélyeg; a félúton bukó betöltés nem hagy kevert puffert; **mind a négy alvás** menti a naplót (nem csak a két időzített), és csatolatlan fájlrendszernél magától kimarad; végül az **óraszinkron minden kapcsolati úton elindul** – a korai kilépéseken is, ahol az `initWiFi()` nem fut le; és **sikertelen NTP mellett** a teljes eszkaláció végigfut, a `/log` a darabszám-alapú szabályra esik vissza, `-` áll az Idő oszlopban, és sehol nincs hamis 1970-es dátum |
+| `NV12`–`NV16` | **A naplómentés hibaútjai**: megtelt fájlrendszer (rövid írás), a **flash kímélése** (változás nélkül nem írunk újra), a „mentve: …" időbélyeg, és az olvashatatlan fájlrendszer három ága – írás után lehetetlen visszaolvasás, megnyithatatlan naplófájl a lapon, félbeszakadó fejléc-átugrás |
+| `NV15`, `AP5`, `AP6`, `WF11` | **A lefedettség-mérésből előkerült vakfoltok**: mind a **10 indulási ok** emberi neve a `/log` oldalon (plusz a nem nevesített `ESP_RST_USB`); **aposztróf** és társai az SSID-ben (a HTML-escape ezen ága sosem futott le); mentés csatolatlan fájlrendszerrel → tiszta 500; és a „router reset után sem jött vissza a WiFi" hibaág |
 | `LOG7`–`LOG9` | **A naplózás változásainak utóhatásai**: a megnőtt `/log` oldal (Idő oszlop, Forrás sor, két új eseménykód) a legrosszabb esetben – tele körpuffer, valós időbélyegekkel – is **4546 bájt**, tehát belefér a stream 6144 bájtos kezdő pufferébe; egy soros porton keresztüli firmware frissítés után a **régi elrendezésű** RTC napló érvénytelen (a magic egyben verziójelző); és a `wifireset` a naplófájlt szándékosan **nem** törli |
 | `CC1`–`CC3` | **Két task, egy memória**: a portál futása alatt a `loop` egyetlen `WiFi.begin()`-t sem ad ki (tehát a konfigurációs puffereket nem olvassa), miközben mentések érkeznek; ugyanez a `MODE_FATAL` ágon, ahol a webszerver **még fut**; és két mentés között a négy puffer mindig **együtt** vált át |
 | `E1`–`E6` | Végponttól végpontig: egészséges ciklus, router reset, AP mód, gombok, visszatérő WiFi |
@@ -133,6 +135,7 @@ elérhetetlen – ezeket **nem** kell tesztelni:
 | Hol | Miért nem érhető el |
 |---|---|
 | `eventName()` `default` ága | mind a **14** eseménykódnak van címkéje – az `L6` mindet ellenőrzi. Ez a lista **kétszer is elcsúszott** (előbb a `GW UNREACH`, majd a `LOW HEAP` / `HEAP RESTART` maradt ki), ezért a teszt kommentje most kimondja: új eseménykódnál ezt is bővíteni kell |
+| A maradék ~1,4% | mind **megjelölve** a forrásban: védelmi ágak (`eventName` `default`, `localtime_r` hibája, `encodeSecret` túlcsordulása – ez utóbbi szerkezetileg elérhetetlen, mert 3 + 2×63 = 129 = a puffer mérete), és olyan sorok, ahová csak a **két task közötti valódi verseny** vezet (a gombkezelők foglalt-zár visszatérései). A `break` a `wifiGiveUp()` után azért fehér, mert a harness az elalvást kivétellel modellezi |
 | `readConfigValue()` `file.close()` a könyvtár-ágon | a stub nem tud könyvtárat adni |
 | `readChunked()` záró `return n`-je | csak akkor érhető el, ha a záró CRLF olvasása közben szakad meg a stream – a `CH*` esetek a többi ágon lépnek ki |
 | `testInternetPing()` záró `return`-je | a ciklus minden ága korábban visszatér (az utolsó körben `remaining == 0`) |
