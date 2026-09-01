@@ -61,7 +61,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 
 ## Lefedett esetek
 
-**245 forgatókönyv, 865 ellenőrzés. Sorlefedettség: 97,69%.**
+**250 forgatókönyv, 883 ellenőrzés. Sorlefedettség: 97,69%.**
 
 | | |
 |---|---|
@@ -92,6 +92,8 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 | `FT1`–`FT8` | Végzetes hiba: betölthetetlen konfig vs. „nincs még konfig", LED-villogás, gombok |
 | `WF1`–`WF6` | Csatlakozási hiba: újrapróbálkozás vs. AP portál, RTC-számláló |
 | `WD1`–`WD13` | Ismétlődő watchdog újraindulás; a leghosszabb etetés nélküli szakasz minden üzemmódban, a **halott DNS** legrosszabb esetét is beleértve |
+| `WDT14`–`WDT15` | **Az „1 óra hibátlan működés” mihez képest mér**: a mostani indulás kezdetéhez, nem abszolút `millis()` értékhez – nagy kezdő `millis()` mellett és a **körbefordulás** átlépésekor is (mindkét mérés elbukik, ha valaki visszanézi abszolút alakra) |
+| `CC1`–`CC3` | **Két task, egy memória**: a portál futása alatt a `loop` egyetlen `WiFi.begin()`-t sem ad ki (tehát a konfigurációs puffereket nem olvassa), miközben mentések érkeznek; ugyanez a `MODE_FATAL` ágon, ahol a webszerver **még fut**; és két mentés között a négy puffer mindig **együtt** vált át |
 | `E1`–`E6` | Végponttól végpontig: egészséges ciklus, router reset, AP mód, gombok, visszatérő WiFi |
 | `P1`–`P20` | Beállító portál mentése: **két fázisú commit** (hibás mezőnél semmi sem íródik), validáció, írási hiba, jelszó-szivárgás, határidő, IP+gateway páros, whitespace (az IP/gateway vágását is beleértve), mentés közbeni gombnyomás, halasztott újraindítás, **503 zárolt konfignál** |
 | `CPU1`–`CPU2` | A loop() nem pörgeti a CPU-t a várakozó állapotokban |

@@ -1015,6 +1015,45 @@ void waitWithButtons(uint32_t duration) {
 // FLASH: ez a függvény semmit nem ír a fájlrendszerre, és a WiFi.begin() sem
 // ír NVS-be, mert a setup() WiFi.persistent(false)-t hívott. Az esemény-napló
 // RTC RAM-ban van. Tehát tetszőleges gyakorisággal ismételhető.
+// KET TASK, EGY MEMORIA. A programban ket task fut: a loop task es az
+// AsyncTCP webszerver "async_tcp" taskja. Az alabbi globalisokhoz mindketto
+// hozzafer - ezert erdemes egy helyen kimondani, mi vedi oket:
+//
+//   apDeadline              az async task irja (touchApDeadline, mind a 4
+//                           kezelo), a loop olvassa. volatile, 32 bites
+//                           igazitott szo - a C3-on egyetlen utasitas, nem
+//                           szakadhat ketté.
+//   restartPending/restartAt  ugyanez, volatile.
+//   savingConfig            spinlock (beginConfigWrite) - ez a KONFIGZAR.
+//   rtcEvents/rtcEvNext     evLogMux kritikus szakasz mindket iranyban.
+//   rtcWdtResets            az async task CSAK OLVASSA (a /log lapon), a loop
+//   rtcRetryRounds          irja. Igazitott szo, tehat nem szakadhat ketté; a
+//                           lapon legfeljebb egy pillanattal regi ertek all -
+//                           diagnosztikai kijelzon ez nem szamit.
+//   ssid/pass/ipStr/gatewayStr   lasd alább.
+//
+// A NEGY KONFIGURACIOS PUFFERT az async task IRJA (a POST kezelo 2. fazisa),
+// a loop task pedig OLVASSA - a WiFi.begin() hivasaiban. Ezt NEM zar vedi,
+// hanem egy szerkezeti invarians:
+//
+//   Az initWiFi() es az onlineProbe() CSAK olyan helyekrol fut, ahol a
+//   beallito portal nem letezik.
+//
+// Miert all ez? A portalt egyedul a startConfigPortal() inditja, az pedig
+// deviceMode = MODE_CONFIG-ot allit, es a server.begin() az UTOLSO sora. A
+// loop() a MODE_CONFIG (es a MODE_FATAL) againak elejen visszater - egyik ag
+// sem er el sem initWiFi()-ig, sem onlineProbe()-ig. Visszafele ut nincs:
+// MODE_CONFIG-bol csak ujraindulassal vagy MODE_FATAL-ba lehet kilepni, es
+// MODE_MONITOR-ba egyik sem vezet vissza. A setup() ket MODE_MONITOR
+// ertekadasa a portal letrejotte ELOTT van.
+//
+// Ket kezelo egymassal sem versenyez: az ESPAsyncWebServer MINDEN kezelot
+// ugyanazon az async_tcp taskon, sorosan hiv - tehat a GET urlap (ami olvassa
+// az ssid-t) es a POST (ami irja) sem futhat egyszerre.
+//
+// HA EZ VALAHA MEGVALTOZNA - barmi, ami a portal futasa kozben hivna
+// initWiFi()-t vagy onlineProbe()-ot -, a negy puffert zar ala kell tenni.
+// (Merve: CC1, CC2.)
 bool onlineProbe() {
   // 1. LÉPÉS - Wi-Fi. Ez NEM teszt, hanem CSATLAKOZÁSI KÍSÉRLET, és nincs
   // következménye: ha nem sikerül, semmilyen számláló nem nő, semmilyen
@@ -2144,8 +2183,11 @@ void handleFirstStart(uint32_t currentMillis) {
     Serial.println("First start wait end (halozat es internet visszajott).");
     digitalWrite(wifiledPin, HIGH);
   }
-  // Innentől a firstStart lezárult: a timing.startMillis-t senki nem olvassa
-  // többé, ezért nincs értelme frissíteni.
+  // Innentől a firstStart lezárult. A timing.startMillis viszont NEM válik
+  // érdektelenné: a watchdog számláló nullázása is ehhez méri az "1 óra
+  // hibátlan működést" (loop(), WDT_COUNTER_CLEAR_MS). Ezért a mező végig a
+  // BOOT időbélyege marad - frissíteni nemcsak felesleges, hanem hibás is
+  // lenne, mert eltolná a watchdog-ablakot.
   uiFlags.firstStart = false;
 }
 
@@ -2759,7 +2801,26 @@ void loop() {
   // cipelt volna magával, és egy jóval későbbi, magában ártalmatlan glitch
   // vitte volna a hármas küszöbre - vagyis feleslegesen MODE_FATAL-ba.
   // (Mérve: WDT9.)
-  if (rtcWdtResets != 0 && currentMillis >= WDT_COUNTER_CLEAR_MS) {
+  //
+  // A FELTETEL ALAKJA. Ez volt az EGYETLEN abszolut millis() osszehasonlitas a
+  // programban (a masik 23 mind kulonbseg-alaku). Ket okbol lett belole is
+  // kulonbseg:
+  //
+  // 1. KORBEFORDULAS. A millis() 49,7 naponta nullara fordul. Abszolut alakban
+  //    a feltetel a fordulas utan egy oran at hamis lenne. (Ma nem okozna
+  //    hibat, mert a szamlalo addigra ugyis nullazva van - de ez ervelessel
+  //    igazolt biztonsag, nem a kifejezes alakjabol kovetkezo. A kulonbseg
+  //    alak elojel nelkuli aritmetikaval magatol atvesszeli a fordulast.)
+  //
+  // 2. AZ INDULASI PONT KIMONDASA. Az abszolut alak azt a hallgatolagos
+  //    feltevest hordozta, hogy a millis() MINDEN indulaskor nullarol kezd.
+  //    Ez IGAZ - az ESP-IDF kimondja, hogy deep sleepbol ebredve az esp_timer
+  //    (es igy az Arduino millis(), ami ebbol szarmazik) NULLAROL indul ujra;
+  //    a sleep idejevel csak a LIGHT sleep utan lep elore, es csak a
+  //    gettimeofday() az, ami a deep sleepet is atvinne. Igy viszont a
+  //    feltetel maga mondja ki, mihez kepest mer: a setup() kezdetehez.
+  //    (Merve: WDT14.)
+  if (rtcWdtResets != 0 && currentMillis - timing.startMillis >= WDT_COUNTER_CLEAR_MS) {
     rtcWdtResets = 0;
     printUptime();
     Serial.println("1 ora hibatlan mukodes - a watchdog szamlalo nullazva.");

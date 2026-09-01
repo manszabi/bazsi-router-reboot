@@ -447,6 +447,18 @@ történik, és soha nem tér vissza. Kívülről nézve a viselkedés azonos.
 | Timeoutkor | panic → újraindulás |
 | 3 rendellenes újraindulás után | `MODE_FATAL` |
 | A számláló nullázódik | áramtalanításkor, vagy **1 óra** hibátlan működés után – **minden üzemmódban**, az AP portált és a first start várakozást is beleértve (mérve: `WDT9`) |
+| Az „1 óra" mihez képest | a **mostani indulás** kezdetéhez (`timing.startMillis`), nem abszolút `millis()` értékhez (`WDT14`, `WDT15`) |
+
+Az utolsó sor apróságnak tűnik, de ez volt a program **egyetlen abszolút
+`millis()` összehasonlítása** – a másik 23 időzítés mind különbség-alakú. Két
+hallgatólagos feltevést hordozott: hogy a `millis()` minden induláskor nulláról
+kezd (ez igaz, lásd a 14. fejezet uptime-megjegyzését), és hogy nem fordul körbe
+(ez 49,7 napig igaz). A különbség-alak mindkettőtől függetlenné teszi, és a
+`timing.startMillis` maga mondja ki, mihez mérünk.
+
+> Ezért a `timing.startMillis` mezőt a `firstStart` lezárása után **sem
+> frissítjük**: végig a boot időbélyege marad. Egy frissítés eltolná a
+> watchdog-ablakot.
 
 Rendellenesnek számít: `ESP_RST_TASK_WDT`, `ESP_RST_INT_WDT`, `ESP_RST_WDT`,
 `ESP_RST_PANIC`, `ESP_RST_CPU_LOCKUP`.
@@ -644,7 +656,53 @@ pedig mindkettőt, gyorsabban – az egyik együtt, a másik ellenfázisban.
 
 ---
 
-## 12. A soros port
+## 12. Két task, egy memória
+
+A programban két task fut: a `loop` task és az AsyncTCP webszerver
+**`async_tcp`** taskja (ez utóbbi csak AP beállító módban). Néhány globálishoz
+mindkettő hozzáfér – itt van egy helyen, mi védi őket:
+
+| Globális | `async_tcp` | `loop` | Mi védi |
+|---|---|---|---|
+| `apDeadline` | ír (mind a 4 kezelő) | olvas | `volatile`, igazított 32 bites szó – a C3-on egyetlen utasítás |
+| `restartPending`, `restartAt` | ír (POST) | olvas | `volatile` |
+| `savingConfig` | foglal/elenged (POST) | foglal (gombok, leállás) | **spinlock** (`beginConfigWrite()`) |
+| `rtcEvents`, `rtcEvNext` | ír (`CONFIG SAVED`), olvas (`/log`) | ír, olvas | **`evLogMux`** kritikus szakasz |
+| `rtcWdtResets`, `rtcRetryRounds` | **csak olvas** (`/log`) | ír | igazított szó – a lapon legfeljebb egy pillanattal régi érték áll |
+| `ssid`, `pass`, `ipStr`, `gatewayStr` | ír (POST 2. fázisa) | olvas (`WiFi.begin()`) | **szerkezeti invariáns**, lásd lent |
+
+### A négy konfigurációs puffer
+
+Ezt a négyet **nem zár védi**, hanem az, hogy a két hozzáférés sosem eshet
+egybe:
+
+> Az `initWiFi()` és az `onlineProbe()` csak olyan helyekről fut, ahol a
+> beállító portál nem létezik.
+
+Miért áll ez?
+
+- A portált egyedül a `startConfigPortal()` indítja, az pedig `MODE_CONFIG`-ot
+  állít, és a `server.begin()` az **utolsó sora**.
+- A `loop()` a `MODE_CONFIG` és a `MODE_FATAL` ágának elején **visszatér** –
+  egyik ág sem ér el sem `initWiFi()`-ig, sem `onlineProbe()`-ig.
+- **Visszaút nincs:** `MODE_CONFIG`-ból csak újraindulással vagy `MODE_FATAL`-ba
+  lehet kilépni; `MODE_MONITOR`-ba egyik sem vezet vissza. A `setup()` két
+  `MODE_MONITOR` értékadása a portál létrejötte **előtt** van.
+- Két kezelő **egymással sem** versenyez: az ESPAsyncWebServer minden kezelőt
+  ugyanazon az `async_tcp` taskon, sorosan hív – tehát a GET űrlap (ami olvassa
+  az SSID-t) és a POST (ami írja) sem futhat egyszerre.
+
+Mérve: `CC1` (a portál futása alatt a `loop` egyetlen `WiFi.begin()`-t sem ad
+ki, miközben mentések érkeznek), `CC2` (ugyanez a `MODE_FATAL` ágon, ahol a
+webszerver **még fut**, mert a `server.end()` csak az `enterDeepSleep()`-ben
+van), `CC3` (két mentés között a négy puffer mindig együtt vált át).
+
+> **Ha ez valaha megváltozna** – bármi, ami a portál futása közben hívna
+> `initWiFi()`-t vagy `onlineProbe()`-ot –, a négy puffert zár alá kell tenni.
+
+---
+
+## 13. A soros port
 
 | | |
 |---|---|
@@ -672,7 +730,7 @@ sort sem ír** (`SER3`).
 Ezt három szabály tartja fenn:
 
 - **Az ismétlődő események csak egyszer.** A `TEST FAIL`, a `WIFI LOST` és a
-  `STUCK BUTTON` sorozatokból csak az első kerül ki (lásd a 13. fejezetet).
+  `STUCK BUTTON` sorozatokból csak az első kerül ki (lásd a 14. fejezetet).
 - **A villogó ciklusok némák.** A LED-kezelés nem ír semmit.
 - **Sikeres teszt = egy sor.** A `testInternetHTTP()` sikernél nem írja ki sem
   a kapott törzset, sem külön visszaigazolást – csak eltérésnél, ahol a kapott
@@ -680,7 +738,7 @@ Ezt három szabály tartja fenn:
 
 ---
 
-## 13. Diagnosztikai napló
+## 14. Diagnosztikai napló
 
 Az eszköz az utolsó **32 eseményt** RTC memóriában tárolja, és a beállító
 portál `/log` oldalán kiírja. Soros kábel nélkül is megtudható, mi történt.
@@ -696,6 +754,14 @@ portál `/log` oldalán kiírja. Soros kábel nélkül is megtudható, mi tört�
 amiket ki akarunk vizsgálni. Mérete 264 bájt a C3 ~8 KB-os RTC memóriájából.
 
 Minden bejegyzés uptime bélyeget, egy eseménykódot és egy paramétert tartalmaz:
+
+> ⚠️ **Az uptime bélyeg az AKTUÁLIS indulás óta telt időt jelenti, nem az
+> összeset.** Deep sleepből ébredve az `esp_timer` (és így az Arduino
+> `millis()` is) **nulláról indul újra** – az ESP-IDF ezt kimondottan leírja: a
+> számláló csak *light* sleep után lép előre az alvás idejével, és egyedül a
+> `gettimeofday()` az, ami a deep sleepet is átvinné. A naplóban tehát az
+> uptime minden `BOOT` sornál visszaáll nullára; a `BOOT` bejegyzések jelölik
+> az alvás-határokat.
 
 | Esemény | A paraméter jelentése |
 |---|---|

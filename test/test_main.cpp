@@ -3876,6 +3876,173 @@ static void scLOG3() {
   CHECK(b.find("</table>") != std::string::npos, "a tabla rendesen lezarul");
 }
 
+// --- Ido-alapfeltevesek es a ket task kozotti megosztott allapot ------------
+
+static void scWDT14() {
+  // A WATCHDOG SZAMLALO NULLAZASA MIHEZ KEPEST MER?
+  //
+  // Ez volt az EGYETLEN abszolut millis() osszehasonlitas a programban
+  // ("currentMillis >= WDT_COUNTER_CLEAR_MS"); a masik 23 idozites mind
+  // kulonbseg-alaku. Az abszolut alak ket hallgatolagos feltevest hordozott:
+  //
+  //  (a) hogy a millis() minden indulaskor NULLAROL kezd. Ez IGAZ - az
+  //      ESP-IDF kimondja, hogy deep sleepbol ebredve az esp_timer (es igy az
+  //      Arduino millis()) nullarol indul ujra; a sleep idejevel csak a LIGHT
+  //      sleep utan lep elore. De a kod ezt sehol nem mondta ki.
+  //  (b) hogy a millis() nem fordul korbe. Ez 49,7 napig igaz.
+  //
+  // A kulonbseg-alak mindkettotol fuggetlenne teszi. Ez a teszt azt meri, amit
+  // a feltetel ALLIT: a szamlalo egy oraval a MOSTANI indulas utan nullazodik,
+  // fuggetlenul attol, hol allt a millis() a bootolaskor.
+  //
+  // A merest KETSZER futtatjuk: egyszer nulla kozeli, egyszer nagy kezdo
+  // millis()-szel. Ha valaki visszairna az abszolut alakra, a masodik kor
+  // AZONNAL nullazna - ott bukna el.
+  const uint32_t bazisok[] = { 1u, 40u * 24 * 3600 * 1000 };  // ~0 es ~40 nap
+  for (uint32_t bazis : bazisok) {
+    coldBoot(true, "TestNet", "pw", "", "", 500, true);
+    g_millis = bazis;
+    rtcWdtMagic = 0;
+    setup();
+    rtcWdtResets = 2;                      // van mit nullazni
+    const uint32_t indulas = timing.startMillis;
+
+    // Kozvetlenul az egy ora ELOTT: meg NEM nullazhat.
+    g_millis = indulas + 59u * 60 * 1000;
+    loop();
+    CHECK(rtcWdtResets == 2, "egy oran BELUL meg nem nullaz");
+
+    // Es egy oraval a MOSTANI indulas utan: nullaz.
+    g_millis = indulas + 61u * 60 * 1000;
+    loop();
+    CHECK(rtcWdtResets == 0, "egy ora hibatlan mukodes utan viszont nullaz");
+  }
+}
+
+static void scWDT15() {
+  // ...ES A KORBEFORDULASON AT IS. A millis() 49,7 naponta nullara fordul.
+  // Ha az eszkoz epp a fordulas kozelében indul, az egy ora akkor is egy ora
+  // legyen. Elojeles vagy abszolut alaknal ez elbukna.
+  coldBoot(true, "TestNet", "pw", "", "");
+  // A BAZIS MEGVALASZTASA SZAMIT. 0xFFFFFF00 (256 ms-re a fordulas elott) NEM
+  // volna eleg eles: ott a fordulas utani ertek majdnem pontosan az eltelt
+  // idovel egyezik, tehat meg az abszolut alak is atmenne. 65 masodperccel a
+  // fordulas ele allva viszont a fordulas utani millis() 65 mp-cel KEVESEBB
+  // az eltelt idonel - es epp ez buktatna meg az abszolut osszehasonlitast.
+  g_millis = 0xFFFF0000u;                  // ~65,5 mp-re a fordulas elott
+  rtcWdtMagic = 0;
+  setup();
+  rtcWdtResets = 1;
+  const uint32_t indulas = timing.startMillis;
+
+  g_millis = indulas + 59u * 60 * 1000;    // ez mar SZANDEKOSAN atfordult
+  loop();
+  CHECK(rtcWdtResets == 1, "a fordulas utan sem nullaz korabban");
+  g_millis = indulas + 61u * 60 * 1000;
+  loop();
+  CHECK(rtcWdtResets == 0, "de az egy ora letelte utan igen");
+}
+
+static void scCC1() {
+  // KET TASK, EGY MEMORIA - 1. resz: A NEGY KONFIGURACIOS PUFFER.
+  //
+  // Az ssid/pass/ipStr/gatewayStr puffereket az async_tcp task IRJA (a POST
+  // kezelo 2. fazisa), a loop task pedig OLVASSA - a WiFi.begin() hivasaiban.
+  // Ezt NEM zar vedi, hanem egy szerkezeti invarians: az initWiFi() es az
+  // onlineProbe() csak olyan helyekrol fut, ahol a portal nem letezik.
+  //
+  // Ez ma igaz, de SEHOL nem volt kimondva es meg kevesbe merve - egy kesobbi
+  // modositas eszrevetlenul eltorhetne. A meres a kovetkezmenyt fogja meg:
+  // amig a portal fut, a loop task EGYETLEN WiFi.begin()-t sem ad ki, tehat
+  // a puffereket nem is olvassa.
+  coldBoot(false, "", "", "", "");
+  setup();
+  CHECK(deviceMode == (DeviceMode)1, "AP modban vagyunk, a portal fut");
+  const int beginBefore = wifiSim.beginCount;
+
+  // Fusson a portal jo sokaig, es kozben erkezzen tobb mentes is - vagyis
+  // pontosan az az idoszak, amikor az async task a puffereket irja.
+  int guard = 0;
+  const uint32_t t0 = g_millis;
+  try {
+    while (g_millis - t0 < 4u * 60 * 1000 && ++guard < 200000) {
+      loop();
+      if (guard % 5000 == 0) {
+        postConfig("Halozat", "jelszo123", "192.168.1.200", "192.168.1.1");
+        restartPending = false;            // ne induljon ujra a meres kozben
+        savingConfig = false;
+      }
+    }
+  } catch (DeepSleepSignal&) {} catch (RestartSignal&) {}
+
+  CHECK(wifiSim.beginCount == beginBefore,
+        "a portal futasa alatt a loop EGYETLEN WiFi.begin()-t sem adott ki");
+  CHECK(g_fs["/ssid.txt"] == "Halozat", "kozben viszont tenylegesen mentettunk");
+
+  // A masik fele: a MODE_CONFIG-bol nincs visszaut MODE_MONITOR-ba, tehat a
+  // portal futasa kozben a monitor ag SOSEM indulhat el.
+  CHECK(deviceMode == (DeviceMode)1, "a mod nem valtott vissza monitorra");
+}
+
+static void scCC2() {
+  // KET TASK, EGY MEMORIA - 2. resz: A VEGZETES HIBA AGA.
+  //
+  // A MODE_CONFIG-bol EGYETLEN kilepes van a mod-gepben: a MODE_FATAL (a
+  // wifireset gomb sikertelen torlese). A webszervert viszont ez NEM allitja
+  // le - csak az enterDeepSleep() hivja a server.end()-et. Tehat van egy
+  // allapot, amelyben a portal MEG FUT, de a mod mar nem MODE_CONFIG. A
+  // kerdes: ilyenkor sem nyul a loop task a konfiguracios pufferekhez?
+  coldBoot(false, "", "", "", "");
+  setup();
+  CHECK(deviceMode == (DeviceMode)1, "AP mod");
+  g_fs["/ssid.txt"] = "Valami";           // legyen mit torolni
+  g_fsRemoveOk = false;                   // ...de a torles bukjon
+  g_fsWritable = false;
+
+  const int beginBefore = wifiSim.beginCount;
+  // A wifireset gomb -> doWifiReset() -> sikertelen torles -> fatalHalt(),
+  // ami a helyszinen, blokkolva jelez es SOSEM ter vissza.
+  g_pinRead[PIN_WIFIBTN] = LOW;
+  bool slept = false;
+  try {
+    for (int i = 0; i < 200000 && !slept; i++) { wifiresetbutton(); g_millis += 10; }
+  } catch (DeepSleepSignal&) { slept = true; } catch (RestartSignal&) {}
+  CHECK(deviceMode == (DeviceMode)2, "MODE_FATAL lett a sikertelen torlestol");
+  CHECK(wifiSim.beginCount == beginBefore,
+        "a vegzetes hiba again sem olvassa a loop a konfiguracios puffereket");
+}
+
+static void scCC3() {
+  // KET TASK, EGY MEMORIA - 3. resz: A KEZELOK EGYMASSAL SEM VERSENYEZNEK.
+  //
+  // Az ESPAsyncWebServer MINDEN kezelot ugyanazon az async_tcp taskon, sorosan
+  // hiv. Ezert olvashatja a GET urlap az ssid-t zar nelkul, mikozben a POST
+  // irja: a ketto nem futhat egyszerre.
+  //
+  // OSZINTEN A TESZT ERTEKEROL: a host-harness a kezeloket ugyis sorosan
+  // hivja, tehat a KONYVTAR taskmodelljet ez a teszt NEM tudja bizonyitani -
+  // az a libbol kovetkezik. Amit rogzit, az a KOVETKEZMENY, es az mar valodi
+  // regressziot fog meg: ket mentes kozott a negy puffer mindig EGYUTT valt at
+  // (se felig regi, se felig uj), tehat a POST 2. fazisa atomi egysegkent
+  // viselkedik a kesobbi olvasok fele.
+  coldBoot(false, "", "", "", "");
+  setup();
+  CHECK(postConfig("ElsoHalozat", "jelszo123", "", "") == 200, "elso mentes");
+  restartPending = false;
+
+  AsyncWebServerRequest r1; g_handlers["/#1"](&r1);
+  CHECK(r1._body.find("value=\"ElsoHalozat\"") != std::string::npos,
+        "a GET urlap a TELJES, epp ervenyes SSID-t mutatja");
+
+  CHECK(postConfig("MasodikHalozat", "masikjelszo", "", "") == 200, "masodik mentes");
+  restartPending = false;
+  AsyncWebServerRequest r2; g_handlers["/#1"](&r2);
+  CHECK(r2._body.find("value=\"MasodikHalozat\"") != std::string::npos,
+        "a kovetkezo GET mar a TELJES uj erteket - nincs felig atirt allapot");
+  CHECK(r2._body.find("ElsoHalozat") == std::string::npos,
+        "a regibol semmi nem maradt benne");
+}
+
 // --- Gombpattogas es a soros port eletciklusa -------------------------------
 
 // VALODI gombnyomas modellezese, PATTOGASSAL. Egy mechanikus nyomogomb sem a
@@ -5371,6 +5538,11 @@ static const Scenario kScenarios[] = {
   { "LOG3: a körpuffer körbefordulása után is pontosan 32 sor", scLOG3 },
   { "LOG6: a naplo szamlaloja korbefordulhat - az index attol ep marad", scLOG6 },
   { "SH1: leallas elott a zarat MEG IS SZEREZZUK, nem csak megvarjuk", scSH1 },
+  { "WDT14: a watchdog szamlalo a MOSTANI indulashoz kepest mer", scWDT14 },
+  { "WDT15: ...es a millis() korbefordulasan at is", scWDT15 },
+  { "CC1: a portal futasa alatt a loop nem olvassa a konfig puffereket", scCC1 },
+  { "CC2: a vegzetes hiba again sem olvassa oket", scCC2 },
+  { "CC3: a webszerver kezeloi egymassal sem versenyeznek", scCC3 },
   { "PWR1: aramszunet - a router bootolasa alatt nem nyul a relehez", scPWR1 },
   { "PWR2: aramszunet hosszu router-boottal - hol a turelem hatara", scPWR2 },
   { "PWR3: kezi aramtalanitas uzem kozben - mennyi a turelmi ido", scPWR3 },
