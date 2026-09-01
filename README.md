@@ -1067,20 +1067,21 @@ a reset gombot.
 
 **Az áramszünetet is túléli** – mert a program a fontos pillanatokban kiírja a
 naplót a LittleFS-re is (`/evlog.bin`): **router reset előtt**, **AP módba
-váltás előtt**, és **az 1 órás alvás előtt**. Ezek azok a pontok, ahol vagy
+váltás előtt**, és **minden alvás előtt**. Ezek azok a pontok, ahol vagy
 hosszabb idő következik, vagy az eszköz beavatkozik – és mindkettő után könnyen
 jöhet egy áramszünet, ami az RTC naplót elvinné.
 
 | | |
 |---|---|
+| Mikor | router reset előtt, AP módba váltás előtt, és **minden alvás előtt** (egyetlen közös ponton, az `enterDeepSleep()` elején) |
 | Írás közben | nincs alvás, újraindulás és másik írás – ugyanaz a **konfigurációs zár**, amit a webes mentés használ; foglalt zárnál a mentés **kimarad**, nem blokkol |
 | Sikeresség | **visszaolvasással** ellenőrizve; a sikertelenség **nem végzetes**, az RTC napló ettől még ép |
 | A `/log` oldal | a **frissebbet** tölti be, és kiírja, melyik forrásból dolgozik |
 | Hiányzó / üres / hibás fájl | nem hiba: az RTC naplót mutatja |
 | Ha mindkettő üres | egyszerűen nincs napló a lapon |
 
-**Valós idő:** sikeres csatlakozás után elindul az óraszinkron
-(`hu.pool.ntp.org`, magyar időzóna a nyári időszámítással). Amíg nincs szinkron,
+**Valós idő:** amint van kapcsolat – **bármelyik úton** jött is létre –, elindul
+az óraszinkron (`hu.pool.ntp.org`, magyar időzóna a nyári időszámítással). Amíg nincs szinkron,
 a lap `-`-t ír az Idő oszlopba – a napló ettől még működik. A valós idő a deep
 sleepet **túléli**, ezért használható a bejegyzések rendezésére bootolásokon át.
 

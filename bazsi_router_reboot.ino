@@ -224,14 +224,6 @@ constexpr uint64_t STUCK_BUTTON_SLEEP_US = 60ULL * 1000000ULL;    // 60 másodpe
 // tehát a 3 mp csak annyit késleltet, ami után úgyis a 60 mp-es alvás jön.
 constexpr uint32_t STUCK_BUTTON_CONFIRM_MS = 3000;
 
-// --- Heap felugyelet -------------------------------------------------------
-//
-// MIERT KELL? A sketch maga semmit nem allokal dinamikusan, az
-// ESPAsyncWebServer / AsyncTCP / a Wi-Fi driver viszont igen. Egy lassu
-// szivargas vagy elaprozodas honapokig eszrevetlen marad, aztan egy nap az
-// eszkoz "csak ugy" nem mukodik - allokacios hiba eseten a legtobb konyvtar
-// csendben elbukik, nem panikol. Ezert merunk, kiirunk, es vegso esetben
-// magunktol ujraindulunk, MIELOTT barmi elromlana.
 // --- Valos ido (NTP) -------------------------------------------------------
 //
 // MIERT KELL? A naplo eddig csak uptime belyeget hordozott, ami minden
@@ -249,6 +241,14 @@ constexpr char NTP_TZ[] = "CET-1CEST,M3.5.0,M10.5.0/3";
 // szinkron nelkul 1970-bol indul, tehat egy egyszeru also korlat elegendo.
 constexpr uint32_t NTP_MIN_VALID_EPOCH = 1735689600UL;
 
+// --- Heap felugyelet -------------------------------------------------------
+//
+// MIERT KELL? A sketch maga semmit nem allokal dinamikusan, az
+// ESPAsyncWebServer / AsyncTCP / a Wi-Fi driver viszont igen. Egy lassu
+// szivargas vagy elaprozodas honapokig eszrevetlen marad, aztan egy nap az
+// eszkoz "csak ugy" nem mukodik - allokacios hiba eseten a legtobb konyvtar
+// csendben elbukik, nem panikol. Ezert merunk, kiirunk, es vegso esetben
+// magunktol ujraindulunk, MIELOTT barmi elromlana.
 constexpr uint32_t HEAP_CHECK_INTERVAL_MS = 10 * 1000;        // mintaveteli koz
 constexpr uint32_t HEAP_LOG_INTERVAL_MS   = 30 * 60 * 1000;   // rendszeres sor
 
@@ -370,8 +370,6 @@ enum ConfigStatus : uint8_t {
 State currentState = TESTING_STATE;
 DeviceMode deviceMode = MODE_MONITOR;
 
-// Az aszinkron webszerver callbackjéből nem szabad blokkolni/újraindítani,
-// ezért csak jelzünk, az újraindítást a loop() végzi el.
 // Sikerült-e a LittleFS csatolása. Ha nem, a beállítások nem menthetők.
 bool fsReady = false;
 
@@ -446,7 +444,9 @@ RTC_DATA_ATTR uint32_t rtcRetryRounds = 0;
 // --- Diagnosztikai eseménynapló ---------------------------------------------
 // RTC_NOINIT_ATTR: túléli a deep sleepet, a watchdog resetet ÉS a reset gombot
 // is - vagyis pont azokat a hibákat, amiket ki akarunk vizsgálni. Csak az
-// áramtalanítás törli. Az ESP32-C3-on ~8 KB RTC fast memória van, ez 264 bájt.
+// áramtalanítás törli. Az ESP32-C3-on ~8 KB RTC memória van; ez a napló
+// 392 bájt (2 x 4 bájt fejléc + 32 x 12 bájt bejegyzés), a program összes RTC
+// állapota együtt is ~420 bájt.
 enum EventCode : uint8_t {
   EV_BOOT = 1,          // param: reset ok (esp_reset_reason_t)
   EV_WIFI_OK = 2,       // param: kör sorszám, amiben sikerült
@@ -564,6 +564,8 @@ RTC_NOINIT_ATTR uint8_t  rtcCarryResetEvents;  // atvitt resetEvents (CARRY_NONE
 // kapna eselyt a konfiguracio javitasara. Ezert ezt is atvisszuk.
 RTC_NOINIT_ATTR uint32_t rtcCarryRetryRounds;
 
+// Az aszinkron webszerver callbackjéből nem szabad blokkolni/újraindítani,
+// ezért csak jelzünk, az újraindítást a loop() végzi el.
 volatile bool restartPending = false;
 volatile uint32_t restartAt = 0;
 
@@ -614,6 +616,7 @@ bool loadEventLogHeader(EvFileHeader& fej);
 bool loadEventLogEntries(const EvFileHeader& fej, EventEntry* ki);
 uint32_t nowEpoch();
 void startNtp();
+void ensureNtp();
 void initHeapState();
 void applyHeapCarry();
 bool initWiFi();
@@ -988,6 +991,11 @@ uint32_t nowEpoch() {
   return (uint32_t)t;
 }
 
+// Elindult-e mar az oraszinkron a MOSTANI kapcsolaton?
+bool ntpStarted = false;
+// Bejelentettuk-e mar a soros porton ebben a bootban? (Lasd startNtp().)
+bool ntpAnnounced = false;
+
 // Az SNTP kliens elinditasa. CSAK elinditja: a valasz a hatterben erkezik, a
 // hivas nem var ra. Tobbszor is hivhato (ujracsatlakozasnal), a kliens
 // ujraindul. A rendszeroraval egyutt a nyari idoszamitas kezelese is beall.
@@ -998,9 +1006,52 @@ uint32_t nowEpoch() {
 // hasznalhato a naplo bejegyzesek rendezesere bootolasokon at.
 void startNtp() {
   configTzTime(NTP_TZ, NTP_SERVER);
+  // A KIIRAS CSAK AZ ELSO ALKALOMMAL. Az SNTP klienst minden
+  // ujracsatlakozasnal ujra kell inditani (a disconnect a netifet is
+  // lebontja), egy PISLAKOLO kapcsolat viszont masodpercenkent tobbszor is
+  // ad ilyen atmenetet - a kiirast tehat ugyanaz a spam-vedelmi szabaly koti,
+  // mint a WIFI LOST sorokat: csak a sorozat elso tagja beszel.
+  // (Merve: LOG4, ami a soros sor/perc erteket is meri.)
+  //
+  // A jelzo FAJL-SZINTU, nem fuggveny-szintu static - ugyanaz a szabaly, mint
+  // a heap felugyelet orainal: a sketch per-boot allapota egy helyen legyen
+  // visszaallithato (a teszt-harness hidegindulasa igy tudja nullazni).
+  if (ntpAnnounced) {
+    return;
+  }
+  ntpAnnounced = true;
   printUptime();
   Serial.print("NTP inditva: ");
   Serial.println(NTP_SERVER);
+}
+
+// Az oraszinkron gondozasa: elinditja, AMINT van halozat - barmelyik uton is
+// jott letre a kapcsolat.
+//
+// MIERT NEM AZ initWiFi()-BOL? Mert nem minden kapcsolat rajta keresztul jon
+// letre. Harom ag kerulte volna meg:
+//   - az initWiFi() "mar csatlakozva vagyunk" korai visszaterese,
+//   - a handleFirstStart() korai kilepese (a proba igazolta a kapcsolatot,
+//     tehat nincs mit ujracsatlakoztatni) - ez a LEGGYAKORIBB helyreallasi
+//     ut aramszunet utan,
+//   - es a FAILURE_STATE RESET_DELAY korai kilepese.
+// Mindharomban elmaradt volna a szinkron, es a naplo epoch mezoje vegig 0
+// maradt volna. Ezert a gondozas a loop()-bol fut, egyetlen helyrol: egy uj
+// kapcsolati ut sem tudja elfelejteni. (Merve: NV10.)
+//
+// A jelzot a kapcsolat elvesztesekor toroljuk, mert a WiFi.disconnect(true) a
+// netifet is lebontja - ujracsatlakozas utan az SNTP klienst ujra kell
+// inditani.
+void ensureNtp() {
+  if (WiFi.status() != WL_CONNECTED) {
+    ntpStarted = false;
+    return;
+  }
+  if (ntpStarted) {
+    return;
+  }
+  ntpStarted = true;
+  startNtp();
 }
 
 // Egy idopont ember altal olvashato alakja. Ha nincs valos ido, a hivo
@@ -1992,9 +2043,6 @@ bool initWiFi() {
   Serial.print("Signal strength (RSSI): ");
   Serial.print(WiFi.RSSI());
   Serial.println(" dBm");
-  // Most van halozat: elinditjuk az oraszinkront. Nem varunk ra - a valasz a
-  // hatterben erkezik, addig a naplo epoch mezoje 0 marad.
-  startNtp();
   return true;
 }
 
@@ -2066,6 +2114,21 @@ bool reset_device() {
 // Közös elalvás. timerUs = 0 esetén NINCS időzített ébresztés: az eszköz
 // magától nem tér vissza, csak a reset gombra vagy áramtalanításra.
 void enterDeepSleep(uint64_t timerUs) {
+  // A NAPLO KIIRASA, MINDEN alvas elott. Korabban ez csak a ket idozitett
+  // alvasnal (retrySleep, internetFailSleep) allt, kulon-kulon a hivo
+  // fuggvenyben - az apSleep() es a fatalSleep() kimaradt belole. Pedig a
+  // kriterium mindegyikre all: hosszabb ido kovetkezik, ami alatt egy
+  // aramszunet elviheti az RTC naplot. A vegzetes hibanal ez a
+  // legfontosabb: epp azt akarjuk kesobb kivizsgalni.
+  //
+  // A kozos pontra hozas egyben megszunteti azt, hogy egy uj alvasi ut
+  // eseten el lehessen felejteni. A hivas a zar megszerzese ELOTT van, mert
+  // a saveEventLog() sajat maga szerzi meg es oldja fel a zarat - a
+  // lockConfigBeforeShutdown() viszont mar nem adja vissza.
+  //
+  // Csatolatlan fajlrendszernel (pl. FATAL(1)) a mentes magatol kimarad.
+  saveEventLog("alvas elott");
+
   // Egyetlen torlópont MINDEN alvásra (apSleep, internetFailSleep,
   // retrySleep, fatalSleep): fájlírás közben nem alszunk el.
   lockConfigBeforeShutdown();
@@ -2134,10 +2197,7 @@ void internetFailSleep() {
   Serial.print((unsigned long)(SLEEP_DURATION_US / 60000000ULL));
   Serial.println(" percre, utana automatikus ujraprobalkozas.");
   logEvent(EV_SLEEP, 2);
-  // Egy ora alvas kovetkezik. Ha kozben aramszunet lesz, az RTC naplo
-  // elveszik - ezert a fajlba is kiirjuk, mielott elalszunk.
-  saveEventLog("tartos internetkieses, alvas elott");
-  enterDeepSleep(SLEEP_DURATION_US);
+  enterDeepSleep(SLEEP_DURATION_US);   // a naplot az enterDeepSleep() menti
 }
 
 // A hálózat nem látszik. Lehet, hogy a router fagyott le - pontosan erre való
@@ -2177,8 +2237,7 @@ void retrySleep() {
   Serial.println(MAX_RETRY_ROUNDS);
   Serial.println("Alvas 1 orara, utana automatikus ujraprobalkozas.");
   logEvent(EV_SLEEP, 1);
-  saveEventLog("ujraprobalkozasi alvas elott");
-  enterDeepSleep(SLEEP_DURATION_US);
+  enterDeepSleep(SLEEP_DURATION_US);   // a naplot az enterDeepSleep() menti
 }
 
 // Nem sikerult csatlakozni a 3 probaval sem. Itt dol el, hogy tovabb varunk-e
@@ -3031,8 +3090,10 @@ void startConfigPortal() {
     bool ipSet = false;
     bool gwSet = false;
 
-    const int params = request->params();
-    for (int i = 0; i < params; i++) {
+    // size_t, nem int: a valodi AsyncWebServerRequest::params() ezt adja
+    // vissza, es a szukites -Wconversion mellett figyelmeztetest is kap.
+    const size_t params = request->params();
+    for (size_t i = 0; i < params; i++) {
       const AsyncWebParameter* p = request->getParam(i);
       if (!p->isPost()) {
         continue;
@@ -3509,6 +3570,9 @@ void loop() {
   // kell, ahol epp baj van), az ujrainditas viszont csak monitor modban
   // tortenhet - lasd a checkHeap() kizarasait.
   checkHeap(currentMillis);
+  // Az oraszinkron gondozasa: minden uzemmodban, mert a valos ido a naplo
+  // ertelmezesehez kell - es AP modban is naplozunk.
+  ensureNtp();
 
   if (deviceMode == MODE_FATAL) {
     // Mindkét LED együtt, gyorsan villog. A program szándékosan nem fut

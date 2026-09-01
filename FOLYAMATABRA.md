@@ -11,7 +11,8 @@ Jelölés: lekerekített doboz = belépési/kilépési pont, rombusz = döntés,
 téglalap = művelet. Az `EV_*` címkék a diagnosztikai napló eseménykódjai
 (lásd `MUKODES.md` 15. fejezet). A `saveEventLog()` a naplót a LittleFS-re is
 kiírja – három fontos pillanatban: **router reset előtt**, **AP módba váltás
-előtt**, és **az 1 órás alvás előtt**; így egy áramszünet sem viszi el.
+előtt**, és **minden alvás előtt** (egyetlen közös ponton, az
+`enterDeepSleep()` elején); így egy áramszünet sem viszi el.
 
 ---
 
@@ -174,7 +175,7 @@ flowchart TD
     GW1 -->|nem| CNT
     GWL --> CNT["resetEvents++<br>EV_ROUTER_RESET<br>saveEventLog() – a napló kiírása<br>a fájlrendszerre, MÉG a relé előtt"]
     CNT --> MX{"resetEvents >= 5?"}
-    MX -->|"igen (már 4 reset volt)"| NFS["internetFailSleep()<br>EV_SLEEP(2) + saveEventLog()<br>deep sleep 1 óra"]
+    MX -->|"igen (már 4 reset volt)"| NFS["internetFailSleep()<br>EV_SLEEP(2)<br>deep sleep 1 óra"]
     MX -->|nem| P1["Relé = HIGH: router áram nélkül<br>90 s (RESET_PULSE)<br>státusz LED VILLOG 2 Hz, Wi-Fi LED sötét"]
     P1 --> P2["Relé = LOW: router bootol<br>max 10 perc várakozás (RESET_DELAY)<br>gombok + watchdog élnek"]
     P2 --> PRB{"60 s-onként: onlineProbe()<br>1. Wi-Fi: van kapcsolat? (ha nincs: csak<br>aszinkron begin(), következmény nélkül)<br>2. CSAK ha van: ping 1.1.1.1"}
@@ -198,7 +199,7 @@ flowchart TD
     AUTH -->|nem| INC["rtcRetryRounds++<br>(RTC memória: túléli a deep sleepet,<br>bekapcsolásra nullázódik)"]
     INC --> R33{"rtcRetryRounds >= 33?<br>(MAX_RETRY_ROUNDS)"}
     R33 -->|"igen – ~46 óra telt el"| AP3["startConfigPortal()<br>EV_AP_MODE(3)"]
-    R33 -->|nem| SL["retrySleep()<br>EV_SLEEP(1) + saveEventLog()<br>deep sleep 1 óra, majd új kör"]
+    R33 -->|nem| SL["retrySleep()<br>EV_SLEEP(1)<br>deep sleep 1 óra, majd új kör"]
 ```
 
 Egy kör ébren töltött ideje ~25,5 perc (10 perc várakozás + 3 próba + 90 s
@@ -257,7 +258,8 @@ Minden alvás a közös `enterDeepSleep()`-en megy át:
 
 ```mermaid
 flowchart TD
-    IN([enterDeepSleep timerUs]) --> W["lockConfigBeforeShutdown()<br>fájlírás közben nem alszunk<br>(a zárat meg is szerzi)"]
+    IN([enterDeepSleep timerUs]) --> SV["saveEventLog()<br>a napló kiírása a fájlrendszerre<br>(minden alvás előtt)"]
+    SV --> W["lockConfigBeforeShutdown()<br>fájlírás közben nem alszunk<br>(a zárat meg is szerzi)"]
     W --> OFF["LED-ek + relé = LOW<br>relé hold: gpio_hold_en + deep_sleep_hold<br>WiFi le, webszerver le, Serial le"]
     OFF --> DET["A gomb-megszakítások leválasztása<br>(ugyanazok a GPIO regiszterek)"]
     DET --> ARM["Minden ébresztőforrás törlése,<br>majd: reset gomb (D1 = GPIO3, RTC-képes)<br>élesítése LOW szintre"]
@@ -286,4 +288,4 @@ számláló és a diagnosztikai napló él túl.
 
 *Az ábrák a `bazsi_router_reboot.ino` aktuális állapotát dokumentálják.
 Módosításkor a kóddal együtt frissítendők – a viselkedést a `test/` alatti
-275 forgatókönyves (1001 ellenőrzéses) tesztkészlet rögzíti.*
+277 forgatókönyves (1015 ellenőrzéses) tesztkészlet rögzíti.*

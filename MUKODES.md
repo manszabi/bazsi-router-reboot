@@ -904,7 +904,9 @@ portál `/log` oldalán kiírja. Soros kábel nélkül is megtudható, mi tört�
 | **Áramtalanítás** | **nem** – de a fájlba mentett napló igen, lásd lent |
 
 `RTC_NOINIT_ATTR`-ben van, ezért éli túl a resetet is – pont azokat a hibákat,
-amiket ki akarunk vizsgálni. Mérete 264 bájt a C3 ~8 KB-os RTC memóriájából.
+amiket ki akarunk vizsgálni. Mérete **392 bájt** (2 × 4 bájt fejléc + 32 × 12
+bájt bejegyzés) a C3 ~8 KB-os RTC memóriájából; a program összes RTC állapota
+együtt is ~420 bájt.
 
 Minden bejegyzés uptime bélyeget, egy eseménykódot és egy paramétert tartalmaz:
 
@@ -953,7 +955,16 @@ pillanatokban** kiírja a naplót a LittleFS-re is (`/evlog.bin`):
 |---|---|
 | **Router reset előtt** | épp azért nyúlunk a hálózathoz, mert valami nem stimmel – itt a legnagyobb az esély egy áramszünetre |
 | **AP módba váltás előtt** | az AP mód azt jelenti, hogy az eszköz feladta; épp ezt az előzményt akarja látni az, aki odamegy és megnyitja a portált |
-| **Az 1 órás alvás előtt** | hosszú idő következik, ami alatt egy áramszünet elviheti az RTC naplót |
+| **Minden alvás előtt** | hosszú idő következik, ami alatt egy áramszünet elviheti az RTC naplót |
+
+Az alvások mentése **egyetlen közös ponton**, az `enterDeepSleep()` elején
+történik – így mind a négy alvási út (`retrySleep`, `internetFailSleep`,
+`apSleep`, `fatalSleep`) megkapja, és egy **új** alvási úttól sem lehet
+elfelejteni. Korábban a mentés külön-külön állt a két időzített alvásnál, és a
+lejárt AP mód meg a végzetes hiba kimaradt belőle – pedig a végzetes hibánál a
+legfontosabb, hiszen épp azt akarjuk később kivizsgálni. (Mérve: `NV9`.)
+Csatolatlan fájlrendszernél a mentés magától kimarad, és nem akasztja meg az
+alvást.
 
 A fájl a teljes körpuffer pillanatképe, **kiegyenesítve** (a legrégebbitől a
 legújabbig), így az olvasónak nem kell tudnia, hol tartott a gyűrű.
@@ -1024,13 +1035,23 @@ ami a mentett napló értelmezéséhez kell.
 |---|---|
 | Szerver | `hu.pool.ntp.org` |
 | Időzóna | `CET-1CEST,M3.5.0,M10.5.0/3` – magyar idő, a nyári időszámítás váltásaival |
-| Indítás | sikeres Wi-Fi csatlakozás után, **nem blokkol** (a válasz a háttérben érkezik) |
+| Indítás | a `loop()`-ból, amint van kapcsolat – **bármelyik úton** jött is létre; **nem blokkol** (a válasz a háttérben érkezik) |
+| Újracsatlakozás után | újraindul (a `disconnect(true)` a netifet is lebontja), de a soros porton **csak egyszer** jelenti be |
 | Amíg nincs szinkron | az `epoch` mező 0 marad, a lap `-`-t ír az Idő oszlopba – a napló ettől még működik |
 
 > A valós idő a **deep sleepet túléli**. Az `esp_timer` (és így a `millis()`)
 > ébredéskor nulláról indul, a `gettimeofday()` alapú rendszeróra viszont az RTC
 > órából jön – egy 1 órás alvás után is jó időt mutat. Épp ezért használható a
 > bejegyzések rendezésére bootolásokon át.
+
+> **Miért a `loop()`-ból, és nem az `initWiFi()`-ből?** Mert nem minden kapcsolat
+> azon keresztül jön létre. Három ág kerülte volna meg: az `initWiFi()` „már
+> csatlakozva vagyunk" korai visszatérése, a `handleFirstStart()` korai kilépése
+> (a próba már igazolta a kapcsolatot – **ez a leggyakoribb helyreállási út
+> áramszünet után**), és a `FAILURE_STATE` `RESET_DELAY` korai kilépése.
+> Mindháromban elmaradt volna a szinkron, és a napló `epoch` mezője végig 0
+> maradt volna – épp a mentett napló értelmezése romlott volna el. (Mérve:
+> `NV10`, mutációval is ellenőrizve.)
 
 ### Hová és mikor íródik a napló (RTC)
 

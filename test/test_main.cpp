@@ -86,6 +86,7 @@ void lockConfigBeforeShutdown();
 extern uint32_t g_epochNow;
 void doWifiReset();
 extern int g_ntpStarts;
+void enterFatal(const char* reason);
 void startConfigPortal();
 bool beginConfigWrite();
 void checkHeap(uint32_t now);
@@ -93,6 +94,8 @@ extern uint32_t heapCheckLast;
 extern uint32_t heapLogLast;
 extern uint8_t  heapCritStreak;
 extern bool     heapWarnActive;
+extern bool     ntpStarted;
+extern bool     ntpAnnounced;
 constexpr uint8_t EV_TEST_FAIL_C = 4;
 constexpr uint8_t EV_FATAL_C = 9;
 void resetbutton();
@@ -173,6 +176,8 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   // visszaallithassa oket - kulonben egy korabbi forgatokonyv figyelmeztetes-
   // allapota atszivarogna a kovetkezobe.
   heapCheckLast = 0; heapLogLast = 0; heapCritStreak = 0; heapWarnActive = false;
+  ntpStarted = false; ntpAnnounced = false;
+  g_epochNow = 0; g_ntpStarts = 0;
   // A soros eletciklus merese is hidegindul (lasd SER6/SER7).
   g_serialOn = false; g_serialBaud = 0; g_serialFirstWriteMs = 0;
   g_serialWritesAfterEnd = 0; g_serialFlushedAll = true;
@@ -4021,6 +4026,131 @@ static void scNV1() {
   }
 }
 
+static void scNV9() {
+  // MIND A NEGY ALVAS MENTI A NAPLOT - nem csak az idozitett ketto.
+  //
+  // TALALT INKONZISZTENCIA. A mentes eredetileg kulon-kulon allt a
+  // retrySleep() es az internetFailSleep() belsejeben; az apSleep() (lejart AP
+  // mod) es a fatalSleep() (vegzetes hiba) kimaradt belole. Pedig a kriterium
+  // mindegyikre all: hosszabb ido kovetkezik, ami alatt egy aramszunet
+  // elviheti az RTC naplot - a vegzetes hibanal pedig ez a legfontosabb,
+  // hiszen epp azt akarjuk kesobb kivizsgalni.
+  //
+  // A mentes ezert egyetlen kozos pontra kerult: az enterDeepSleep() elejere.
+  // Ez egyben azt is megszunteti, hogy egy UJ alvasi utnal el lehessen
+  // felejteni.
+
+  // (a) lejart AP mod
+  {
+    coldBoot(false, "", "", "", "");
+    setup();
+    g_fs.erase("/evlog.bin");        // a modvaltaskori mentest eldobjuk
+    bool slept = false;
+    int guard = 0;
+    try { while (!slept && ++guard < 4000000) loop(); }
+    catch (DeepSleepSignal&) { slept = true; }
+    CHECK(slept, "az AP hatarido lejartaval elalszik");
+    CHECK(g_fs.count("/evlog.bin") == 1, "apSleep: a naplo kiment a fajlba");
+  }
+
+  // (b) vegzetes hiba - itt a LEGFONTOSABB, hogy megmaradjon
+  {
+    coldBoot(true, "TestNet", "pw", "", "");
+    setup();
+    monitorUzembe();
+    g_fs.erase("/evlog.bin");
+    enterFatal("teszt");             // MODE_FATAL, 5 perc utan alvas
+    bool slept = false;
+    int guard = 0;
+    try { while (!slept && ++guard < 4000000) loop(); }
+    catch (DeepSleepSignal&) { slept = true; }
+    CHECK(slept, "5 perc hibajelzes utan elalszik");
+    CHECK(g_fs.count("/evlog.bin") == 1, "fatalSleep: a naplo kiment a fajlba");
+  }
+
+  // (c) ...de csatolatlan fajlrendszernel a mentes magatol kimarad, es ez sem
+  //     akadalyozza az alvast. (A FATAL(1) epp ilyen: a LittleFS a hibas.)
+  {
+    coldBoot(true, "TestNet", "pw", "", "");
+    g_fsMountOk = false;
+    setup();
+    CHECK(deviceMode == (DeviceMode)2, "MODE_FATAL a csatolasi hiba miatt");
+    bool slept = false;
+    int guard = 0;
+    try { while (!slept && ++guard < 4000000) loop(); }
+    catch (DeepSleepSignal&) { slept = true; }
+    CHECK(slept, "fajlrendszer nelkul is elalszik, nem akad meg a mentesen");
+    CHECK(g_fs.count("/evlog.bin") == 0, "es nem is probal irni");
+  }
+}
+
+static void scNV10() {
+  // TALALT HIBA A SAJAT NTP-BEKOTESEMBEN. Az oraszinkron eredetileg csak az
+  // initWiFi() SIKERES agarol indult - csakhogy nem minden kapcsolat azon
+  // keresztul jon letre. Harom ag kerulte meg:
+  //   - az initWiFi() "mar csatlakozva vagyunk" korai visszaterese,
+  //   - a handleFirstStart() korai kilepese, amikor a proba mar igazolta a
+  //     kapcsolatot (ez a LEGGYAKORIBB helyreallasi ut aramszunet utan!),
+  //   - es a FAILURE_STATE RESET_DELAY korai kilepese.
+  // Mindharomban elmaradt volna a szinkron, es a naplo epoch mezoje vegig 0
+  // maradt volna - epp a mentett naplo ertelmezese romlott volna el.
+  //
+  // A gondozas ezert a loop()-bol fut, egyetlen helyrol.
+
+  // (a) A LEGGYAKORIBB UT: a halozat a firstStart varakozas KOZBEN jon vissza,
+  //     tehat a proba korai kilepese zarja le - initWiFi() nelkul.
+  {
+    coldBoot(true, "TestNet", "pw", "", "");
+    wifiSim.willConnect = false; pingSim.ok = false;   // induláskor nincs semmi
+    setup();
+    const int startsSetupUtan = g_ntpStarts;
+    // Most jon vissza a halozat es az internet.
+    wifiSim.willConnect = true; pingSim.ok = true;
+    g_httpBody = "Microsoft Connect Test";
+    int guard = 0;
+    try { while (uiFlags.firstStart && ++guard < 2000000) loop(); }
+    catch (DeepSleepSignal&) {}
+    CHECK(!uiFlags.firstStart, "a firstStart a proba korai kilepesevel zarult");
+    CHECK(serialHas("halozat es internet visszajott"), "tenyleg a korai agon");
+    CHECK(g_ntpStarts > startsSetupUtan,
+          "es az oraszinkron ELINDULT ezen az uton is");
+  }
+
+  // (b) Ujracsatlakozas utan UJRA indul: a WiFi.disconnect(true) a netifet is
+  //     lebontja, tehat az SNTP klienst ujra kell inditani.
+  {
+    coldBoot(true, "TestNet", "pw", "", "");
+    g_httpBody = "Microsoft Connect Test";
+    setup();
+    int guard = 0;
+    while (uiFlags.firstStart && ++guard < 2000000) loop();
+    loop();
+    const int elotte = g_ntpStarts;
+    CHECK(elotte >= 1, "el a szinkron");
+
+    wifiSim.willConnect = false;          // elmegy a halozat
+    loop();
+    CHECK(!ntpStarted, "a kapcsolat elvesztesevel a jelzo torlodik");
+    wifiSim.willConnect = true;           // ...es visszajon
+    wifiSim.begun = true; wifiSim.beginAt = 0;
+    loop();
+    CHECK(g_ntpStarts > elotte, "ujracsatlakozas utan ujra elindul a szinkron");
+  }
+
+  // (c) ...de amig egyszer sem szakad meg, NEM inditjuk ujra minden korben.
+  {
+    coldBoot(true, "TestNet", "pw", "", "");
+    g_httpBody = "Microsoft Connect Test";
+    setup();
+    int guard = 0;
+    while (uiFlags.firstStart && ++guard < 2000000) loop();
+    loop();
+    const int elotte = g_ntpStarts;
+    for (int i = 0; i < 500; i++) loop();
+    CHECK(g_ntpStarts == elotte, "elo kapcsolat mellett nem inditgatjuk ujra");
+  }
+}
+
 static void scNV2() {
   // AZ IRAS SIKERESSEGET FIGYELJUK. Nem eleg, hogy az iras nem panaszkodott:
   // vissza is olvassuk a fejlecet. Ugyanaz az elv, mint a writeConfigValue()
@@ -4168,6 +4298,9 @@ static void scNV7() {
   coldBoot(true, "TestNet", "pw", "", "");
   g_epochNow = 0;                          // meg nincs szinkron
   setup();
+  // Az oraszinkront a loop() gondozza (lasd ensureNtp() es NV10), nem a
+  // setup() - ezert egy kort le kell futtatni hozza.
+  loop();
   CHECK(g_ntpStarts >= 1, "sikeres csatlakozas utan elindul az oraszinkron");
 
   logEvent((EventCode)2, 111);             // szinkron nelkuli bejegyzes
@@ -6516,6 +6649,8 @@ static const Scenario kScenarios[] = {
   { "NV6: hianyzo, ures vagy hibas fajl nem okoz gondot", scNV6 },
   { "NV7: NTP idobelyeg a bejegyzeseken", scNV7 },
   { "NV8: feluton buko betoltes nem hagy kevert puffert", scNV8 },
+  { "NV9: mind a NEGY alvas menti a naplot, nem csak az idozitett ketto", scNV9 },
+  { "NV10: az oraszinkron MINDEN kapcsolati uton elindul", scNV10 },
   { "LOG7: a /log oldal a legrosszabb esetben is befer a pufferbe", scLOG7 },
   { "LOG8: firmware frissites utan a regi elrendezesu naplo ervenytelen", scLOG8 },
   { "LOG9: a wifireset a naplofajlt szandekosan NEM torli", scLOG9 },
