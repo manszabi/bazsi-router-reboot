@@ -345,10 +345,15 @@ választ, és ez a hiba némán, a redundancia elvesztésével jelentkezne. A
 > fájlírás közben a nyomás megmarad, de nem hat (`LAT4`), és egy beragadt gomb
 > nem reteszel, mert felfutó éle sosem lesz (`LAT5`).
 
-> ⚠️ Induláskor **mindkét** gombot ellenőrizzük. Ha bármelyik beragadva marad, a
-> két LED 3 másodpercig **felváltva** villog (megkülönböztetésül a végzetes
-> hibától, ahol együtt villognak), majd az ESP 60 másodpercre deep sleep módba lép.
-> Ilyenkor a gombos ébresztés **nincs** bekapcsolva, különben a beragadt gomb végtelen boot loopot okozna.
+> ⚠️ Induláskor **mindkét** gombot ellenőrizzük. Ha bármelyik nyomva van, előbb
+> **3 másodpercet várunk az elengedésére** – a reset gomb LOW szintre ébreszt,
+> tehát a felhasználó szükségképpen még nyomva tartja, amikor az eszköz bootolni
+> kezd; egy pillanatnyi beolvasás a saját ébresztő gombnyomását nézné
+> beragadásnak. Ha 3 másodperc után is nyomva van, a két LED 3 másodpercig
+> **felváltva** villog (megkülönböztetésül a végzetes hibától, ahol együtt
+> villognak), majd az ESP 60 másodpercre deep sleep módba lép. Ilyenkor a gombos
+> ébresztés **nincs** bekapcsolva, különben a beragadt gomb végtelen boot loopot
+> okozna.
 
 ### Deep sleep és ébredés
 
@@ -599,7 +604,7 @@ teljes egészében felügyelet alatt van:
 | Szakasz | Felügyelve? | Megjegyzés |
 |---|:---:|---|
 | `pinMode`-ok, relé hold feloldása, `Serial.begin()` + max. 3 mp várakozás | nem | ide még nem megy ki soros üzenet, tehát az `initWatchdog()` hibajelzése is elveszne |
-| gombellenőrzés, `checkWatchdogResets()` | **igen** | a beragadt gomb 3 mp-et villog, aztán deep sleep |
+| gombellenőrzés, `checkWatchdogResets()` | **igen** | 3 mp türelem az elengedésre, aztán 3 mp villogás és deep sleep |
 | LittleFS csatolás / **formázás** | **igen** | lásd lent |
 | konfiguráció beolvasása | **igen** | négy rövid fájl |
 | `WiFi.persistent()`, `initWiFi()`, AP portál indítása | **igen** | a Wi-Fi init a legvalószínűbb lefagyási pont; a 20 mp-es várakozás magától etet |
@@ -797,8 +802,11 @@ Két védelem gondoskodik arról, hogy a mentés ne vesszen el:
 - **Minden HTTP kérés újraindítja az 5 perces visszaszámlálást** – a 404-es
   válasszal végződő is. A határidő abszolút: mindig pontosan 5 perccel a
   *legutolsó* kérés utánra kerül, nem halmozódik, és felső korlát nincs.
-- **Fájlírás közben az eszköz soha nem alszik el** (`savingConfig` jelző), így
-  nem maradhat félig kiírt konfiguráció.
+- **Fájlírás közben az eszköz soha nem alszik el és nem indul újra**
+  (`savingConfig` jelző), így nem maradhat félig kiírt konfiguráció. A leállási
+  út nem csak megvárja a folyamatban lévő mentést, hanem **meg is szerzi a
+  zárat**, hogy a várakozás vége és a tényleges alvás/újraindítás közötti
+  ezredmásodpercekben se indulhasson új írás.
 
 ## 🚨 Végzetes hiba – a fájlrendszer nem használható
 

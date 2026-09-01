@@ -74,6 +74,10 @@ extern uint32_t resetDelayProbeLast;
 extern uint32_t firstStartProbeLast;
 bool onlineProbeDue(uint32_t& lastProbe, uint32_t now);
 void logEvent(EventCode code, uint16_t param);
+bool lastEventWas(uint8_t code);
+bool stuckCycleAlreadyLogged(uint16_t which);
+void lockConfigBeforeShutdown();
+bool beginConfigWrite();
 constexpr uint8_t EV_TEST_FAIL_C = 4;
 constexpr uint8_t EV_FATAL_C = 9;
 void resetbutton();
@@ -93,6 +97,8 @@ void startConfigPortal();
 static const int PIN_RELAY   = 10;  // D10 - rele (kulso 22k lehuzoval)
 static const int PIN_LED     = 6;   // D4  - statusz LED
 static const int PIN_WIFILED = 5;   // D3  - Wi-Fi LED
+static const int PIN_RESETBTN = 3;  // D1  - reset gomb (RTC-kepes, ebreszt)
+static const int PIN_WIFIBTN  = 2;  // D0  - wifireset gomb
 #define RELAY_HIGH "pin10=HIGH"
 #define RELAY_LOW  "pin10=LOW"
 #define LED_HIGH   "pin6=HIGH"
@@ -3036,8 +3042,13 @@ static void scWR1() {
   g_onDelay = nullptr;
 
   CHECK(restarted, "vegul ujraindul");
-  CHECK(!savingConfig, "de csak azutan, hogy az iras befejezodott");
-  CHECK(g_millis - t0 >= 2500, "megvarta a teljes irast");
+  CHECK(g_millis - t0 >= 2500, "de csak azutan, hogy az iras befejezodott");
+  // A jelzo itt SZANDEKOSAN true: a leallasi ut nem csak megvarta az irast,
+  // hanem meg is szerezte a zarat, hogy a varakozas vege es az ESP.restart()
+  // kozotti ablakban se indulhasson ujabb mentes. (Lasd SH1.) Ez a teszt
+  // korabban a "!savingConfig"-ra fogadott - vagyis az implementaciora, nem a
+  // tulajdonsagra; az igazi allitas a fenti idozites.
+  CHECK(savingConfig, "es a zar most MAR a mienk - uj mentes nem indulhat");
   CHECK(serialHas("Fajliras folyik"), "jelzi is, hogy var");
   CHECK(serialHas("A fajliras befejezodott"), "es hogy kesz");
 }
@@ -3058,8 +3069,8 @@ static void scWR2() {
   g_onDelay = nullptr;
 
   CHECK(slept, "vegul elalszik");
-  CHECK(!savingConfig, "de csak a fajliras utan");
-  CHECK(g_millis - t0 >= 800, "megvarta a teljes irast");
+  CHECK(g_millis - t0 >= 800, "de csak a fajliras utan");
+  CHECK(savingConfig, "es a zar az elalvasig a mienk marad (lasd SH1)");
 }
 
 static void scWR3() {
@@ -3238,8 +3249,15 @@ static void scWD10() {
 }
 
 static void scWD11() {
-  // A LittleFS formazasa (elso indulas) szandekosan a felugyeleten KIVUL van:
-  // egy lassu formazas soha ne futhasson watchdog resetbe.
+  // ELAVULT VOLT EZ A KOMMENT. Regen a LittleFS formazasa szandekosan a
+  // felugyeleten KIVUL futott (a ~1,5 MB-os particion 15-20 mp volt). A
+  // partitions_custom.csv 512 KiB-os particiojan a formazas tipikusan 4-7 mp,
+  // a legrosszabb esetben is ~51 mp - mindketto bőven a 90 mp-es timeout
+  // alatt -, ezert a watchdog MAR A CSATOLAS ELOTT elesedik (lasd WDT7).
+  // Ami ebbol a tesztbol ervenyes maradt: a felelesztes SORRENDJE. Etetni
+  // csak feliratkozas UTAN szabad (kulonben az esp_task_wdt_reset() hibat ad),
+  // es a setup() vegere a watchdognak aktivnak es helyesen konfiguraltnak
+  // kell lennie.
   coldBoot(false, "", "", "", "");
   g_wdtEnabled = false;
   g_wdtFeedNotSubscribed = 0;
@@ -3853,6 +3871,240 @@ static void scLOG3() {
   CHECK(b.find("<td>39</td>") != std::string::npos, "a LEGUJABB esemeny benne van");
   CHECK(b.find("<td>7</td>") == std::string::npos, "a kiszorult regi mar nincs");
   CHECK(b.find("</table>") != std::string::npos, "a tabla rendesen lezarul");
+}
+
+static void scSH1() {
+  // TALALT HIBA. Az alvas es az ujraindulas elott megvartuk a folyamatban levo
+  // fajlirast - de a varakozas ugy tert vissza, hogy a zar SZABAD maradt.
+  // A visszateres es a tenyleges esp_deep_sleep_start() / ESP.restart() kozott
+  // meg lefut ket-harom println es egy Serial.flush(); abban az ablakban az
+  // async_tcp task uj mentest indithatott, amit aztan az ujraindulas
+  // FELBEVAGOTT - epp az, ami ellen a varakozas van. (A halasztott
+  // ujraindulas kommentje maga mondja ki, hogy a mobilos dupla koppintas
+  // gyakori, tehat pont ilyen sorozat all elo.)
+  //
+  // Ugyanez a hiba mar szerepelt a restartFromButton()-ben, es ott a zar
+  // ATOMIKUS megszerzese oldotta meg. Most a leallasi ut is ugyanazt teszi:
+  // a lockConfigBeforeShutdown() nem csak var, hanem meg is szerzi a zarat.
+  coldBoot(false, "", "", "", "");
+  setup();
+  CHECK(deviceMode == (DeviceMode)1, "AP modban vagyunk, a portal fut");
+
+  // 1) A zar szabad -> a leallasi ut megszerzi.
+  savingConfig = false;
+  lockConfigBeforeShutdown();
+  CHECK(savingConfig, "a leallasi ut MEG IS SZEREZTE a zarat, nem csak megvarta");
+  CHECK(!beginConfigWrite(), "igy egy beerkezo mentes mar nem tud irast inditani");
+
+  // 2) Es a POST kezelo ilyenkor tiszta 503-at ad - nem csonka fajlt.
+  CHECK(postConfig("Halozat", "jelszo123", "", "") == 503,
+        "az utolso pillanatban erkezo mentes 503-at kap, nem tepi szet a fajlt");
+  CHECK(g_fs.find("/ssid.txt") == g_fs.end(), "es tenyleg semmit nem irt ki");
+
+  // 3) A hataridos kilepes megmarad: ha a jelzo BERAGAD, az eszkoz nem fagyhat
+  //    le miatta - 5 mp utan a zar nelkul is tovabblep. (A regi viselkedes.)
+  savingConfig = true;
+  const uint32_t t0 = g_millis;
+  lockConfigBeforeShutdown();
+  const uint32_t dt = g_millis - t0;
+  CHECK(dt >= 5000 && dt < 5300, "beragadt jelzonel 5 mp utan tovabblep, nem fagy le");
+  CHECK(serialHas("5 mp alatt sem fejezodott be"), "es ezt ki is mondja a soros porton");
+}
+
+static void scSH2() {
+  // AZ OT ALVASI UT ELOFELTETELEI EGY HELYEN. Kulon-kulon mind meg van merve,
+  // de az EGYMASHOZ kepesti kulonbsegek a lenyegesek, es azok eddig sehol nem
+  // alltak egymas mellett. Ket szabaly van:
+  //   - IDOZITO csak oda, ahonnan a hiba MAGATOL elmulhat (halozat/internet).
+  //     A vegzetes hiba es a lejart AP mod magatol nem javul, ott ebredni
+  //     ertelmetlen fogyasztas lenne.
+  //   - GOMBEBRESZTES mindenhova, KIVEVE a beragadt gombot: ott a nyomva
+  //     tartott gomb azonnal ujraebresztene az eszkozt, azaz boot loop lenne.
+  struct Eset { const char* nev; uint64_t varhatoUs; bool gombEbresztes; };
+
+  // (a) beragadt gomb: rovid idozito, gombebresztes NELKUL
+  {
+    coldBoot(true, "TestNet", "pw", "", "");
+    g_pinRead[PIN_RESETBTN] = LOW;
+    uint64_t us = 0; bool slept = false;
+    try { setup(); } catch (DeepSleepSignal& d) { slept = true; us = d.us; }
+    CHECK(slept && us == 60ULL*1000000ULL, "beragadt gomb: 60 mp");
+    CHECK(g_gpioWakeMask == 0, "beragadt gomb: gombebresztes NINCS (boot loop ellen)");
+  }
+
+  // (b) lejart AP mod: idozito NINCS, gombebresztes VAN
+  {
+    coldBoot(false, "", "", "", "");
+    setup();
+    CHECK(deviceMode == (DeviceMode)1, "AP modban vagyunk");
+    bool slept = false; uint64_t us = 1;
+    try {
+      for (int i = 0; i < 4000000 && !slept; i++) loop();
+    } catch (DeepSleepSignal& d) { slept = true; us = d.us; }
+    CHECK(slept, "az AP hatarido lejartaval elalszik");
+    CHECK(us == 0, "AP idotullepes: idozitett ebresztes NINCS");
+    CHECK(g_gpioWakeMask == (1ULL << PIN_RESETBTN), "de a reset gomb felebreszti");
+  }
+
+  // (c) vegzetes hiba: idozito NINCS, gombebresztes VAN
+  {
+    coldBoot(true, "TestNet", "pw", "", "");
+    g_fsMountOk = false;              // -> MODE_FATAL
+    setup();
+    CHECK(deviceMode == (DeviceMode)2, "MODE_FATAL lett");
+    bool slept = false; uint64_t us = 1;
+    try {
+      for (int i = 0; i < 4000000 && !slept; i++) loop();
+    } catch (DeepSleepSignal& d) { slept = true; us = d.us; }
+    CHECK(slept, "5 perc hibajelzes utan elalszik");
+    CHECK(us == 0, "vegzetes hiba: idozitett ebresztes NINCS");
+    CHECK(g_gpioWakeMask == (1ULL << PIN_RESETBTN), "de a reset gomb felebreszti");
+  }
+
+  // (d) tartos internetkieses: 1 ora + gombebresztes (az EGYETLEN idozitett
+  //     alvas a monitor agon)
+  {
+    coldBoot(true, "TestNet", "pw", "", "");
+    setup();
+    bool slept = false; uint64_t us = 0;
+    try {
+      for (int c = 0; c < 10; c++) {
+        int guard = 0;
+        while (!reset_device() && ++guard < 200000) { yield(); }
+      }
+    } catch (DeepSleepSignal& d) { slept = true; us = d.us; }
+    CHECK(slept && us == 3600ULL*1000000ULL, "tartos internetkieses: 1 ora");
+    CHECK(g_gpioWakeMask == (1ULL << PIN_RESETBTN), "es a reset gomb is felebreszti");
+  }
+}
+
+// SH3 segedei: a felebreszto gombnyomas hosszanak modellezese.
+static uint32_t sh3ReleaseAt = 0;
+static void sh3Release() {
+  if (g_millis >= sh3ReleaseAt) g_pinRead[PIN_RESETBTN] = HIGH;
+}
+
+static void scSH3() {
+  // A FELEBRESZTO GOMBNYOMAST NEM SZABAD BERAGADT GOMBNAK NEZNI.
+  //
+  // A reset gomb LOW SZINTRE ebreszt, tehat a felhasznalo szuksegkeppen meg
+  // NYOMVA tartja, amikor az eszkoz bootolni kezd. Ha a setup() beragadt
+  // gombnak latna, azonnal visszaaludna 60 masodpercre - a felhasznalo
+  // szamara ugy tunne, hogy a gomb "nem csinal semmit", pedig epp o nyomta
+  // meg. Ez tehat nem elmeleti eset: MINDEN gombos ebredes ilyen.
+  //
+  // A vedelem nem kulon kod, hanem IDOZITES: a beragadt-gomb ellenorzes elott
+  // lefut a Serial.begin() utani varakozas (max 3000 ms, ha nincs USB gazda)
+  // es a CDC beallas (500 ms). Itt MEGMERJUK, milyen hosszu nyomas szamit meg
+  // ebresztesnek es melyik mar beragadasnak - hogy egy kesobbi atrendezes ne
+  // rovidithesse le eszrevetlenul ezt az ablakot.
+  const uint32_t probak[] = { 100, 300, 500, 700, 1000, 2000, 4000 };
+  uint32_t leghosszabbOk = 0, legrovidebbAlvas = 0xFFFFFFFFu;
+  for (uint32_t hossz : probak) {
+    coldBoot(true, "TestNet", "pw", "", "", 500, true);
+    g_pinRead[PIN_RESETBTN] = LOW;      // a gomb ebredeskor meg lenyomva
+    sh3ReleaseAt = g_millis + hossz;    // ennyi ido mulva engedi el
+    g_onDelay = sh3Release;
+    bool slept = false;
+    try { setup(); } catch (DeepSleepSignal&) { slept = true; }
+    catch (RestartSignal&) {}
+    g_onDelay = nullptr;
+    if (slept) { if (hossz < legrovidebbAlvas) legrovidebbAlvas = hossz; }
+    else       { if (hossz > leghosszabbOk)    leghosszabbOk = hossz; }
+  }
+  printf("     [info] ebresztesnek szamit: <= %u ms nyomas; beragadasnak: >= %u ms\n",
+         leghosszabbOk, legrovidebbAlvas);
+  CHECK(leghosszabbOk >= 2000,
+        "meg egy 2 masodperces ebreszto gombnyomas sem szamit beragadasnak");
+  CHECK(legrovidebbAlvas > 2000,
+        "a hatar az emberi gombnyomas hossza FOLOTT van");
+
+  // Es a masik oldal: ha a gombot VEGIG nyomva tartjak, akkor viszont
+  // beragadasnak KELL szamitania - kulonben egy tenyleg beragadt gomb
+  // vegtelen boot loopot okozna.
+  coldBoot(true, "TestNet", "pw", "", "", 500, true);
+  g_pinRead[PIN_RESETBTN] = LOW;
+  bool slept = false; uint64_t us = 0;
+  try { setup(); } catch (DeepSleepSignal& d) { slept = true; us = d.us; }
+  CHECK(slept, "a vegig nyomva tartott gomb viszont beragadasnak szamit");
+  CHECK(us == 60ULL*1000000ULL, "es 60 mp mulva ujraprobal, nem 1 ora mulva");
+  CHECK(g_gpioWakeMask == 0, "gombebresztes nelkul - kulonben azonnal ujraebredne");
+}
+
+static void scLOG6() {
+  // TULCSORDULHAT-E A NAPLO? Ket kulon kerdes van benne.
+  //
+  // (1) A KORPUFFER INDEXE. Az rtcEvNext monoton no es SOSEM csokken, tehat
+  //     elobb-utobb korbefordul a uint32_t-n. Az iras helye rtcEvNext %
+  //     EVLOG_SIZE - es mivel az EVLOG_SIZE (32) KETTO HATVANYA, a 2^32
+  //     maradek nelkul oszthato vele: a 0xFFFFFFFF -> 0x00000000 atmenetnel az
+  //     index 31 -> 0, azaz pontosan ott folytatja, ahol tartott. Nincs
+  //     kihagyott vagy ketszer irt slot, es a % miatt kiindexelni sem tud.
+  //     (Ha az EVLOG_SIZE nem 2 hatvanya lenne - mondjuk 30 -, itt ugrana az
+  //     index, es a /log egy sort ketszer mutatna. Ezert meri ezt a teszt.)
+  //
+  // (2) A KIIRAS. A /log a legregebbi meg meglevo bejegyzestol indul:
+  //     i = evTotal - shown. A shown = min(evTotal, 32), tehat a kivonas
+  //     SOSEM csordul ala. A korbefordulas utan viszont evTotal kicsi lesz
+  //     (0, 1, 2...), es a lap atmenetileg kevesebb sort mutat, mint amennyi
+  //     valojaban a pufferben van. Ez egyszeri, kozmetikai, es 2^32 esemeny
+  //     utan kovetkezik be: realis esemenyutemmel (~5 esemeny orankent,
+  //     lasd a LOG4-et) ez tobb szazezer ev. Rogzitjuk, hogy tudott legyen.
+  coldBoot(false, "", "", "", "");
+  setup();
+
+  // Kozvetlenul a korbefordulas ele allitjuk a szamlalot. A magic-et is
+  // beallitjuk, kulonben a logEvent() nullazna.
+  rtcEvMagic = 0; rtcEvNext = 0;
+  logEvent((EventCode)2, 0);          // magic beallitasa a sketch sajat utjan
+  rtcEvNext = 0xFFFFFFF0u;            // 16 iras van hatra a fordulasig
+
+  // 40 esemeny: 16 a fordulas elott, 24 utana. A param a sorszam, igy
+  // pontosan lathato, melyik slotba mi kerult.
+  for (uint16_t i = 0; i < 40; i++) logEvent((EventCode)2, i);
+  CHECK(rtcEvNext == 24u, "az rtcEvNext korbefordult (0xFFFFFFF0 + 40 = 24)");
+
+  // A slotok folytonossaga: a 40 iras az utolso 32-t kell hogy hagyja, es
+  // pontosan egyszer mindegyik slotban. Ha az index a fordulasnal ugrott
+  // volna, valamelyik ertek hianyozna vagy ketszer szerepelne.
+  bool megvan[40] = { false };
+  for (int i = 0; i < 32; i++) {
+    const uint16_t v = rtcEvents[i].param;
+    if (v < 40) megvan[v] = true;
+  }
+  int hianyzik = 0;
+  for (uint16_t v = 8; v < 40; v++) if (!megvan[v]) hianyzik++;
+  CHECK(hianyzik == 0, "a fordulas utan is mind a 32 legutobbi ertek megvan");
+  CHECK(!megvan[7], "a kiszorult regi tenyleg felulirodott");
+
+  // Es a lap sem szakad meg, sem az indexeles nem lep ki a tombbol (ASan).
+  AsyncWebServerRequest req; g_handlers["/log#1"](&req);
+  const std::string& b = req._body;
+  size_t sorok = 0, tol = 0;
+  while ((tol = b.find("<tr><td>", tol)) != std::string::npos) { sorok++; tol += 8; }
+  CHECK(req._code == 200, "a /log a fordulas utan is 200-at ad");
+  CHECK(sorok == 24, "a fordulas utan atmenetileg csak evTotal sor latszik");
+  CHECK(b.find("</table>") != std::string::npos, "a tabla rendesen lezarul");
+
+  // A lastEventWas() sem indexel ki: a rtcEvNext == 0 pillanataban a
+  // "rtcEvNext > 0" kapu miatt egyszeruen false-t ad (egyetlen kimaradt
+  // spam-szures, nem hiba).
+  rtcEvNext = 0;
+  CHECK(!lastEventWas(2), "rtcEvNext == 0 eseten nem indexel ki, false-t ad");
+
+  // A masik ket olvaso is a fordulasnal: a stuckCycleAlreadyLogged() a
+  // "rtcEvNext < 2" kapuval vedett.
+  CHECK(!stuckCycleAlreadyLogged(0), "a beragadt-gomb olvaso sem indexel ki");
+
+  // AZ UPTIME MEZO. uint32_t masodperc: 136 ev folyamatos uzem. A napi
+  // alvas-ebredes ciklus miatt elerhetetlen, de a formazas nagy erteknel is
+  // ep marad (nem csonkol, nem negativ).
+  rtcEvMagic = 0; rtcEvNext = 0;
+  logEvent((EventCode)2, 0);
+  rtcEvents[0].uptimeSec = 0xFFFFFFFFu;
+  AsyncWebServerRequest max; g_handlers["/log#1"](&max);
+  CHECK(max._body.find("1193046:28:15") != std::string::npos,
+        "a legnagyobb uptime is helyesen, csonkitas nelkul jelenik meg");
 }
 
 static void scAP1() {
@@ -4740,7 +4992,7 @@ static const Scenario kScenarios[] = {
   { "WD8: gateway-ellenőrzéssel együtt is 90 mp alatt", scWD8 },
   { "WD9: AP mód, végzetes hiba, first start - mind 90 mp alatt", scWD9 },
   { "WD10: a watchdog a WiFi.begin() ELŐTT élesedik", scWD10 },
-  { "WD11: a LittleFS formázás szándékosan a felügyeleten kívül", scWD11 },
+  { "WD11: a watchdog felélesztésének sorrendje és beállítása", scWD11 },
   { "WD12: a setup() hátralévő része sem lép 90 mp fölé", scWD12 },
   { "WD13: halott DNS (33 mp/kérés) mellett is 90 mp alatt marad", scWD13 },
   { "P14: a halasztott újraindítás a türelmi idő UTÁN fut le", scP14 },
@@ -4793,6 +5045,10 @@ static const Scenario kScenarios[] = {
   { "LOG1: a /log emberi olvasásra készül (reset ok, uptime, jelmagyarázat)", scLOG1 },
   { "LOG2: a naplóoldalon semmilyen konfigurációs érték nem jelenik meg", scLOG2 },
   { "LOG3: a körpuffer körbefordulása után is pontosan 32 sor", scLOG3 },
+  { "LOG6: a naplo szamlaloja korbefordulhat - az index attol ep marad", scLOG6 },
+  { "SH1: leallas elott a zarat MEG IS SZEREZZUK, nem csak megvarjuk", scSH1 },
+  { "SH2: az alvasi utak elofeltetelei - idozito es gombebresztes", scSH2 },
+  { "SH3: a felebreszto gombnyomast nem nezzuk beragadt gombnak", scSH3 },
   { "AP1: üres címmező törlésként értelmeződik (a DHCP-re váltás útja)", scAP1 },
   { "AP2: az előkitöltés SOHA nem tartalmazza a jelszót", scAP2 },
   { "AP3: az SSID HTML-escape-elve kerül a lapra (XSS ellen)", scAP3 },

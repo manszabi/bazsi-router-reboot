@@ -24,7 +24,7 @@ Az eszköz mindig pontosan egy üzemmódban van.
 | Kimenetek alapállapotba (relé `LOW`, státusz LED be, Wi-Fi LED ki) | azonnal | |
 | Soros port indítása | max. **3 mp** + 0,5 mp | |
 | **Watchdog bekapcsolása** | azonnal | Innentől a `setup()` maradéka is felügyelt – lásd 8. pont |
-| Beragadt gomb ellenőrzés (**mindkettő**: `D0` és `D1`) | azonnal | Ha bármelyik nyomva: LED-ek **felváltva** villognak 3 mp-ig, majd **60 mp** deep sleep |
+| Beragadt gomb ellenőrzés (**mindkettő**: `D0` és `D1`) | azonnal | Ha bármelyik nyomva: **3 mp türelem az elengedésre**, utána LED-ek **felváltva** villognak 3 mp-ig, majd **60 mp** deep sleep |
 | Watchdog reset számláló ellenőrzés | azonnal | 3. rendellenes reset → `MODE_FATAL` |
 | LittleFS csatolás (első indításkor **formázás**: 4–7 mp) | azonnal | Hiba → `MODE_FATAL` |
 | Konfiguráció beolvasása | azonnal | Olvasási hiba → `MODE_FATAL` |
@@ -325,7 +325,8 @@ Négy védelem óvja a mentést:
   válasszal végződő is, mert az is interakció. A határidő **abszolút**: mindig
   pontosan 5 perccel a *legutolsó* kérés utánra kerül, nem halmozódik. Felső
   korlát nincs: amíg nézegeted az oldalt, az eszköz ébren marad.
-- **Fájlírás közben az eszköz soha nem alszik el**, tehát nem maradhat félig
+- **Fájlírás közben az eszköz soha nem alszik el** (a leállási út a zárat meg
+  is szerzi, nem csak megvárja az írást), tehát nem maradhat félig
   kiírt konfiguráció.
 - **Fájlírás közben a gombok sem indítanak újra.** A mentést az aszinkron
   webszerver taskja végzi, a gombokat viszont a `loop()` figyeli – egy éppen
@@ -478,7 +479,9 @@ nézve „nem csinálna semmit". Az eszköz ezért nem indul újra, hanem jelez.
 
 ### Beragadt gomb induláskor
 
-Induláskor **mindkét** gombot ellenőrizzük. Ha bármelyik nyomva van:
+Induláskor **mindkét** gombot ellenőrizzük. Ha bármelyik nyomva van, előbb
+**3 másodpercet várunk arra, hogy elengedjék** – és csak ha addig sem engedték
+el, akkor minősül beragadásnak:
 
 1. A két LED **felváltva** villog **3 másodpercig** (ellentétes fázisban)
 2. Az eszköz **60 mp** deep sleepbe megy
@@ -486,6 +489,19 @@ Induláskor **mindkét** gombot ellenőrizzük. Ha bármelyik nyomva van:
    újraébresztené, és végtelen boot loop lenne
 4. Az esemény bekerül a diagnosztikai naplóba (`STUCK BUTTON`, a paraméter
    megmondja melyik gomb)
+
+> **Miért kell a 3 másodperces türelem?** A reset gomb **LOW szintre** ébreszt
+> az alvásból, tehát a felhasználó szükségképpen **még nyomva tartja**, amikor
+> az eszköz bootolni kezd – minden gombos ébredés ilyen. Egy pillanatnyi
+> beolvasás alapján egy teljesen normális, fél-egy másodperces gombnyomás is
+> „beragadásnak" minősülne, és az eszköz azonnal visszaaludna 60 mp-re: a
+> felhasználó szemszögéből „a gomb nem csinál semmit", pedig épp ő nyomta meg.
+>
+> Régen a döntést a `Serial.begin()` utáni várakozás hossza szabta meg, ami
+> viszont attól függött, **van-e USB gazda**: bedugott kábellel a határ ~600 ms
+> volt, kábel nélkül ~3,5 mp. Ugyanaz a gombnyomás máshogy sült el aszerint,
+> hogy be volt-e dugva a kábel. A `STUCK_BUTTON_CONFIRM_MS` ezt a küszöböt
+> kimondottá és a kábeltől függetlenné teszi. (Mérve: `SH3`.)
 
 > A **felváltva** villogás szándékosan más, mint a végzetes hiba jelzése, ahol a
 > két LED **együtt** villog. Ránézésre megkülönböztethető.
@@ -502,6 +518,17 @@ Induláskor **mindkét** gombot ellenőrizzük. Ha bármelyik nyomva van:
 | Végzetes hiba (LittleFS / konfig / watchdog) | örökre | **nem** – csak gomb |
 
 Minden alvás előtt a **relé `LOW`**, tehát a router kap áramot.
+
+Az alvás és az újraindulás **közös torlópontja**, hogy fájlírás közben egyik
+sem történhet meg. A várakozás nem csak megvárja a folyamatban lévő mentést,
+hanem **meg is szerzi a konfigurációs zárat**: enélkül a várakozás vége és a
+tényleges `esp_deep_sleep_start()` / `ESP.restart()` közötti néhány
+ezredmásodpercben (két-három `println` és egy `Serial.flush()`) az AsyncTCP
+task még elindíthatna egy új mentést, amit aztán a leállás félbevágna – épp az,
+ami ellen a várakozás van. Ugyanez a hiba szerepelt korábban a gombos
+újraindításban is, és ott is a zár **atomikus** megszerzése oldotta meg.
+(Mérve: `SH1`.) A határidős kilépés megmarad: ha a jelző bármiért beragadna,
+5 mp után az eszköz a zár nélkül is továbblép, tehát nem fagyhat le tőle.
 
 > Biztonsági háló: ha a gombos ébresztés élesítése bármiért hibázna (pl. valaki
 > nem RTC-képes lábra teszi a reset gombot), az eszköz a „csak gombbal" alvások
@@ -605,6 +632,29 @@ A puffer két különböző taskból is íródik – a `loop()`-ból és az Asyn
 webszerver taskjából –, ezért minden írás és olvasás `portENTER_CRITICAL`
 kritikus szakaszban történik. A szakaszok **nincsenek egymásba ágyazva**
 (mérve: `LOG5`), így nem tudnak megakadni.
+
+### Túlcsordulhat-e?
+
+Két külön kérdés van benne, és mindkettőre nem a válasz.
+
+**A körpuffer indexe.** Az írási pozíció (`rtcEvNext`) monoton nő és sosem
+csökken, tehát elvben körbefordul a 32 biten. Az írás helye
+`rtcEvNext % 32` – és mivel a 32 **kettő hatványa**, a 2^32 maradék nélkül
+osztható vele: a `0xFFFFFFFF → 0x00000000` átmenetnél az index 31-ről 0-ra lép,
+azaz pontosan ott folytatja, ahol tartott. Nincs kihagyott vagy kétszer írt
+slot, és a maradékképzés miatt kiindexelni sem tud. (Ha a méret nem kettő
+hatványa lenne – mondjuk 30 –, itt ugrana az index. Mérve: `LOG6`.)
+
+**A számláló értéke.** A körbefordulás után a `/log` átmenetileg kevesebb sort
+mutat, mint amennyi valójában a pufferben van (a legrégebbi keresése az
+`evTotal`-ból indul). Ez egyszeri és kozmetikai – és 2^32 eseményt igényel. A
+leggyorsabb tartós eseményütem a firmware-ben a router reset sorozat, ~20
+esemény óránként; ezzel a fordulás **több tízezer év**. A `uptimeSec` mező
+ugyanilyen nagyságrend: uint32 másodperc = 136 év folyamatos üzem.
+
+A körbefordulás pillanatában a `lastEventWas()` (`rtcEvNext > 0` kapu) és a
+`stuckCycleAlreadyLogged()` (`rtcEvNext < 2` kapu) egyszerűen `false`-t ad –
+egyetlen kimaradt spamszűrés, nem hiba, és nem indexel ki a tömbből.
 
 ### Az ismétlődő események szűrése
 

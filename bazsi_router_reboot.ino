@@ -203,6 +203,26 @@ constexpr uint32_t RESTART_GRACE_MS = 2000;  // válasz kiküldése újraindít�
 constexpr uint64_t SLEEP_DURATION_US = 3600ULL * 1000000ULL;      // 1 óra
 constexpr uint64_t STUCK_BUTTON_SLEEP_US = 60ULL * 1000000ULL;    // 60 másodperc
 
+// Ennyi ideig várunk a beragadtnak látszó gomb ELENGEDÉSÉRE, mielőtt tényleg
+// beragadásnak minősítenénk.
+//
+// MIÉRT KELL EZ? A reset gomb LOW SZINTRE ébreszt az alvásból, tehát a
+// felhasználó szükségképpen MÉG NYOMVA TARTJA, amikor az eszköz bootolni kezd.
+// Minden gombos ébredés ilyen. Ha a setup() egyetlen pillanatnyi digitalRead()
+// alapján döntene, egy teljesen normális, fél-egy másodperces gombnyomás
+// "beragadásnak" minősülne, és az eszköz azonnal visszaaludna 60 mp-re - a
+// felhasználó szemszögéből "a gomb nem csinál semmit", pedig épp ő nyomta meg.
+//
+// Mérve (SH3): a döntés régen a Serial.begin() utáni várakozás hosszától
+// függött, ami viszont attól, hogy VAN-E USB GAZDA. Bedugott USB-vel a határ
+// ~600 ms volt (egy szándékos gombnyomás bőven fölé megy), USB nélkül ~3,5 mp.
+// Vagyis ugyanaz a gombnyomás máshogy sült el aszerint, hogy be van-e dugva a
+// kábel. Ez a konstans a küszöböt kimondottá és a kábeltől függetlenné teszi.
+//
+// A hosszát nem kell finomhangolni: egy TÉNYLEG beragadt gomb sosem enged el,
+// tehát a 3 mp csak annyit késleltet, ami után úgyis a 60 mp-es alvás jön.
+constexpr uint32_t STUCK_BUTTON_CONFIRM_MS = 3000;
+
 // A hosszú várakozások (firstStartDelay, RESET_DELAY) korai lezárása.
 //
 // Mindkét várakozás arra való, hogy a router bootolására időt hagyjunk - de ha
@@ -418,7 +438,7 @@ void waitWithButtons(uint32_t duration);
 bool waitWithButtonsUntilOnline(uint32_t duration);
 bool onlineProbe();
 bool onlineProbeDue(uint32_t& lastProbe, uint32_t now);
-void waitForConfigWrite();
+void lockConfigBeforeShutdown();
 void internetFailSleep();
 void fatalSleep();
 void apSleep();
@@ -440,6 +460,7 @@ void enterDeepSleep(uint64_t timerUs);
 void holdRelayForSleep();
 bool stuckCycleAlreadyLogged(uint16_t which);
 bool lastEventWas(uint8_t code);
+int pressedButtonNow();
 bool initWiFi();
 bool reconnectWifi();
 bool writeConfigValue(fs::FS& fs, const char* path, const char* message);
@@ -1089,21 +1110,42 @@ bool beginConfigWrite() {
   return acquired;
 }
 
-void waitForConfigWrite() {
-  if (!savingConfig) {
-    return;
+// Az alvas es az ujraindulas kozos torlopontja: megvarja a folyamatban levo
+// fajlirast, ES MEG IS SZEREZI a zarat.
+//
+// MIERT NEM ELEG MEGVARNI? A puszta megvaras ugy ter vissza, hogy a zar
+// SZABAD. A visszateres es a tenyleges esp_deep_sleep_start() / ESP.restart()
+// kozott viszont meg lefut ket-harom println es egy Serial.flush() - ez valos
+// ezredmasodpercek -, es abban az ablakban az async_tcp task ELINDITHAT egy uj
+// mentest. Pontosan azt a felbevagott fajlirast kapnank, ami ellen a varakozas
+// egyaltalan van. A halasztott ujraindulas komment sajat maga mondja ki, hogy
+// a mobilos DUPLA KOPPINTAS gyakori - tehat epp ilyen sorozat all elo.
+// Ugyanaz a hiba volt a restartFromButton()-ben is; ott a beginConfigWrite()
+// atomikus megszerzese oldotta meg, itt ugyanaz a megoldas. (Merve: SH1.)
+//
+// A zarat NEM oldjuk fel: aki ezt hivja, mar nem ter vissza. A hataridos
+// kilepes viszont megmarad - egy beragadt jelzo miatt az eszkoz nem fagyhat le,
+// es 5 mp utan a zar nelkul is tovabblepunk (a regi viselkedes).
+void lockConfigBeforeShutdown() {
+  if (beginConfigWrite()) {
+    return;  // szabad volt, es most mar a mienk
   }
   printUptime();
   Serial.println("Fajliras folyik - megvarjuk, mielott alszunk vagy ujraindulunk.");
   const uint32_t start = millis();
-  while (savingConfig && millis() - start < SAVE_WAIT_MAX_MS) {
+  bool acquired = false;
+  while (millis() - start < SAVE_WAIT_MAX_MS) {
     feedWatchdog();
     delay(BUTTON_POLL_MS);
+    if (beginConfigWrite()) {
+      acquired = true;
+      break;
+    }
   }
-  if (savingConfig) {
-    Serial.println("FIGYELEM: a mentes 5 mp alatt sem fejezodott be, tovabblepunk.");
-  } else {
+  if (acquired) {
     Serial.println("A fajliras befejezodott.");
+  } else {
+    Serial.println("FIGYELEM: a mentes 5 mp alatt sem fejezodott be, tovabblepunk.");
   }
 }
 
@@ -1214,6 +1256,15 @@ bool stuckCycleAlreadyLogged(uint16_t which) {
 // azonnal újraébresztené az eszközt, azaz végtelen boot loop lenne.
 // logIt = false: a beragadt-gomb kör ismétlése, nem kerül újra a naplóba
 // (lásd a setup() spam-védelmét).
+// Melyik gomb van lenyomva ÉPPEN MOST? 0 = reset, 1 = wifireset, -1 = egyik
+// sem. A sorrend számít: ha valahogy mindkettő nyomva van, a reset gombot
+// jelentjük - az kap gombébresztést, tehát az a veszélyesebb boot loop.
+int pressedButtonNow() {
+  if (digitalRead(resetPin) == LOW) return 0;
+  if (digitalRead(wifiresetPin) == LOW) return 1;
+  return -1;
+}
+
 void handleStuckButton(const char* message, uint16_t which, bool logIt) {
   Serial.println(message);
   Serial.print("Alvas ");
@@ -1409,7 +1460,7 @@ bool reset_device() {
 void enterDeepSleep(uint64_t timerUs) {
   // Egyetlen torlópont MINDEN alvásra (apSleep, internetFailSleep,
   // retrySleep, fatalSleep): fájlírás közben nem alszunk el.
-  waitForConfigWrite();
+  lockConfigBeforeShutdown();
   digitalWrite(ledPin, LOW);
   digitalWrite(relayPin, LOW);
   digitalWrite(wifiledPin, LOW);
@@ -2551,9 +2602,22 @@ void setup() {
   // a kivizsgálandó eseményeket. Ezért csak az ELSŐ kör kerül a naplóba, az
   // ismétlések (a hozzájuk tartozó BOOT-tal együtt) nem - ugyanaz az elv, mint
   // a TEST FAIL sorozatoknál.
-  const int stuckButton = (digitalRead(resetPin) == LOW)     ? 0
-                        : (digitalRead(wifiresetPin) == LOW) ? 1
-                                                             : -1;
+  // Nem pillanatfelvétel: megvárjuk, elengedik-e. A részleteket lásd a
+  // STUCK_BUTTON_CONFIRM_MS-nél - dióhéjban: az ébresztő gombnyomás alatt az
+  // eszköz már bootol, tehát a gomb ilyenkor MINDIG lenyomva találtatik.
+  int stuckButton = pressedButtonNow();
+  if (stuckButton >= 0) {
+    Serial.println("Gomb lenyomva indulaskor - megvarjuk, elengedik-e.");
+    const uint32_t vart = millis();
+    while (millis() - vart < STUCK_BUTTON_CONFIRM_MS && pressedButtonNow() >= 0) {
+      feedWatchdog();
+      delay(BUTTON_POLL_MS);
+    }
+    stuckButton = pressedButtonNow();
+    if (stuckButton < 0) {
+      Serial.println("Elengedtek - ez ebreszto gombnyomas volt, indulunk tovabb.");
+    }
+  }
   const bool stuckRepeat =
     stuckButton >= 0 && stuckCycleAlreadyLogged((uint16_t)stuckButton);
   if (!stuckRepeat) {
@@ -2657,9 +2721,11 @@ void loop() {
   //
   // A türelmi idő alatt (2 mp) ÚJABB mentés is érkezhet - mobilon a dupla
   // koppintás gyakori. Ilyenkor épp fájlírás folyik, és az újraindítás félbe
-  // vágná: előbb megvárjuk, hogy az írás befejeződjön.
+  // vágná: előbb megvárjuk, hogy az írás befejeződjön - ÉS mindjárt meg is
+  // szerezzük a zárat, hogy a várakozás vége és az ESP.restart() közötti
+  // néhány ezredmásodpercben már ne indulhasson újabb mentés.
   if (restartPending && (int32_t)(currentMillis - restartAt) >= 0) {
-    waitForConfigWrite();
+    lockConfigBeforeShutdown();
     restartPending = false;
     Serial.println("RESTART!");
     Serial.flush();

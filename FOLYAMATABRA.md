@@ -49,8 +49,10 @@ flowchart TD
     PWR([Bekapcsolás / reset / ébredés]) --> PINS["GPIO-k beállítása<br>relé = LOW, státusz LED = HIGH<br>relé hold feloldása (gpio_hold_dis)"]
     PINS --> SER["Serial indítása<br>max 3 s várakozás + 0,5 s CDC-beállás"]
     SER --> WDT["initWatchdog()<br>TWDT: 90 s, trigger_panic = true<br>a loop task feliratkoztatva<br>innentől a setup() is felügyelt"]
-    WDT --> STUCK{"Beragadt gomb?<br>reset (D1) vagy wifireset (D0) = LOW"}
-    STUCK -->|igen| SBLOG["EV_BOOT + EV_STUCK_BUTTON naplózása<br>(csak az első körben – az ismétlődő<br>60 s-os ébredések némák)"]
+    WDT --> STUCK{"Nyomva van valamelyik gomb?<br>reset (D1) vagy wifireset (D0) = LOW"}
+    STUCK -->|igen| HOLD{"Elengedik 3 s-on belül?<br>(STUCK_BUTTON_CONFIRM_MS)<br>a gombos ébresztés alatt a gomb<br>MINDIG lenyomva találtatik"}
+    HOLD -->|"igen – ez ébresztő gombnyomás volt"| BOOTLOG
+    HOLD -->|"nem – tényleg beragadt"| SBLOG["EV_BOOT + EV_STUCK_BUTTON naplózása<br>(csak az első körben – az ismétlődő<br>60 s-os ébredések némák)"]
     SBLOG --> SBLINK["3 s: a két LED FELVÁLTVA villog"]
     SBLINK --> SB60["Deep sleep 60 s<br>csak timer ébresztés, gomb NEM<br>(boot loop ellen)"]
     SB60 --> PWR
@@ -109,7 +111,7 @@ flowchart TD
 ```mermaid
 flowchart TD
     L([loop ciklus, 10 ms-onként]) --> RP{"restartPending és<br>letelt a 2 s türelmi idő?"}
-    RP -->|igen| WFW["waitForConfigWrite()<br>(fájlírás megvárása, max 5 s)"] --> RS([ESP.restart])
+    RP -->|igen| WFW["lockConfigBeforeShutdown()<br>(fájlírás megvárása max 5 s,<br>ÉS a zár megszerzése)"] --> RS([ESP.restart])
     RP -->|nem| MODE{deviceMode}
     MODE -->|MODE_FATAL| FB["Mindkét LED együtt villog (5 Hz)<br>gombok élnek"] --> F5{"5 perc letelt?"}
     F5 -->|igen| FSL["fatalSleep() – EV_SLEEP(4)<br>alvás timer NÉLKÜL"]
@@ -240,7 +242,7 @@ sequenceDiagram
     W->>L: restartPending = true, restartAt = most + 2 s
     Note over L: savingConfig alatt tilos: gombkezelés,<br>alvás, újraindítás (sérült konfig ellen)
     L->>L: 2 s türelmi idő (dupla mentés beérhet)
-    L->>L: waitForConfigWrite() – max 5 s
+    L->>L: lockConfigBeforeShutdown() – max 5 s, a zárat meg is szerzi
     L->>L: ESP.restart()
 ```
 
@@ -252,9 +254,10 @@ Minden alvás a közös `enterDeepSleep()`-en megy át:
 
 ```mermaid
 flowchart TD
-    IN([enterDeepSleep timerUs]) --> W["waitForConfigWrite()<br>fájlírás közben nem alszunk"]
+    IN([enterDeepSleep timerUs]) --> W["lockConfigBeforeShutdown()<br>fájlírás közben nem alszunk<br>(a zárat meg is szerzi)"]
     W --> OFF["LED-ek + relé = LOW<br>relé hold: gpio_hold_en + deep_sleep_hold<br>WiFi le, webszerver le, Serial le"]
-    OFF --> ARM["Minden ébresztőforrás törlése,<br>majd: reset gomb (D1 = GPIO3, RTC-képes)<br>élesítése LOW szintre"]
+    OFF --> DET["A gomb-megszakítások leválasztása<br>(ugyanazok a GPIO regiszterek)"]
+    DET --> ARM["Minden ébresztőforrás törlése,<br>majd: reset gomb (D1 = GPIO3, RTC-képes)<br>élesítése LOW szintre"]
     ARM --> TMR{"timerUs > 0?"}
     TMR -->|igen| T1["Timer élesítése"]
     TMR -->|"nem, DE a gombélesítés hibázott"| T2["Biztonsági háló:<br>1 órás timer mégis"]
@@ -270,7 +273,7 @@ flowchart TD
 | `internetFailSleep()` | 4 router reset után sincs internet | `EV_SLEEP(2)` | 1 óra | igen |
 | `apSleep()` | AP portál 5 perc tétlenség | `EV_SLEEP(3)` | – | igen |
 | `fatalSleep()` | végzetes hiba, 5 perc villogás után | `EV_SLEEP(4)` | – | igen |
-| beragadt gomb | reset/wifireset LOW induláskor | `EV_STUCK_BUTTON` | 60 s | **nem** (szándékosan) |
+| beragadt gomb | reset/wifireset LOW induláskor **és 3 s után is** | `EV_STUCK_BUTTON` | 60 s | **nem** (szándékosan) |
 
 Ébredéskor az eszköz teljesen újraindul (`setup()`, 2. ábra); a RAM-beli
 számlálók nullázódnak, az RTC memóriában csak a `rtcRetryRounds`, a watchdog
@@ -280,4 +283,4 @@ számláló és a diagnosztikai napló él túl.
 
 *Az ábrák a `bazsi_router_reboot.ino` aktuális állapotát dokumentálják.
 Módosításkor a kóddal együtt frissítendők – a viselkedést a `test/` alatti
-231 forgatókönyves (795 ellenőrzéses) tesztkészlet rögzíti.*
+235 forgatókönyves (828 ellenőrzéses) tesztkészlet rögzíti.*
