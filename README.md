@@ -714,11 +714,19 @@ kétlépcsős próba, és a **sorrend a lényeg**:
    egy ping a `1.1.1.1`-re. Hálózat nélkül **el sem indul**: pingelni
    értelmetlen (és pazarlás) lenne, ha a csomag ki sem tudna menni.
 
-A várakozás csak akkor ér véget korábban, ha **mindkét lépés** sikerül; ekkor
-jöhet a rendes tesztsorozat. Ha bármelyik elbukik, a várakozás szabályosan
-végigfut. Ugyanez a próba fut a router reset utáni `RESET_DELAY` alatt is – ott
-ráadásul az újracsatlakozási kört is megspórolja, hiszen a kapcsolatot épp az
-imént mértük.
+A várakozás akkor ér véget korábban, ha **mindkét lépés** sikerül; ekkor jöhet
+a rendes tesztsorozat.
+
+**A próba ismétlődik, tehát nem kell induláskor meglennie mindennek.** Ha egy
+adott próba elbukik, a várakozás egyszerűen megy tovább a következő ütemig – és
+ha a kapcsolat a 10 perc *bármely* pontján helyreáll, a kilépés az azt követő
+ütemben megtörténik. A teljes időt tehát csak akkor várjuk ki, ha végig nincs
+meg a hálózat vagy az internet. (Mérve: `OP7` – a 3,5 percnél visszatérő
+internetnél a várakozás 4 perc alatt lezárult, nem 10 alatt.)
+
+Ugyanez a próba fut a router reset utáni `RESET_DELAY` alatt is – ott ráadásul
+az újracsatlakozási kört is megspórolja, hiszen a kapcsolatot épp az imént
+mértük.
 
 > **Miért ping, amikor az internettesztek szándékosan HTTP-t használnak?**
 > Mert itt más a tét. A ciklikus tesztnél egy hamis pozitív végzetes: befagyott

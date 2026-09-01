@@ -91,7 +91,8 @@ flowchart TD
     PRB -->|"mindkettő OK"| EARLY["firstStart AZONNAL lezárva<br>(nem várjuk ki a maradékot)"]
     EARLY --> DONE
     PRB -->|"bármelyik bukik"| WAIT{"Eltelt már 10 perc?<br>(firstStartDelay)"}
-    WAIT -->|nem| BACK([vissza a loop-ba<br>gombok és watchdog élnek])
+    WAIT -->|"nem – 60 s múlva ÚJRA próbál"| BACK([vissza a loop-ba<br>gombok és watchdog élnek])
+    BACK -.->|"a következő ütem"| PRB
     WAIT -->|igen| REC{"reconnectWifi()<br>3 próba, 30 s szünetekkel<br>(próbánként 20 s timeout)"}
     REC -->|siker| DONE["firstStart lezárva<br>normál monitor üzem (4. ábra)"]
     REC -->|sikertelen| AUTH{"WL_CONNECT_FAILED?<br>(hitelesítési hiba)"}
@@ -279,4 +280,4 @@ számláló és a diagnosztikai napló él túl.
 
 *Az ábrák a `bazsi_router_reboot.ino` aktuális állapotát dokumentálják.
 Módosításkor a kóddal együtt frissítendők – a viselkedést a `test/` alatti
-195 forgatókönyves (636 ellenőrzéses) tesztkészlet rögzíti.*
+196 forgatókönyves (640 ellenőrzéses) tesztkészlet rögzíti.*

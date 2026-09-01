@@ -3464,6 +3464,35 @@ static void scOP4() {
         "kapcsolat nelkul NEM pingelunk - a ping csak a masodik lepes");
 }
 
+static void scOP7() {
+  // A halozat VEGIG el (az initWiFi() sikerult), csak az internet nincs meg
+  // induláskor - de MENET KOZBEN visszajon. A varakozas ilyenkor NEM fut
+  // vegig: a 60 mp-enkenti proba elkapja, es nem sokkal az internet
+  // visszaterese utan lezarul.
+  //
+  // Ez a "sikeres csatlakozas utan is lefut a firstStart" allitas masik fele:
+  // a 10 perc CSAK akkor telik le teljesen, ha az internet vegig hianyzik.
+  coldBoot(true, "TestNet", "pw", "", "");
+  pingSim.ok = false;                    // Wi-Fi megvan, internet nincs
+  setup();
+  const uint32_t t0 = timing.startMillis;
+  const uint32_t netVissza = 210u * 1000;   // 3,5 perc mulva lesz net
+  int guard = 0;
+  try {
+    while (uiFlags.firstStart && ++guard < 400000) {
+      if (g_millis - t0 >= netVissza) pingSim.ok = true;
+      loop();
+    }
+  } catch (DeepSleepSignal&) {}
+  const uint32_t dt = g_millis - t0;
+  printf("     [info] a firstStart %u mp alatt zarult le\n", dt / 1000);
+  CHECK(!uiFlags.firstStart, "a varakozas lezarult");
+  CHECK(dt >= netVissza, "nem elobb, mint hogy az internet visszajott");
+  CHECK(dt < netVissza + 90u * 1000,
+        "es az internet visszaterese utan egy proba-utemen belul (nem 10 perc)");
+  CHECK(serialHas("halozat es internet visszajott"), "a korai kilepes agan zarult");
+}
+
 static void scOP6() {
   // A millis() 49,7 naponta korbefordul. A proba orai ELOJEL NELKULI
   // kivonassal dolgoznak, ezert ezt at kell vesszeleniuk. Ha valaki
@@ -3832,6 +3861,7 @@ static const Scenario kScenarios[] = {
   { "OP4: flash kímélés – nincs fájlírás, és percenként max egy WiFi.begin()", scOP4 },
   { "OP5: a RESET_DELAY korán zárul, és nem bontja le az igazolt kapcsolatot", scOP5 },
   { "OP6: a próba órái túlélik a millis() körbefordulását", scOP6 },
+  { "OP7: élő Wi-Fi mellett is korán zárul, ha az internet menet közben visszajön", scOP7 },
 
   // --- LED jelzesek ---
   { "LED2: AP módban a Wi-Fi LED villog, a státusz LED végig világít", scLEDap },

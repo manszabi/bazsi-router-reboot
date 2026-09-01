@@ -213,7 +213,9 @@ constexpr uint64_t STUCK_BUTTON_SLEEP_US = 60ULL * 1000000ULL;    // 60 másodpe
 // Mindkét várakozás arra való, hogy a router bootolására időt hagyjunk - de ha
 // a router hamarabb feláll, felesleges a maradékot kivárni. Ennyi időnként
 // megnézzük, hogy visszajött-e a hálózat ÉS az internet; ha mindkettő megvan,
-// a várakozás azonnal véget ér. Ha nem, a várakozás szabályosan végigfut.
+// a várakozás azonnal véget ér. A próba ISMÉTLŐDIK, tehát elég, ha a kapcsolat
+// a várakozás BÁRMELY pontján helyreáll: a kilépés az azt követő ütemben
+// megtörténik. A teljes időt csak akkor várjuk ki, ha végig nincs meg.
 //
 // MIÉRT 60 mp? Egy router bootolása 1-3 perc, tehát ennél sűrűbb kérdezés nem
 // hozna érdemben korábbi kilépést, viszont rádiózna. Egy 10 perces várakozás
@@ -1818,10 +1820,15 @@ void handleFirstStart(uint32_t currentMillis) {
   // 60 mp-et várni a továbblépéssel.
   //
   // FIGYELEM, VISELKEDÉSVÁLTOZÁS: korábban a puszta Wi-Fi kapcsolat is azonnal
-  // lezárta a várakozást. Most a ping is kell hozzá. Ha a hálózat megvan, de
-  // az internet nem, a firstStartDelay végigfut - épp erre való: áramszünet
-  // után a router lassabban indul, mint az ESP, és nem akarjuk 2 perccel a
-  // bekapcsolás után újraindítani.
+  // lezárta a várakozást. Most a ping is kell hozzá.
+  //
+  // Ez NEM azt jelenti, hogy internet híján mindig letelik a 10 perc: a próba
+  // 60 mp-enként ISMÉTLŐDIK, tehát ha az internet a várakozás bármely pontján
+  // visszajön, a kilépés az azt követő ütemben megtörténik (mérve: OP7 - a
+  // 3,5 percnél visszatérő internetnél a várakozás 4 perc alatt lezárult).
+  // A teljes 10 perc csak akkor telik le, ha VÉGIG nincs internet - és épp
+  // ez a helyes: áramszünet után a router lassabban indul, mint az ESP, és
+  // nem akarjuk 2 perccel a bekapcsolás után újraindítani.
   const bool online = onlineProbeDue(firstStartProbeLast, currentMillis);
 
   if (!online) {

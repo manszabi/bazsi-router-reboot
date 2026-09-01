@@ -61,7 +61,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 
 ## Lefedett esetek
 
-**195 forgatókönyv, 636 ellenőrzés. Sorlefedettség: 98,48%.**
+**196 forgatókönyv, 640 ellenőrzés. Sorlefedettség: 98,48%.**
 
 | | |
 |---|---|
@@ -93,7 +93,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 | `OV1` | Számlálók korlátosak több reset cikluson át |
 | `IP1`–`IP3` | Csak IPv4 fogadható el (IPv6 és `0.0.0.0` nem) |
 | `LED1`–`LED3` | LED-jelzések: a reset pulzus alatt a **státusz LED villog** (2 Hz) és a Wi-Fi LED sötét, **AP módban** a Wi-Fi LED villog (1 Hz) és a státusz LED végig világít, a villogás üteme és határa |
-| `OP1`–`OP6` | **Korai kilépés a hosszú várakozásokból**: a `firstStartDelay` korán zárul, ha a hálózat *és* az internet is megvan; csak hálózatnál végigfut; ép induláskor az első próba azonnal fut; **flash kímélés** (nincs fájlírás, percenként max egy `WiFi.begin()`, kapcsolat nélkül nincs ping); a `RESET_DELAY` korai zárása nem bontja le az igazolt kapcsolatot; **a próba órái túlélik a `millis()` körbefordulását** |
+| `OP1`–`OP7` | **Korai kilépés a hosszú várakozásokból**: a `firstStartDelay` korán zárul, ha a hálózat *és* az internet is megvan; csak hálózatnál végigfut; ép induláskor az első próba azonnal fut; **flash kímélés** (nincs fájlírás, percenként max egy `WiFi.begin()`, kapcsolat nélkül nincs ping); a `RESET_DELAY` korai zárása nem bontja le az igazolt kapcsolatot; **a próba órái túlélik a `millis()` körbefordulását**; **élő Wi-Fi mellett is korán zárul, ha az internet menet közben jön vissza** |
 | `WDT7` | A watchdog már a LittleFS csatolása **előtt** élesedik |
 | `EVT1` | A `/log` `TEST FAIL` paramétere is 1-alapú – ugyanaz a szám, mint a soros porton |
 

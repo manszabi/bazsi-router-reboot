@@ -123,7 +123,10 @@ Teszttel kimérve (`PO1`–`PO3`):
 2. **Internet – csak meglévő kapcsolat mellett.** Ping a `1.1.1.1`-re. Hálózat
    nélkül el sem indul, mert értelmetlen lenne.
 
-A várakozás csak akkor zárul korábban, ha **mindkét lépés** sikerül.
+A várakozás akkor zárul korábban, ha **mindkét lépés** sikerül. A próba
+**ismétlődik**, tehát elég, ha a kapcsolat a várakozás *bármely* pontján
+helyreáll – a kilépés az azt követő ütemben megtörténik. A teljes időt csak
+akkor várjuk ki, ha végig nincs meg (mérve: `OP7`).
 
 Egy kör két próbálkozási ablakot ad (a router reset előtt és után), így az első
 kör önmagában ~25 percet fed le. Ami ebből kimarad, azt a következő körök
