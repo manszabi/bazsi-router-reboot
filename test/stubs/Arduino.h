@@ -87,6 +87,11 @@ static const uint8_t D8 = 8;
 static const uint8_t D9 = 9;
 static const uint8_t D10 = 10;
 
+// --- gomb-mintavetelezes merese (lasd main_stub.cpp) ---
+extern bool     g_btnTrack;
+extern uint32_t g_btnLastPoll;
+extern uint32_t g_btnMaxGap;
+
 // --- szimulált idő / naplózás ---
 extern uint32_t g_millis;
 extern std::vector<std::string> g_log;

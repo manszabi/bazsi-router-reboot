@@ -311,6 +311,18 @@ választ, és ez a hiba némán, a redundancia elvesztésével jelentkezne. A
 | **Reset** (D1) | ESP32-C3 azonnali újraindítása; deep sleepből felébreszti az eszközt |
 | **Wi-Fi Reset** (D0) | Mentett Wi-Fi adatok törlése + ESP újraindítás → visszaáll AP módba |
 
+> ⚠️ **Tartsd nyomva a gombot ~1 másodpercig.** A firmware minden saját
+> várakozó ciklusában **10 ms-onként** mintavételezi mindkét gombot (mérve:
+> `BTN1`) – de egy futó **HTTP teszt alatt nem tud**: a `http.GET()` az ESP32
+> core blokkoló hívása, nincs benne visszahívás. Ez az ablak **legfeljebb egy
+> kérésnyi**: 15 mp, ha a szerver hallgat, és 33 mp, ha a DNS halott (mérve:
+> `BTN2` – 33 010 ms). A kérések *között* újra pollozunk.
+>
+> Következmény: egy rövid koppintás ebbe az ablakba eshet, és nyom nélkül
+> elveszik – a láb állapotát ugyanis csak a mintavételkor olvassuk. A **végig
+> nyomva tartott** gomb viszont az ablak után is hat, a debounce nem „vész el"
+> (mérve: `BTN3`). Ezért a szabály: nyomd, és tartsd, amíg reagál.
+
 > ⚠️ Induláskor **mindkét** gombot ellenőrizzük. Ha bármelyik beragadva marad, a
 > két LED 3 másodpercig **felváltva** villog (megkülönböztetésül a végzetes
 > hibától, ahol együtt villognak), majd az ESP 60 másodpercre deep sleep módba lép.

@@ -3464,6 +3464,84 @@ static void scOP4() {
         "kapcsolat nelkul NEM pingelunk - a ping csak a masodik lepes");
 }
 
+// ===========================================================================
+// GOMBOK: mekkora a leghosszabb ablak, amiben egyik gombot sem nezzuk?
+// ===========================================================================
+
+// A mert legrosszabb eset a hosszu varakozasokban. A hatarok azt rogzitik,
+// hogy a MI ciklusaink 10 ms-onkent mintavetelezik a gombokat - egy nagyobb
+// ertek azt jelentene, hogy egy varakozas kimaradt a lefedettsegbol.
+static uint32_t merjGombHezag(void (*forgatokonyv)()) {
+  g_btnTrack = true; g_btnLastPoll = g_millis; g_btnMaxGap = 0;
+  forgatokonyv();
+  g_btnTrack = false;
+  return g_btnMaxGap;
+}
+
+static void scBTN1() {
+  // A HOSSZU VARAKOZASOK alatt mindket gombot 10 ms-onkent nezzuk.
+  // Vegigjatszunk egy teljes first start varakozast + router resetet +
+  // RESET_DELAY-t, es megmerjuk a leghosszabb "vak" ablakot.
+  //
+  // A HTTP kereseket szandekosan GYORSRA allitjuk: a blokkolo http.GET() a
+  // core-e, azt nem tudjuk megszakitani, es kulon teszt (BTN2) meri. Itt a
+  // MI ciklusaink a targy.
+  coldBoot(false, "MyNetwork", "titok123", "", "");
+  g_httpOkMs = 10; g_httpFailMs = 10; pingSim.okMs = 10; pingSim.failMs = 10;
+  setup();
+  const uint32_t gap = merjGombHezag([]() {
+    const uint32_t t0 = g_millis;
+    int guard = 0;
+    try { while (g_millis - t0 < 20u*60*1000 && ++guard < 500000) loop(); }
+    catch (DeepSleepSignal&) {}
+  });
+  printf("     [info] leghosszabb gomb-vak ablak: %u ms\n", gap);
+  CHECK(gap <= 60, "a sajat varakozo ciklusaink 10 ms-onkent nezik a gombokat");
+}
+
+static void scBTN2() {
+  // A blokkolo HTTP keres alatt a gombok NEM nezhetok: a http.GET() a core
+  // fuggvenye, nincs benne visszahivas. Ez nem hiba, hanem a konyvtar
+  // korlatja - de MERT ertek, hogy tudjuk, mit dokumentalunk.
+  //
+  // A legrosszabb eset a HALOTT DNS: 33 mp (lasd WDT_TIMEOUT_MS levezeteset).
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpCode = -1;
+  g_httpFailMs = 33000;              // halott DNS: a legrosszabb eset
+  pingSim.ok = true;
+  setup();
+  const uint32_t gap = merjGombHezag([]() {
+    int guard = 0;
+    try {
+      while (++guard < 200000 && !serialHas("Test failed.")) loop();
+      // MEG EGY kor: a hezag csak a KOVETKEZO gombolvasaskor rogzul, es a
+      // blokkolo kerest tartalmazo loop() mar nem olvas gombot. Enelkul a
+      // meres 60 ms-ot mutatna, vagyis eltakarna a vizsgalt jelenseget.
+      loop();
+    } catch (DeepSleepSignal&) {}
+  });
+  printf("     [info] a blokkolo HTTP keres alatti vak ablak: %u ms\n", gap);
+  CHECK(gap >= 30000, "a http.GET() alatt tenyleg nem nezzuk a gombokat");
+  CHECK(gap <= 34000,
+        "de csak EGY keres erejeig - a keresek KOZOTT ujra pollozunk");
+}
+
+static void scBTN3() {
+  // A gombot a vak ablak UTAN is fel kell ismerni: a debounce nem "veszik el"
+  // attol, hogy kozben nem mintavetelezunk. Egy VEGIG nyomva tartott gomb a
+  // pollozas visszaterese utan ket mintaval (>= 50 ms) ujrainditja az eszkozt.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpCode = -1; g_httpFailMs = 33000; pingSim.ok = true;
+  setup();
+  g_pinRead[3] = LOW;                // a reset gombot VEGIG nyomva tartjuk
+  bool restarted = false;
+  int guard = 0;
+  try { while (++guard < 200000 && !restarted) loop(); }
+  catch (RestartSignal&) { restarted = true; }
+  catch (DeepSleepSignal&) {}
+  CHECK(restarted, "a vegig nyomva tartott reset gomb a vak ablak utan is hat");
+}
+
 static void scOP7() {
   // A halozat VEGIG el (az initWiFi() sikerult), csak az internet nincs meg
   // induláskor - de MENET KOZBEN visszajon. A varakozas ilyenkor NEM fut
@@ -3862,6 +3940,11 @@ static const Scenario kScenarios[] = {
   { "OP5: a RESET_DELAY korán zárul, és nem bontja le az igazolt kapcsolatot", scOP5 },
   { "OP6: a próba órái túlélik a millis() körbefordulását", scOP6 },
   { "OP7: élő Wi-Fi mellett is korán zárul, ha az internet menet közben visszajön", scOP7 },
+
+  // --- Gombok a hosszu varakozasok alatt ---
+  { "BTN1: a hosszú várakozások alatt 10 ms-onként nézzük mindkét gombot", scBTN1 },
+  { "BTN2: a blokkoló HTTP kérés alatti vak ablak mérése (egy kérésnyi)", scBTN2 },
+  { "BTN3: a végig nyomva tartott gomb a vak ablak után is hat", scBTN3 },
 
   // --- LED jelzesek ---
   { "LED2: AP módban a Wi-Fi LED villog, a státusz LED végig világít", scLEDap },

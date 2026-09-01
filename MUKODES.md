@@ -404,6 +404,19 @@ A gombokat 10 ms-onként mintavételezzük, és csak a végig lenyomva maradt
 
 > ⚠️ A Wi-Fi reset gomb lába (`D0` = **GPIO2**) az ESP32-C3 egyik *strapping*
 > lába: a chip csak akkor bootol, ha a reset pillanatában GPIO2 = 1.
+> **Mennyire gyorsan reagál?** A firmware minden saját várakozó ciklusában
+> **10 ms-onként** olvassa mindkét gombot – a `waitWithButtons()`, a
+> `waitWithButtonsUntilOnline()`, az `initWiFi()` 20 mp-es várakozása, a reset
+> pulzus, a `handleFirstStart()` és a `loop()` minden ága beleértve (mérve:
+> `BTN1`, a leghosszabb ablak 10 ms).
+>
+> Egyetlen kivétel a futó **HTTP teszt**: a `http.GET()` a core blokkoló
+> hívása, nincs benne visszahívás, tehát alatta egyik gombot sem nézzük.
+> Ez az ablak legfeljebb **egy kérésnyi** – 15 mp hallgató szervernél, 33 mp
+> halott DNS-nél (mérve: `BTN2`). Egy rövid koppintás ide eshet és elveszik;
+> a **végig nyomva tartott** gomb viszont az ablak után is hat (`BTN3`).
+> Gyakorlati szabály: **nyomd és tartsd, amíg reagál.**
+
 > **Bekapcsolás közben ne tartsd nyomva** – az eszköz el sem indulna, és ez
 > ellen szoftver nem védhet. Új hardver revízióban a gombot érdemes szabad,
 > nem-strapping lábra tenni (pl. `D2` = GPIO4).

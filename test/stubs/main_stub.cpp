@@ -145,7 +145,21 @@ void digitalWrite(uint8_t p, uint8_t v) {
   if (g_pinState[p] != v) simLog("pin" + std::to_string(p) + "=" + (v ? "HIGH" : "LOW"));
   g_pinState[p] = v;
 }
-int digitalRead(uint8_t p) { auto it = g_pinRead.find(p); return it == g_pinRead.end() ? HIGH : it->second; }
+// A GOMBOK mintavetelezesi koze. Ugyanaz az elv, mint a g_wdtMaxFeedGap-nel:
+// enelkul nem lehetne kimutatni, hogy egy blokkolo konyvtarhivas (http.GET,
+// Ping.ping) alatt a gomb masodpercekig eszrevetlen marad. A gombok a
+// D0 = GPIO2 (wifireset) es a D1 = GPIO3 (reset).
+bool     g_btnTrack = false;
+uint32_t g_btnLastPoll = 0;
+uint32_t g_btnMaxGap = 0;
+int digitalRead(uint8_t p) {
+  if (g_btnTrack && (p == 2 || p == 3)) {
+    const uint32_t gap = g_millis - g_btnLastPoll;
+    if (gap > g_btnMaxGap) g_btnMaxGap = gap;
+    g_btnLastPoll = g_millis;
+  }
+  auto it = g_pinRead.find(p); return it == g_pinRead.end() ? HIGH : it->second;
+}
 void yield() { g_millis += 10; }   // szimulált idő telik minden yield()-nél
 int64_t esp_timer_get_time() { return (int64_t)g_millis * 1000; }
 void esp_sleep_enable_timer_wakeup(uint64_t us) { g_wakeupUs = us; simLog("timer_wakeup(" + std::to_string(us) + ")"); }
