@@ -551,6 +551,20 @@ ne reagáljon, mint hogy spontán újrainduljon.
 > ellen szoftver nem védhet. Új hardver revízióban a gombot érdemes szabad,
 > nem-strapping lábra tenni (pl. `D2` = GPIO4).
 
+### A mezők validálása – közös szabály
+
+Mind a négy mező **ugyanúgy** viselkedik: előbb levágjuk a másolás-beillesztés
+szóközeit, és **csak azután** mérjük a hosszt. Enélkül egy határértékes érték
+egyetlen beillesztett záró szóközzel „túl hosszú" hibát adna – holott a vágott
+érték tökéletesen érvényes, és a beolvasás úgyis vágna. A túlméretes érték
+viszont továbbra is hiba: a vágás nem menti meg. (Mérve: `AP7`.)
+
+> A soros portra **csak a négy ismert mezőt** visszhangozzuk, és a hosszt is
+> korlátozzuk (`%.64s`). Az ismeretlen paramétereket amúgy sem dolgozzuk fel,
+> tehát diagnosztikai értékük nincs – egy sok mezős POST viszont annyi sort írt
+> volna, ahány mezőt küldtek, mindezt az `async_tcp` taskban, ami közben a
+> webszervert is kiszolgálja.
+
 **Fájlírás közben egyik gomb sem hat.** A mentést az aszinkron webszerver
 taskja végzi; egy odaeső gombnyomás félbeszakított írást okozna. A gombok a
 mentés befejeztével működnek tovább (ilyenkor egy új 50 ms-os lenyomás kell).
