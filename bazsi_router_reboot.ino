@@ -1273,8 +1273,35 @@ void checkHeap(uint32_t now) {
   //  - Fajliras kozben soha (ezt a zar biztositja lejjebb is).
   //  - A rele impulzusa alatt sem: a router epp aram nelkul van, es az
   //    ujraindulas felbevagna a 90 mp-es pulzust.
+  //  - ES a router reset UTANI ellenorzo ablakban sem. Ez a legkevesbe
+  //    nyilvanvalo kizaras, ezert reszletesen:
+  //
+  //    A gateway-eszkalacio KETFAZISU, es a ket fazis kozott akar 10 perc is
+  //    eltelhet (RESET_DELAY):
+  //      1. fazis: a sajat gateway sem elerheto -> GW UNREACH(1) naplozas,
+  //         a router kap EGY eselyt: ujrainditas, majd varakozas.
+  //      2. fazis: a varakozas utan UJRA ellenorizzuk. Ha a gateway meg
+  //         mindig nem valaszol, a statikus IP a rossz -> AP beallito mod,
+  //         hogy javitani lehessen.
+  //
+  //    Azt, hogy "az elso fazis mar lefutott", HAROM sima globalis egyutt
+  //    hordozza: currentState == FAILURE_STATE, uiFlags.resetPrinted es
+  //    timing.stateStart. Egy ujraindulas MINDHARMAT elvesziti - a
+  //    timing.stateStart-ot ertelmesen nem is lehetne atvinni, mert a millis()
+  //    ebredeskor nullarol indul. Az eszkoz igy ELOLROL kezdene: megint az
+  //    elso fazis futna le, vagyis a router kapna MEG egy folosleges
+  //    aramtalanitast, es a masodik fazis dontese - az AP modba menetel -
+  //    csak egy teljes korrel kesobb szuletne meg. Epp az a felhasznalo
+  //    jarna rosszul, akinek a statikus IP-jet javitani kellene.
+  //
+  //    Ezert itt inkabb VARUNK. Az ablak korlatos (RESET_DELAY + a
+  //    visszacsatlakozas, ~13 perc), a heapCritStreak pedig telitve marad,
+  //    tehat az ablak bezarultaval az ujraindulas azonnal megtortenik.
+  //    (Merve: GW1, GW2.)
+  const bool resetEllenorzoAblak =
+      (currentState == FAILURE_STATE) && uiFlags.resetPrinted;
   if (deviceMode != MODE_MONITOR || savingConfig || restartPending
-      || testState.resetStep != 0) {
+      || testState.resetStep != 0 || resetEllenorzoAblak) {
     return;
   }
 

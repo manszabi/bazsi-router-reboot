@@ -708,6 +708,32 @@ többet, mint amennyit javít (mérve: `HP5`):
 | **`MODE_FATAL`** | a program már nem futtat állapotgépet | igen: 5 perc után deep sleep |
 | **Fájlírás közben** | félbevágott mentés | a következő mérés újra próbálja |
 | **A relé impulzusa alatt** | a router épp áram nélkül van, az újraindulás félbevágná a 90 mp-es pulzust | a pulzus végén újra próbálja |
+| **A router reset utáni ellenőrző ablakban** | lásd lent – ez a legkevésbé nyilvánvaló kizárás | az ablak (max. ~13 perc) végén azonnal |
+
+#### A router reset utáni ellenőrző ablak
+
+A gateway-eszkaláció **kétfázisú**, és a két fázis között akár 10 perc is
+eltelhet (`RESET_DELAY`):
+
+1. A saját gateway sem érhető el → `GW UNREACH(1)` → **a router kap egy esélyt**:
+   újraindítás, majd várakozás.
+2. A várakozás után **újra** ellenőrizzük. Ha a gateway még mindig nem válaszol,
+   a statikus IP a rossz – a routert nincs értelme tovább áramtalanítani, jön az
+   **AP beállító mód**, hogy javítani lehessen.
+
+Azt, hogy „az első fázis már lefutott", **három sima globális hordozza együtt**:
+`currentState`, `uiFlags.resetPrinted` és `timing.stateStart`. Egy újraindulás
+mindhármat elveszti – és a `timing.stateStart`-ot **átvinni sem lehetne**
+értelmesen, mert a `millis()` ébredéskor nulláról indul.
+
+Az eszköz így elölről kezdené: megint az első fázis futna le, vagyis a router
+kapna **még egy fölösleges áramtalanítást**, és a második fázis döntése – az AP
+módba menetel – csak egy teljes körrel később születne meg. Épp az járna
+rosszul, akinek a statikus IP-jét javítani kellene.
+
+Ezért itt inkább **várunk**. Az ablak korlátos (`RESET_DELAY` + a
+visszacsatlakozás, ~13 perc), a kritikus-számláló pedig telítve marad, tehát az
+ablak bezárultával az újraindulás azonnal megtörténik. (Mérve: `GWH1`, `GWH2`.)
 
 ### Mit visz át az újraindulás
 
@@ -732,6 +758,22 @@ watchdog) ne támasszon fel elavult értéket. (Mérve: `HP4`.)
 Ami eleve túléli: a diagnosztikai napló, a watchdog-számláló, az
 újrapróbálkozási körök (mind RTC memóriában), és a LittleFS-en tárolt
 konfiguráció.
+
+#### A teljes lista: mi vész el, és miért nem baj
+
+| Változó | Mi lesz vele | Miért rendben |
+|---|---|---|
+| `testState.resetEvents` | **átvisszük** | enélkül végtelenül újraindíthatná a routert |
+| `testState.cycleIndex`, `failedCount` | elvész | csak azt mondja meg, hol tart az öt teszt között – egy új tesztkör ~1 perc (`GWH3`) |
+| `testState.resetStep` | elvész | **nem lehet** félbehagyott pulzus: a relé impulzusa alatt nincs újraindulás |
+| `currentState`, `uiFlags.resetPrinted`, `timing.stateStart` | elvész | **ezért van az ellenőrző ablak kizárása** – lásd fent |
+| `timing.startMillis` | újraszámolódik | a `setup()` beállítja |
+| `timing.fatalStart` | elvész | `MODE_FATAL`-ban nincs újraindulás |
+| `uiFlags.firstStart` | visszaáll `true`-ra | a 10 perces várakozás újra lefut, de a próba perceken belül lezárja |
+| `staticConfigActive` | újraszámolódik | az `initWiFi()` állítja be |
+| `deviceMode`, `savingConfig`, `restartPending` | elvész | mindhárom állapotban ki van zárva az újraindulás |
+| `ssid`, `pass`, `ipStr`, `gatewayStr` | elvész | a LittleFS-ről újratöltődik |
+| a gombok reteszei | elvész | a nyomás úgyis újraindítást kért, és az megtörténik |
 
 > ⚠️ **A mintavétel a `loop()` iterációi között történik**, tehát a hosszú
 > blokkoló várakozások alatt (`RESET_DELAY`, a 90 mp-es relé pulzus, egy futó

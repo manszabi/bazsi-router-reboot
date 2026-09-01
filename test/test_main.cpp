@@ -4533,6 +4533,149 @@ static void scHP9() {
   CHECK(rtcCarryResetEvents == 2, "es a router reset szamlalo atvitele is megvan");
 }
 
+extern uint32_t rtcHeapMagic;
+extern uint32_t rtcHeapRestarts;
+extern uint8_t  rtcCarryResetEvents;
+
+// --- Mi marad meg egy heap-ujraindulas utan? -------------------------------
+
+// A gateway-eszkalacio elojatszasa: statikus IP, a sajat gateway NEM valaszol,
+// az internet sem - vagyis pontosan az az eset, amikor a program a routernek
+// ad egy eselyt, majd (ha ugy sem megy) AP modba visz.
+static void gatewayHiba() {
+  coldBoot(true, "TestNet", "pw", "192.168.1.200", "192.168.1.1");
+  g_httpBody = "Rossz";                       // minden internet teszt bukik
+  pingSim.ok = false;                         // a gateway sem valaszol
+  pingSim.perTarget["192.168.1.1"] = false;
+  setup();
+}
+
+static void scGWH1() {
+  // TALALT HIBA. A gateway-eszkalacio KETFAZISU, es a ket fazis kozott akar
+  // 10 perc is eltelhet (RESET_DELAY):
+  //   1. a sajat gateway sem elerheto -> a router kap EGY eselyt: ujrainditas
+  //   2. a varakozas utan UJRA ellenorizzuk; ha meg mindig nincs gateway, a
+  //      statikus IP a rossz -> AP beallito mod, hogy javitani lehessen
+  //
+  // Azt, hogy "az elso fazis mar lefutott", HAROM sima globalis hordozza
+  // egyutt: currentState, uiFlags.resetPrinted es timing.stateStart. Egy
+  // heap-ujraindulas mindharmat elveszti - es a timing.stateStart-ot atvinni
+  // sem lehetne ertelmesen, mert a millis() ebredeskor nullarol indul.
+  //
+  // Ez a meres azt rogziti, hogy az ELLENORZO ABLAKBAN nincs onkentes
+  // ujraindulas. Enelkul az eszkoz elolrol kezdene: a router kapna MEG egy
+  // folosleges aramtalanitast, es az AP modba menetel egy teljes korrel
+  // kesobb szuletne meg - epp az jarna rosszul, akinek a statikus IP-jet
+  // javitani kellene.
+  gatewayHiba();
+
+  // Eljutunk az elso fazis vegeig: megtortent a router reset, es most a
+  // RESET_DELAY telik.
+  int guard = 0;
+  try {
+    while (!(currentState == (State)1 && uiFlags.resetPrinted) && ++guard < 900000) loop();
+  } catch (DeepSleepSignal&) {} catch (RestartSignal&) {}
+  CHECK(currentState == (State)1 && uiFlags.resetPrinted,
+        "az elso fazis lefutott: a router megkapta az eselyet");
+  CHECK(serialHas("A sajat gateway sem elerheto"), "es a gateway-hiba miatt");
+  const uint8_t resetekAddig = testState.resetEvents;
+
+  // MOST jon a kritikus heap - epp az ellenorzo ablakban.
+  g_freeHeap = 5000; g_maxAllocHeap = 4000;
+  bool restarted = false;
+  guard = 0;
+  const uint32_t t0 = g_millis;
+  try {
+    while (g_millis - t0 < 5u * 60 * 1000 && ++guard < 500000) loop();
+  } catch (RestartSignal&) { restarted = true; }
+  catch (DeepSleepSignal&) {}
+  CHECK(!restarted,
+        "a router reset UTANI ellenorzo ablakban NINCS onkentes ujraindulas");
+  CHECK(testState.resetEvents == resetekAddig,
+        "es igy a router sem kapott folosleges masodik aramtalanitast");
+}
+
+static void scGWH2() {
+  // ...es az ablak bezarultaval a dontes RENDESEN megszuletik: a masodik
+  // fazis lefut, es az eszkoz AP modba megy, hogy a rossz statikus IP-t
+  // javitani lehessen. A kesleltetett heap-ujraindulas ezt nem akadalyozza.
+  gatewayHiba();
+
+  // A heap CSAK az elso fazis utan valik kritikussa. (Ha kezdettol kritikus
+  // lenne, az ujraindulas mar az ellenorzo ablak ELOTT lefutna - jogosan,
+  // hiszen ott nincs mit vedeni; akkor viszont nem azt mernenk, amit akarunk.)
+  int guard = 0;
+  bool restarted = false, slept = false;
+  try {
+    while (!(currentState == (State)1 && uiFlags.resetPrinted) && ++guard < 900000) loop();
+  } catch (RestartSignal&) { restarted = true; }
+  catch (DeepSleepSignal&) { slept = true; }
+  CHECK(currentState == (State)1 && uiFlags.resetPrinted,
+        "az elso fazis lefutott");
+  g_freeHeap = 5000; g_maxAllocHeap = 4000;   // INNENTOL kritikus a heap
+
+  guard = 0;
+  try {
+    while (deviceMode != (DeviceMode)1 && ++guard < 900000) loop();
+  } catch (RestartSignal&) { restarted = true; }
+  catch (DeepSleepSignal&) { slept = true; }
+
+  CHECK(!restarted && !slept, "vegig eljutott ujraindulas es alvas nelkul");
+  CHECK(deviceMode == (DeviceMode)1,
+        "a masodik fazis dontese megszuletett: AP beallito mod");
+  CHECK(serialHas("Valoszinuleg rossz a statikus IP"),
+        "es a helyes indoklassal - a felhasznalo tudja, mit javitson");
+  bool gw2 = false, ap4 = false;
+  for (uint32_t i = 0; i < rtcEvNext && i < 32; i++) {
+    if (rtcEvents[i].code == 12 && rtcEvents[i].param == 2) gw2 = true;
+    if (rtcEvents[i].code == 6 && rtcEvents[i].param == 4) ap4 = true;
+  }
+  CHECK(gw2 && ap4, "a naploban GW UNREACH(2) es AP MODE(4) is szerepel");
+}
+
+static void scGWH3() {
+  // MI MARAD MEG EGYALTALAN? A kerdes altalanos valasza egy helyen.
+  //
+  // Egy ESP.restart() MINDEN sima globalist eldob. A kizarasok (AP mod,
+  // MODE_FATAL, fajliras, rele impulzus, ellenorzo ablak) pontosan azokat az
+  // allapotokat vedik, amelyek elvesztese VISELKEDESI hibat okozna. Ami
+  // marad, azt vagy atvisszuk (resetEvents), vagy olcso ujraszamolni.
+  //
+  // Ez a meres a "olcso ujraszamolni" allitast ellenorzi: egy heap-ujraindulas
+  // NORMAL monitor uzemben nem hagy hatra kart - a cycleIndex es a
+  // failedCount elvesztese legfeljebb egy uj tesztkort jelent.
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcHeapMagic = 0;
+  setup();
+  monitorUzembe();
+  CHECK(currentState != (State)1, "monitor uzemben, nem hibaagon");
+
+  testState.cycleIndex = 2;      // felig lefutott tesztsor
+  testState.failedCount = 2;
+  testState.resetEvents = 1;     // ...es egy router reset mar volt
+
+  g_freeHeap = 5000; g_maxAllocHeap = 4000;
+  bool restarted = false;
+  int guard = 0;
+  try {
+    while (!restarted && ++guard < 200000) { checkHeap(g_millis); g_millis += 1000; }
+  } catch (RestartSignal&) { restarted = true; }
+  CHECK(restarted, "normal monitor uzemben az ujraindulas viszont megtortenik");
+  CHECK(rtcCarryResetEvents == 1, "a router reset szamlalo atmegy");
+
+  // A tenyleges ujraindulas: a RAM torlodik, az RTC nem.
+  const uint32_t hm = rtcHeapMagic, hr = rtcHeapRestarts;
+  const uint8_t carry = rtcCarryResetEvents;
+  coldBoot(true, "TestNet", "pw", "", "", 500, true);
+  rtcHeapMagic = hm; rtcHeapRestarts = hr; rtcCarryResetEvents = carry;
+  setup();
+  CHECK(testState.resetEvents == 1, "a router reset szamlalo folytatodik");
+  CHECK(testState.cycleIndex == 0 && testState.failedCount == 0,
+        "a tesztsor viszont elolrol kezdodik - ez olcso, es igy is helyes");
+  CHECK(testState.resetStep == 0, "es nincs felben maradt rele impulzus");
+  CHECK(uiFlags.firstStart, "a firstStart varakozas ujra lefut (a proba koran zarja)");
+}
+
 // --- Ido-alapfeltevesek es a ket task kozotti megosztott allapot ------------
 
 static void scWDT14() {
@@ -6214,6 +6357,9 @@ static const Scenario kScenarios[] = {
   { "HP7: egy ora hibatlan mukodes nullazza a heap szamlalot", scHP7 },
   { "HP8: a ket uj esemenykod a /log oldalon is ertelmezheto", scHP8 },
   { "HP9: valodi lassu szivargas vegponttol vegpontig", scHP9 },
+  { "GWH1: a router reset utani ellenorzo ablakban nincs heap-ujraindulas", scGWH1 },
+  { "GWH2: es az ablak utan a gateway-dontes rendesen megszuletik", scGWH2 },
+  { "GWH3: mi marad meg es mi szamolodik ujra egy heap-ujraindulas utan", scGWH3 },
   { "WDT15: ...es a millis() korbefordulasan at is", scWDT15 },
   { "CC1: a portal futasa alatt a loop nem olvassa a konfig puffereket", scCC1 },
   { "CC2: a vegzetes hiba again sem olvassa oket", scCC2 },

@@ -574,9 +574,19 @@ Heap: szabad 178432 B, legnagyobb tomb 110000 B, valaha volt legkisebb 178432 B
 ```
 
 **Nem indul újra**, ha AP beállító módban vagy (elveszne a beírt konfiguráció),
-végzetes hiba módban, fájlírás közben, vagy a relé impulzusa alatt. Mindegyik
-helyzetnek megvan a maga kiútja: a portál 5 perc után elalszik, a többi eset
-pedig a következő mérésnél újra sorra kerül.
+végzetes hiba módban, fájlírás közben, a relé impulzusa alatt, vagy **a router
+reset utáni ellenőrző ablakban**. Mindegyik helyzetnek megvan a maga kiútja: a
+portál 5 perc után elalszik, a többi eset pedig a következő mérésnél újra sorra
+kerül.
+
+> Az utolsó kizárás a legkevésbé nyilvánvaló. A gateway-eszkaláció **kétfázisú**:
+> ha a saját gateway sem érhető el, a router kap egy esélyt (újraindítás), és a
+> várakozás után **újra** ellenőrizzük – ha még mindig nincs gateway, a statikus
+> IP a rossz, jön az AP mód, hogy javítani lehessen. Azt, hogy „az első fázis már
+> lefutott", három sima globális hordozza együtt, és egy újraindulás mindhármat
+> elveszti. Az eszköz elölről kezdené: a router kapna **még egy fölösleges
+> áramtalanítást**, és az AP módba menetel egy teljes körrel később születne meg –
+> épp az járna rosszul, akinek a statikus IP-jét javítani kellene.
 
 **Amit az újraindulás átvisz:** a `testState.resetEvents` – ez számolja, hányszor
 indítottuk már újra a routert, és ez viszi az eszközt az ötödiknél az 1 órás
