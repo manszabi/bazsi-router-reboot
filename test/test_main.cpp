@@ -3495,6 +3495,99 @@ static void figyelWifiLed() {
 // WI-FI: a korai kilepes uj utjai - jelszo es statikus IP
 // ===========================================================================
 
+// ===========================================================================
+// ROUTER RESET: milyen surun kapcsolja ki a routert? (felesleges ujrainditas)
+// ===========================================================================
+
+// Ket egymas utani rele-bekapcsolas kozti ido percben, plusz a resetek szama.
+static void merjResetUtem(uint32_t& elsoTav, int& resetek) {
+  elsoTav = 0; resetek = 0;
+  uint32_t utolso = 0;
+  int guard = 0;
+  size_t nezettIg = 0;
+  try {
+    while (++guard < 900000) {
+      loop();
+      for (size_t i = nezettIg; i < g_log.size(); i++) {
+        if (g_log[i] == RELAY_HIGH) {
+          resetek++;
+          if (utolso != 0 && elsoTav == 0) elsoTav = g_millis - utolso;
+          utolso = g_millis;
+        }
+      }
+      nezettIg = g_log.size();
+    }
+  } catch (DeepSleepSignal&) {}
+}
+
+static void scRR1() {
+  // ESET A: az internet IP szinten MEGY (a ping sikerul), csak a HTTP bukik.
+  // Ez a befagyott router-DNS - a router tenyleg elakadt, tehat a gyorsabb
+  // ujrainditasi utem HELYES. A korai kilepes itt rovidit.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpCode = -1; g_httpFailMs = 15000;   // hallgato szerver
+  pingSim.ok = true;                        // az IP ut viszont el
+  setup();
+  g_log.clear();
+  uint32_t tav; int resetek;
+  merjResetUtem(tav, resetek);
+  printf("     [info] befagyott DNS: %d router reset, ket reset kozt %u perc %u mp\n",
+         resetek, tav / 60000, (tav / 1000) % 60);
+  CHECK(resetek == 4, "pontosan 4 tenyleges router ujrainditas, aztan alvas");
+  CHECK(tav >= 3u * 60 * 1000,
+        "ket ujrainditas kozt legalabb 3 perc telik (nem kapcsolgat)");
+  CHECK(tav <= 7u * 60 * 1000, "es legfeljebb ~7 perc (a korai kilepes rovidit)");
+}
+
+static void scRR2() {
+  // ESET B: az internet TENYLEG halott (a ping sem megy). Ilyenkor NINCS
+  // korai kilepes, tehat a teljes 10 perces RESET_DELAY lefut - a router
+  // bootolasara hagyott ido erintetlen. Ez a fontos: az uj korai kilepes
+  // NEM teszi agressziveabbe a routert bantalmazo esetet.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpCode = -1; g_httpFailMs = 15000;
+  pingSim.ok = false;                       // semmi nem megy
+  setup();
+  g_log.clear();
+  uint32_t tav; int resetek;
+  merjResetUtem(tav, resetek);
+  printf("     [info] teljes kieses: %d router reset, ket reset kozt %u perc %u mp\n",
+         resetek, tav / 60000, (tav / 1000) % 60);
+  CHECK(resetek == 4, "itt is pontosan 4 ujrainditas");
+  CHECK(tav >= 12u * 60 * 1000,
+        "ket ujrainditas kozt legalabb 12 perc - a 10 perces bootvarakozas ep");
+}
+
+static void scRR3() {
+  // Egyetlen sikeres teszt NULLAZZA a reset-szamlalot: az eszkoz nem
+  // "gyujtogeti" a resetet napokon at. Ha 3 reset utan visszajon a net, a
+  // kovetkezo kieses megint 4 resetet kap, nem egyet.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpCode = -1; g_httpFailMs = 15000; pingSim.ok = true;
+  setup();
+  int guard = 0, resetek = 0;
+  size_t nezettIg = 0;
+  try {
+    while (++guard < 900000 && resetek < 2) {
+      loop();
+      for (size_t i = nezettIg; i < g_log.size(); i++)
+        if (g_log[i] == RELAY_HIGH) resetek++;
+      nezettIg = g_log.size();
+    }
+  } catch (DeepSleepSignal&) {}
+  CHECK(resetek == 2, "ket reset megtortent");
+  CHECK(testState.resetEvents == 2, "a szamlalo 2-n all");
+  // Most visszajon az internet
+  g_httpCode = 200; g_httpBody = "Microsoft Connect Test";
+  guard = 0;
+  try { while (++guard < 400000 && !serialHas("Successful Test")) loop(); }
+  catch (DeepSleepSignal&) {}
+  CHECK(serialHas("Successful Test"), "sikeres teszt");
+  CHECK(testState.resetEvents == 0, "a reset-szamlalo NULLAZODOTT");
+  CHECK(testState.cycleIndex == 0 && testState.failedCount == 0,
+        "es a ciklus is tiszta lappal indul");
+}
+
 static void scBTN4() {
   // A reset gomb ujrainditasa is ATOMIKUSAN szerzi meg a konfigzarat, nem
   // csak a gyors savingConfig-ellenorzest vegzi. Enelkul az async_tcp task
@@ -4186,6 +4279,9 @@ static const Scenario kScenarios[] = {
   // --- Gombok a hosszu varakozasok alatt ---
   { "WDT8b: a LittleFS formázása is belefér a watchdog ablakába", scWDT8b },
   { "WDT9: 1 óra hibátlan működés AP módban is nullázza a WDT számlálót", scWDT9 },
+  { "RR1: befagyott DNS – 4 reset, két újraindítás közt legalább 3 perc", scRR1 },
+  { "RR2: teljes kiesésnél a 10 perces bootvárakozás érintetlen marad", scRR2 },
+  { "RR3: egyetlen sikeres teszt nullázza a reset-számlálót", scRR3 },
   { "BTN4: a reset gomb is atomikusan szerzi meg a konfigzárat", scBTN4 },
   { "SE11: az onlineProbe() WiFi.begin()-je is a NYÍLT jelszót adja", scSE11 },
   { "WF10: a RESET_DELAY korai kilépése után a statikus IP érintetlen", scWF10 },

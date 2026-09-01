@@ -224,6 +224,29 @@ a `SUCCESS_DELAY` hátralévő része, tehát a **legrosszabb felismerési idő
 újracsatlakozás ≈ **13,6–15,1 perc**, ha a Wi-Fi az első próbára visszajön;
 ha mind a 3 próba kell, ≈ **15,5–17,0 perc**.
 
+### Milyen sűrűn kapcsolja ki a routert?
+
+A `maxfailureEvents = 5` felső korlátja **4 tényleges újraindítás**, utána
+1 órás alvás – ezen a korai kilépés nem változtat, csak a *tempón*. Mérve:
+
+| Helyzet | Két újraindítás között | Újraindítások |
+|---|---|---|
+| **Befagyott router-DNS** (a ping megy, a HTTP nem) | **4 perc 34 mp** | 4 (`RR1`) |
+| **Teljes internetkiesés** (a ping sem megy) | **13 perc 38 mp** | 4 (`RR2`) |
+
+A különbség szándékos, és épp a helyes irányba mutat. A korai kilépés csak
+akkor rövidít, ha az `onlineProbe()` pingje **sikerül** – vagyis az IP-szintű
+út él, és mégsem megy a HTTP. Ez pontosan a beragadt router esete, ahol a
+gyorsabb újraindítás indokolt. Ha az internet tényleg halott, a ping is bukik,
+korai kilépés nincs, és a routernek szánt **10 perces bootvárakozás
+érintetlen** – az új mechanizmus tehát nem teszi agresszívebbé a firmware-t
+ott, ahol az ártana.
+
+Egyetlen sikeres teszt **nullázza a reset-számlálót** (`RR3`), tehát az eszköz
+nem „gyűjtögeti" a resetet napokon át.
+
+---
+
 ### Ha a saját gateway sem válaszol
 
 Statikus IP mellett külön eset: a Wi-Fi **társítás sikerül** (az WPA2, 2. réteg),
