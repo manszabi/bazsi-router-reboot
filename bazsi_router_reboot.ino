@@ -482,7 +482,18 @@ struct EventEntry {
 };
 
 constexpr uint8_t EVLOG_SIZE = 32;
-constexpr uint32_t EVLOG_MAGIC = 0x42415A4CUL;  // "BAZL"
+// A magic EGYBEN VERZIOJELZO is. Az RTC NOINIT terulet a szoftveres resetet -
+// tehat egy SOROS PORTON KERESZTULI FIRMWARE FRISSITEST is - tulel: az uj
+// firmware a regi tartalmat talalja ott. Ha kozben az EventEntry elrendezese
+// valtozott (mint amikor 8-rol 12 bajtra nott az epoch mezovel), a regi
+// bejegyzesek UJ elrendezeskent ertelmezve szemetet adnanak - es a
+// saveEventLog() ezt a szemetet meg ki is irna a fajlrendszerre.
+//
+// Ezert: HA AZ EventEntry VAGY AZ EVLOG_SIZE VALTOZIK, EZT A MAGIC-ET IS
+// EMELNI KELL. Az uj firmware igy ervenytelennek latja a regi naplot, es
+// tiszta lappal indul - egyetlen bootnyi naplo elvesztese az ara, cserebe
+// nincs hamis diagnosztika.
+constexpr uint32_t EVLOG_MAGIC = 0x42415A4DUL;  // "BAZM" (v2: 12 bajtos bejegyzes)
 RTC_NOINIT_ATTR uint32_t rtcEvMagic;
 RTC_NOINIT_ATTR uint32_t rtcEvNext;   // következő írási pozíció (monoton nő)
 RTC_NOINIT_ATTR EventEntry rtcEvents[EVLOG_SIZE];
@@ -540,6 +551,18 @@ constexpr uint8_t  CARRY_NONE = 0xFF;
 RTC_NOINIT_ATTR uint32_t rtcHeapMagic;
 RTC_NOINIT_ATTR uint32_t rtcHeapRestarts;      // egymast koveto heap-ujrainditasok
 RTC_NOINIT_ATTR uint8_t  rtcCarryResetEvents;  // atvitt resetEvents (CARRY_NONE = nincs)
+// ...es a 2 napos ablak szamlaloja. MIERT KELL EZ IS ATVINNI?
+//
+// Az rtcRetryRounds SZANDEKOSAN RTC_DATA_ATTR: a deep sleepet tuleli, de
+// bekapcsolaskor ES SZOFTVERES RESETRE nullazodik - "a felhasznaloi
+// beavatkozas tiszta 2 napos ablakkal indit". A gombnyomasra ez helyes.
+//
+// A heap miatti ujraindulas viszont NEM felhasznaloi beavatkozas, hanem a sajat
+// dontesunk - megis ugyanolyan szoftveres reset, tehat ugyanugy nullazna a
+// szamlalot. Az eszkoz igy SOHA nem erne el a 2 napos hatarra, vagyis sosem
+// menne AP beallito modba: orokke ujraprobalkozna, es a felhasznalo sosem
+// kapna eselyt a konfiguracio javitasara. Ezert ezt is atvisszuk.
+RTC_NOINIT_ATTR uint32_t rtcCarryRetryRounds;
 
 volatile bool restartPending = false;
 volatile uint32_t restartAt = 0;
@@ -1182,6 +1205,7 @@ void initHeapState() {
     rtcHeapMagic = HEAP_MAGIC;
     rtcHeapRestarts = 0;
     rtcCarryResetEvents = CARRY_NONE;
+    rtcCarryRetryRounds = 0;
   }
 }
 
@@ -1193,12 +1217,20 @@ void applyHeapCarry() {
     return;
   }
   testState.resetEvents = rtcCarryResetEvents;
+  // A 2 napos ablak szamlaloja: a sajat ujraindulasunk NE nullazza. A
+  // rtcCarryResetEvents egyben az ervenyesseg jelzoje is, tehat a kettot
+  // egyutt irjuk es egyutt is hasznaljuk fel.
+  rtcRetryRounds = rtcCarryRetryRounds;
   rtcCarryResetEvents = CARRY_NONE;
   printUptime();
   Serial.print("Heap miatti ujraindulas utan folytatjuk: router reset szamlalo = ");
   Serial.print(testState.resetEvents);
   Serial.print(" / ");
-  Serial.println(maxfailureEvents);
+  Serial.print(maxfailureEvents);
+  Serial.print(", ujraprobalkozasi kor = ");
+  Serial.print(rtcRetryRounds);
+  Serial.print(" / ");
+  Serial.println(MAX_RETRY_ROUNDS);
 }
 
 // A heap allapotanak nyomon kovetese: mereskovetes, ritkitott soros kiiras, es
@@ -1316,6 +1348,7 @@ void checkHeap(uint32_t now) {
   // leirasat: ez az egyetlen sima globalis, aminek az elvesztese viselkedesi
   // hibat okozna.
   rtcCarryResetEvents = testState.resetEvents;
+  rtcCarryRetryRounds = rtcRetryRounds;
   rtcHeapRestarts++;
   logEvent(EV_HEAP_RESTART, (uint16_t)(szabad / 1024));
   printUptime();

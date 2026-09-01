@@ -46,6 +46,7 @@ extern uint32_t rtcRetryRounds;
 extern uint32_t rtcEvMagic;
 extern uint32_t rtcEvNext;
 enum EventCode : uint8_t;
+extern uint32_t rtcCarryRetryRounds;
 // FIGYELEM: ennek BAJTROL BAJTRA egyeznie kell a sketch definiciojaval - nem
 // csak az RTC memoria elrendezese miatt, hanem mert ez a struktura megy ki a
 // LittleFS-re mentett naplofajlba is, tehat a FAJLFORMATUM resze.
@@ -83,6 +84,7 @@ bool lastEventWas(uint8_t code);
 bool stuckCycleAlreadyLogged(uint16_t which);
 void lockConfigBeforeShutdown();
 extern uint32_t g_epochNow;
+void doWifiReset();
 extern int g_ntpStarts;
 void startConfigPortal();
 bool beginConfigWrite();
@@ -201,6 +203,7 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   g_gpioWakeResult = 0;
   g_gpioWakeMask = 0; g_gpioWakeMode = -1;
   g_isr.clear(); g_isrMode.clear();
+  rtcCarryRetryRounds = 0;
   btnResetLatched = false; btnWifiResetLatched = false;
   btnResetDownAt = 0; btnWifiResetDownAt = 0;
   // A GPIO hold a valosagban tuleli az ebredest (reset), csak az
@@ -2355,10 +2358,17 @@ static void scL6() {
   logEvent((EventCode)10, 2);   // WDT RESET
   logEvent((EventCode)11, 1);   // STUCK BUTTON
   logEvent((EventCode)12, 1);   // GW UNREACH
+  logEvent((EventCode)13, 24);  // LOW HEAP
+  logEvent((EventCode)14, 11);  // HEAP RESTART
   // A 6-os (AP MODE) sort a coldBoot(SSID nelkul) + setup() mar beirta.
   // A 12-es viszont eddig KIMARADT: a test/README azt allitotta, hogy ez a
   // teszt MINDEN kodot lefed, a lefedettseg-meres pedig azt mutatta, hogy a
   // "GW UNREACH" cimke sora sosem fut le. Az allitas es a teszt szetcsuszott.
+  //
+  // ...es UGYANEZ ismetlodott meg a 13-14-es kodoknal (LOW HEAP, HEAP
+  // RESTART): a teszt tovabbra is "MIND a 12"-t allitott, mikozben mar 14 kod
+  // volt. A tanulsag: ha uj esemenykod kerul az enumba, EZT a listat is
+  // bovitteni kell - kulonben a teszt cime hazudik.
 
   AsyncWebServerRequest req;
   g_handlers["/log#1"](&req);
@@ -2366,10 +2376,10 @@ static void scL6() {
   const char* want[] = { ">BOOT<", ">WIFI OK<", ">WIFI LOST<", ">TEST FAIL<",
                          ">ROUTER RESET<", ">AP MODE<", ">CONFIG SAVED<",
                          ">SLEEP<", ">FATAL<", ">WDT RESET<", ">STUCK BUTTON<",
-                         ">GW UNREACH<" };
+                         ">GW UNREACH<", ">LOW HEAP<", ">HEAP RESTART<" };
   bool all = true;
   for (const char* w : want) if (b.find(w) == std::string::npos) { all = false; printf("     [info] hianyzik: %s\n", w); }
-  CHECK(all, "MIND a 12 esemenykod olvashato cimket kap");
+  CHECK(all, "MIND a 14 esemenykod olvashato cimket kap");
   CHECK(b.find(">?<") == std::string::npos, "nincs ismeretlen kod a naplóban");
 }
 
@@ -4211,6 +4221,7 @@ static void scNV8() {
 extern uint32_t rtcHeapMagic;
 extern uint32_t rtcHeapRestarts;
 extern uint8_t  rtcCarryResetEvents;
+extern uint32_t rtcCarryRetryRounds;
 
 static void scHP1() {
   // ALAPMERES: MIT ES MILYEN GYAKRAN IR KI?
@@ -4536,8 +4547,81 @@ static void scHP9() {
 extern uint32_t rtcHeapMagic;
 extern uint32_t rtcHeapRestarts;
 extern uint8_t  rtcCarryResetEvents;
+extern uint32_t rtcCarryRetryRounds;
 
-// --- Mi marad meg egy heap-ujraindulas utan? -------------------------------
+static void scLOG7() {
+  // A /log OLDAL MERETE. A lap egy AsyncResponseStream-be megy, aminek van egy
+  // kezdo pufferemerete; a stream szukseg eseten NO, de akkor soronkent
+  // ujraallokalna - epp az async_tcp taskban, ahol a heap a legszukebb.
+  // Egy boseges kezdomeret ezt egyetlen foglalassa teszi.
+  //
+  // A lap MEGNOTT: uj Ido oszlop (soronkent ~30 bajt), "Forras" sor, es ket uj
+  // esemenykod a jelmagyarazatban. Ezert MEGMERJUK a legrosszabb esetet - tele
+  // korpuffer, mind a 32 sor valos idobelyeggel -, hogy a kezdomeret tenyleg
+  // elegendo legyen.
+  coldBoot(false, "", "", "", "");
+  g_epochNow = 1780000000UL;              // van oraszinkron -> hosszabb sorok
+  setup();
+  for (int i = 0; i < 40; i++) logEvent((EventCode)5, (uint16_t)(60000 + i));
+  AsyncWebServerRequest req; g_handlers["/log#1"](&req);
+  const size_t meret = req._body.size();
+  printf("     [info] a /log oldal legrosszabb esetben %u bajt\n", (unsigned)meret);
+  CHECK(req._code == 200, "a lap kiszolgalodik");
+  CHECK(meret < 6144, "es belefer a stream 6144 bajtos kezdo pufferebe");
+  { size_t sorok = 0, tol = 0;
+    while ((tol = req._body.find("<tr><td>", tol)) != std::string::npos) { sorok++; tol += 8; }
+    CHECK(sorok == 32, "mind a 32 sor ott van"); }
+}
+
+static void scLOG8() {
+  // FIRMWARE FRISSITES SOROS PORTON AT. Ez az eset konnyen kimarad a
+  // gondolkodasbol: a soros feltoltes utan az eszkoz SZOFTVERES resetet kap,
+  // nem aramtalanitast - az RTC NOINIT terulet tehat TULELI, es az uj firmware
+  // a REGI naplot talalja ott.
+  //
+  // Amikor az EventEntry 8-rol 12 bajtra nott (epoch mezo), a regi bejegyzesek
+  // uj elrendezeskent ertelmezve szemetet adtak volna - es a saveEventLog()
+  // ezt a szemetet meg ki is irta volna a fajlrendszerre. Ezert a magic
+  // EGYBEN VERZIOJELZO is: ha az elrendezes valtozik, a magic is valtozik, es
+  // az uj firmware tiszta lappal indul.
+  coldBoot(false, "", "", "", "");
+  rtcEvMagic = 0x42415A4CUL;              // a REGI ("BAZL") magic
+  rtcEvNext = 17;                          // ...es egy regi naplo latszata
+  for (int i = 0; i < 32; i++) {
+    rtcEvents[i].uptimeSec = 0xDEADBEEF;   // ertelmezhetetlen szemet
+    rtcEvents[i].epoch = 0xDEADBEEF;
+    rtcEvents[i].code = 200;
+    rtcEvents[i].param = 9999;
+  }
+  setup();
+  CHECK(rtcEvNext < 17, "a regi magic ervenytelen: a naplo tiszta lappal indult");
+  AsyncWebServerRequest req; g_handlers["/log#1"](&req);
+  CHECK(req._body.find("<td>9999</td>") == std::string::npos,
+        "a regi elrendezes szemete NEM jelenik meg a lapon");
+  CHECK(req._body.find(">?<") == std::string::npos,
+        "es ismeretlen esemenykod sincs");
+}
+
+static void scLOG9() {
+  // A MENTETT NAPLO ES A WIFIRESET. A wifireset gomb a NEGY konfiguracios
+  // fajlt torli - a naplofajlt SZANDEKOSAN nem. Ket okbol: a naplo nem
+  // tartalmaz konfiguracios erteket (lasd LOG2), es epp a torles utani
+  // diagnozishoz kell a leginkabb.
+  coldBoot(false, "", "", "", "");
+  setup();                                 // AP mod -> a naplo kiment
+  CHECK(g_fs.count("/evlog.bin") == 1, "van mentett naplo");
+  CHECK(postConfig("Halozat", "jelszo123", "", "") == 200, "mentettunk konfigot");
+  restartPending = false; savingConfig = false;
+
+  bool restarted = false;
+  try { doWifiReset(); } catch (RestartSignal&) { restarted = true; }
+  CHECK(restarted, "a wifireset ujrainditott");
+  CHECK(g_fs["/ssid.txt"].empty(), "az SSID torolve");
+  CHECK(g_fs.count("/evlog.bin") == 1,
+        "a naplofajl viszont MEGMARADT - epp most kell a diagnozishoz");
+}
+
+// --- Mi marad meg egy heap-ujraindulas utan? ----------------------------
 
 // A gateway-eszkalacio elojatszasa: statikus IP, a sajat gateway NEM valaszol,
 // az internet sem - vagyis pontosan az az eset, amikor a program a routernek
@@ -4674,6 +4758,89 @@ static void scGWH3() {
         "a tesztsor viszont elolrol kezdodik - ez olcso, es igy is helyes");
   CHECK(testState.resetStep == 0, "es nincs felben maradt rele impulzus");
   CHECK(uiFlags.firstStart, "a firstStart varakozas ujra lefut (a proba koran zarja)");
+}
+
+static void scGWH4() {
+  // A MASIK TOBBFAZISU LETRA: A 2 NAPOS ABLAK.
+  //
+  // Ha a halozat egyaltalan nem latszik, a program 33 kort probal, koronkent
+  // egy oras alvassal - vagyis kb. ket napig. Utana AP beallito modba megy,
+  // hogy a felhasznalo javithassa a konfiguraciot. A korokat az rtcRetryRounds
+  // szamolja.
+  //
+  // TALALT HIBA. Ez a szamlalo SZANDEKOSAN RTC_DATA_ATTR: a deep sleepet
+  // tuleli, de bekapcsolaskor ES SZOFTVERES RESETRE nullazodik - "a
+  // felhasznaloi beavatkozas tiszta 2 napos ablakkal indit". Gombnyomasra ez
+  // helyes.
+  //
+  // A heap miatti ujraindulas viszont NEM felhasznaloi beavatkozas, megis
+  // ugyanolyan szoftveres reset. Atvitel nelkul tehat minden heap-ujraindulas
+  // NULLAZTA volna a 2 napos ablakot: az eszkoz sosem erte volna el a hatart,
+  // vagyis SOSEM ment volna AP modba - orokke ujraprobalkozna, es a
+  // felhasznalo sosem kapna eselyt a javitasra.
+  // A halozat NEM latszik - epp ez az az eset, amikor a letra egyaltalan fut.
+  // (Ha csatlakoznank, a sikeres kapcsolat JOGOSAN nullazna a 2 napos ablakot;
+  // az elso valtozat ezen bukott el, mert egeszseges halozattal indult.)
+  coldBoot(false, "TestNet", "pw", "", "");
+  rtcHeapMagic = 0;
+  setup();
+  CHECK(deviceMode == (DeviceMode)0, "monitor modban maradt es ujraprobal");
+  rtcRetryRounds = 30;             // mar 30 kort letudtunk a 33-bol
+  testState.resetEvents = 1;
+
+  g_freeHeap = 5000; g_maxAllocHeap = 4000;
+  bool restarted = false;
+  int guard = 0;
+  try {
+    while (!restarted && ++guard < 200000) { checkHeap(g_millis); g_millis += 1000; }
+  } catch (RestartSignal&) { restarted = true; }
+  CHECK(restarted, "a heap miatt ujraindult");
+  CHECK(rtcCarryRetryRounds == 30, "az atvitel rogzitette a 2 napos ablak allasat");
+
+  // A VALODI ujraindulas: a RAM torlodik, es az RTC_DATA_ATTR is nullazodik -
+  // epp ezert kell az atvitel, ami RTC_NOINIT-ben ul.
+  const uint32_t hm = rtcHeapMagic, hr = rtcHeapRestarts, cr = rtcCarryRetryRounds;
+  const uint8_t ce = rtcCarryResetEvents;
+  coldBoot(false, "TestNet", "pw", "", "");   // deepSleepWake = false -> nullaz
+  CHECK(rtcRetryRounds == 0, "a szoftveres reset tenyleg nullazta volna");
+  rtcHeapMagic = hm; rtcHeapRestarts = hr;
+  rtcCarryResetEvents = ce; rtcCarryRetryRounds = cr;
+  setup();
+  CHECK(rtcRetryRounds == 30,
+        "az atvitel utan viszont a 2 napos ablak FOLYTATODIK, nem kezdodik elolrol");
+  CHECK(testState.resetEvents == 1, "es a router reset szamlalo is");
+  CHECK(serialHas("ujraprobalkozasi kor = 30"), "a soros porton is lathato");
+
+  // A LETRA VEGE tehat elerheto marad: meg harom kor, es AP mod.
+  CHECK(rtcRetryRounds < 33, "meg nem ertunk a hatarra");
+}
+
+static void scGWH5() {
+  // ...de a FELHASZNALOI beavatkozas tovabbra is tiszta lapot ad. A gombos
+  // ujraindulas nem allit be atvitelt, tehat a 2 napos ablak nullazodik -
+  // ez a szandekolt, dokumentalt viselkedes, es a javitas nem ronthatja el.
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcHeapMagic = 0;
+  setup();
+  monitorUzembe();
+  rtcRetryRounds = 20;
+
+  g_pinRead[PIN_RESETBTN] = LOW;
+  bool restarted = false;
+  try {
+    for (int i = 0; i < 200; i++) { resetbutton(); g_millis += 10; }
+  } catch (RestartSignal&) { restarted = true; }
+  CHECK(restarted, "a reset gomb ujrainditott");
+  CHECK(rtcCarryResetEvents == 0xFF,
+        "gombnyomasnal NINCS atvitel - a felhasznaloi beavatkozas tiszta lap");
+
+  const uint32_t hm = rtcHeapMagic;
+  const uint8_t ce = rtcCarryResetEvents;
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcHeapMagic = hm; rtcCarryResetEvents = ce;
+  setup();
+  CHECK(rtcRetryRounds == 0,
+        "gombnyomas utan a 2 napos ablak elolrol indul (szandekolt)");
 }
 
 // --- Ido-alapfeltevesek es a ket task kozotti megosztott allapot ------------
@@ -6349,6 +6516,9 @@ static const Scenario kScenarios[] = {
   { "NV6: hianyzo, ures vagy hibas fajl nem okoz gondot", scNV6 },
   { "NV7: NTP idobelyeg a bejegyzeseken", scNV7 },
   { "NV8: feluton buko betoltes nem hagy kevert puffert", scNV8 },
+  { "LOG7: a /log oldal a legrosszabb esetben is befer a pufferbe", scLOG7 },
+  { "LOG8: firmware frissites utan a regi elrendezesu naplo ervenytelen", scLOG8 },
+  { "LOG9: a wifireset a naplofajlt szandekosan NEM torli", scLOG9 },
   { "HP2: a figyelmeztetes csak az atlepeskor szol", scHP2 },
   { "HP3: egyetlen melypont nem indit ujra, a tartos igen", scHP3 },
   { "HP4: a router reset szamlalo TULELI a heap-ujraindulast", scHP4 },
@@ -6360,6 +6530,8 @@ static const Scenario kScenarios[] = {
   { "GWH1: a router reset utani ellenorzo ablakban nincs heap-ujraindulas", scGWH1 },
   { "GWH2: es az ablak utan a gateway-dontes rendesen megszuletik", scGWH2 },
   { "GWH3: mi marad meg es mi szamolodik ujra egy heap-ujraindulas utan", scGWH3 },
+  { "GWH4: a 2 napos ablak szamlaloja is atmegy a heap-ujraindulason", scGWH4 },
+  { "GWH5: gombnyomasnal viszont tovabbra is tiszta lap", scGWH5 },
   { "WDT15: ...es a millis() korbefordulasan at is", scWDT15 },
   { "CC1: a portal futasa alatt a loop nem olvassa a konfig puffereket", scCC1 },
   { "CC2: a vegzetes hiba again sem olvassa oket", scCC2 },

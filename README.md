@@ -588,11 +588,21 @@ kerül.
 > áramtalanítást**, és az AP módba menetel egy teljes körrel később születne meg –
 > épp az járna rosszul, akinek a statikus IP-jét javítani kellene.
 
-**Amit az újraindulás átvisz:** a `testState.resetEvents` – ez számolja, hányszor
-indítottuk már újra a routert, és ez viszi az eszközt az ötödiknél az 1 órás
-alvásba. Enélkül a számláló elölről kezdene, és az eszköz **végtelenül
-újraindíthatná a routert** ahelyett, hogy elalszik. Az RTC memórián megy át, és
-a `setup()` pontosan egyszer használja fel. Részletek: [MUKODES.md](MUKODES.md)
+**Amit az újraindulás átvisz** – két számláló, mindkettő egy-egy többfázisú
+létra állását őrzi:
+
+- a `testState.resetEvents`: hányszor indítottuk már újra a routert. Ez viszi az
+  eszközt az ötödiknél az 1 órás alvásba; enélkül **végtelenül újraindíthatná a
+  routert** ahelyett, hogy elalszik.
+- az `rtcRetryRounds`: a **2 napos ablak** állása. Ez `RTC_DATA_ATTR`, tehát
+  szoftveres resetre szándékosan nullázódik (a *felhasználói* beavatkozás tiszta
+  lapot kap) – a heap-újraindulás viszont nem felhasználói beavatkozás. Átvitel
+  nélkül az eszköz sosem érné el a 2 napos határt, vagyis **sosem menne AP
+  módba**, és a felhasználó sosem kapna esélyt a javításra.
+
+Mindkettő az RTC memórián megy át, és a `setup()` pontosan egyszer használja fel.
+Gombnyomásnál nincs átvitel, tehát ott marad a tiszta lap. Részletek:
+[MUKODES.md](MUKODES.md)
 
 ## ✅ Tesztelt konfiguráció
 

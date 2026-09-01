@@ -755,15 +755,34 @@ Ezért ez az egy érték átmegy az RTC memórián (`rtcCarryResetEvents`), és 
 átvitel" jelölésre, hogy egy későbbi, más okból történt újraindulás (gomb,
 watchdog) ne támasszon fel elavult értéket. (Mérve: `HP4`.)
 
-Ami eleve túléli: a diagnosztikai napló, a watchdog-számláló, az
-újrapróbálkozási körök (mind RTC memóriában), és a LittleFS-en tárolt
-konfiguráció.
+Ami eleve túléli: a diagnosztikai napló és a watchdog-számláló (`RTC_NOINIT`),
+valamint a LittleFS-en tárolt konfiguráció.
+
+#### A 2 napos ablak – a másik többfázisú létra
+
+Ha a hálózat egyáltalán nem látszik, a program **33 kört** próbál, köröként egy
+órás alvással – kb. két napig. Utána AP beállító módba megy, hogy a felhasználó
+javíthassa a konfigurációt. A köröket az `rtcRetryRounds` számolja.
+
+Ez a számláló **szándékosan `RTC_DATA_ATTR`**, nem `RTC_NOINIT`: a deep sleepet
+túléli, de bekapcsoláskor **és szoftveres resetre nullázódik** – „a felhasználói
+beavatkozás tiszta 2 napos ablakkal indít". Gombnyomásra ez helyes.
+
+**A heap miatti újraindulás viszont nem felhasználói beavatkozás** – a saját
+döntésünk –, mégis ugyanolyan szoftveres reset. Átvitel nélkül tehát minden
+heap-újraindulás **nullázta volna a 2 napos ablakot**: az eszköz sosem érte
+volna el a határt, vagyis **sosem ment volna AP módba** – örökké
+újrapróbálkozna, és a felhasználó sosem kapna esélyt a javításra.
+
+Ezért ezt is átvisszük – de csak a *saját* újraindulásunkon. Gombnyomásnál nincs
+átvitel, tehát a tiszta lap ott megmarad. (Mérve: `GWH4`, `GWH5`.)
 
 #### A teljes lista: mi vész el, és miért nem baj
 
 | Változó | Mi lesz vele | Miért rendben |
 |---|---|---|
 | `testState.resetEvents` | **átvisszük** | enélkül végtelenül újraindíthatná a routert |
+| `rtcRetryRounds` (2 napos ablak) | **átvisszük** | lásd lent – enélkül sosem érné el az AP módot |
 | `testState.cycleIndex`, `failedCount` | elvész | csak azt mondja meg, hol tart az öt teszt között – egy új tesztkör ~1 perc (`GWH3`) |
 | `testState.resetStep` | elvész | **nem lehet** félbehagyott pulzus: a relé impulzusa alatt nincs újraindulás |
 | `currentState`, `uiFlags.resetPrinted`, `timing.stateStart` | elvész | **ezért van az ellenőrző ablak kizárása** – lásd fent |
@@ -955,7 +974,18 @@ végzetes**: az RTC naplóban minden ott marad, a program dolga fontosabb – cs
 szólunk róla. (Mérve: `NV2`.)
 
 > A flasht nem koptatjuk feleslegesen: ha a legutóbbi mentés óta nem történt
-> esemény, nem írunk újra.
+> esemény, nem írunk újra. A `wifireset` gomb a négy konfigurációs fájlt törli,
+> a naplófájlt **szándékosan nem**: nem tartalmaz konfigurációs értéket, és épp
+> a törlés utáni diagnózishoz kell a leginkább. (Mérve: `LOG9`.)
+
+> ⚠️ **A magic egyben verziójelző.** Az RTC `NOINIT` terület a szoftveres
+> resetet – tehát egy **soros porton keresztüli firmware frissítést** is –
+> túléli: az új firmware a régi tartalmat találja ott. Amikor az `EventEntry`
+> 8-ról 12 bájtra nőtt (epoch mező), a régi bejegyzések új elrendezésként
+> értelmezve szemetet adtak volna – és a mentés ezt a szemetet ki is írta volna
+> a fájlrendszerre. Ezért: **ha az `EventEntry` vagy az `EVLOG_SIZE` változik, az
+> `EVLOG_MAGIC`-et is emelni kell.** Az ára egyetlen bootnyi napló, cserébe
+> nincs hamis diagnosztika. (Mérve: `LOG8`.)
 
 ### Melyiket tölti be az AP mód weboldala?
 
