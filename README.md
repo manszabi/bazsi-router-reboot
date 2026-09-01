@@ -952,7 +952,13 @@ szekvencia, AP portál, alvás/ébredés:
 
 Az utolsó 32 esemény RTC memóriában, a beállító portál **`/log`** oldalán
 olvasható – soros kábel nélkül is. Túléli a deep sleepet, a watchdog resetet és
-a reset gombot; csak az áramtalanítás törli. Részletek:
+a reset gombot; csak az áramtalanítás törli.
+
+**Nem fájlba megy**, hanem egy körpufferbe az RTC memóriában: nincs flash írás,
+nincs naplóírási hiba, amit kezelni kellene, és akkor is olvasható marad, ha
+épp a fájlrendszer csatolása bukott meg. Az ismétlődő eseményekből (`TEST
+FAIL`, `WIFI LOST`, `STUCK BUTTON`) csak az **első** kerül be, hogy egy tartós
+hiba ne söpörje ki a puffert – épp a hiba kezdetét veszítenénk el. Részletek:
 [MUKODES.md](MUKODES.md)
 
 ## 🧪 Tesztek

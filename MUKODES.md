@@ -564,7 +564,7 @@ Minden bejegyzés uptime bélyeget, egy eseménykódot és egy paramétert tarta
 |---|---|
 | `BOOT` | az indulás oka (`esp_reset_reason()`) |
 | `WIFI OK` | hányadik újrapróbálkozási körben sikerült |
-| `WIFI LOST` | `WiFi.status()` a kiesés pillanatában |
+| `WIFI LOST` | `WiFi.status()` a kiesés pillanatában (csak a kiesés-sorozat **első** tagja) |
 | `TEST FAIL` | a teszt sorszáma **1-alapon**, 1–5 (csak a hibasorozat **első** tagja) |
 | `ROUTER RESET` | hányadik reset esemény (1–4) |
 | `AP MODE` | 1 = nincs mentett SSID, 2 = hitelesítési hiba, 3 = letelt a 2 nap, 4 = a gateway sem érhető el |
@@ -584,3 +584,42 @@ jelmagyarázat írja le, tehát a naplóhoz nem kell forráskód.
 A naplóoldalon **semmilyen konfigurációs érték nem jelenik meg** – sem az SSID,
 sem az IP, sem a jelszó (nyíltan vagy kódolva). A mentés *ténye* viszont igen
 (`CONFIG SAVED`), mert az a diagnózishoz kell. (Mérve: `LOG2`.)
+
+### Hová és mikor íródik a napló
+
+**A napló nem fájl.** Nem megy a LittleFS-re, nincs `/log.txt`, nincs flash
+írás. Egy 32 elemű körpuffer az RTC memóriában, amibe a `logEvent()` egyetlen
+struktúra-értékadással ír. Ennek három következménye van, és mindhárom
+szándékos:
+
+- **Nem tud „naplóírási hibát" okozni.** Nincs mit kezelni: nincs megnyitás,
+  nincs `write()` visszatérési érték, nem tud betelni a tár. Ami a naplózás
+  miatt megakadhatna a programban, az itt eleve nem létezik.
+- **Túléli azt is, amikor a fájlrendszer viszi el a hibát.** Ha a LittleFS
+  csatolása bukik (`FATAL` 1-es paraméterrel), a napló *pont akkor* olvasható,
+  amikor egy fájlba írt napló elveszne.
+- **Nem koptatja a flasht.** Egy hosszú kiesés alatt óránként több tucat
+  esemény keletkezhet; fájlba írva ez fölösleges írásciklus lenne.
+
+A puffer két különböző taskból is íródik – a `loop()`-ból és az AsyncTCP
+webszerver taskjából –, ezért minden írás és olvasás `portENTER_CRITICAL`
+kritikus szakaszban történik. A szakaszok **nincsenek egymásba ágyazva**
+(mérve: `LOG5`), így nem tudnak megakadni.
+
+### Az ismétlődő események szűrése
+
+Az ismétlődő eseményeket **csak az első alkalommal** írjuk be, különben egy
+tartós hiba pár perc alatt kisöpörné a puffert, és épp a hiba *kezdetét*
+veszítenénk el – azt, ami a diagnózishoz kell. Három helyen van ilyen szűrés:
+
+| Esemény | A szűrés módja |
+|---|---|
+| `TEST FAIL` | csak `failedCount == 1`-nél |
+| `STUCK BUTTON` | `stuckCycleAlreadyLogged` jelző |
+| `WIFI LOST` | `lastEventWas(EV_WIFI_LOST)` – ha az előző bejegyzés is ez volt, kimarad |
+
+A `WIFI LOST` szűrése volt a legutolsó hiányzó darab. **Az arányokról
+őszintén:** védelem nélkül, valósághű pislákolási ütemek mellett (500 / 1000 /
+2000 / 5000 ms) a mérés 4 / 2 / 1 / 0 bejegyzést adott – tehát a 32-es puffert
+nem söpörte el. A mechanizmus viszont valós, és a pislákolás gyorsulásával
+arányosan romlik; a védelem hat sor, és nincs hátránya. (Mérve: `LOG4`.)

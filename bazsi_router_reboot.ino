@@ -439,6 +439,7 @@ void fatalHalt(const char* reason);
 void enterDeepSleep(uint64_t timerUs);
 void holdRelayForSleep();
 bool stuckCycleAlreadyLogged(uint16_t which);
+bool lastEventWas(uint8_t code);
 bool initWiFi();
 bool reconnectWifi();
 bool writeConfigValue(fs::FS& fs, const char* path, const char* message);
@@ -1175,6 +1176,24 @@ void holdRelayForSleep() {
     // Nem végzetes: a dokumentált külső lehúzó ellenállás a tartalék.
     Serial.println("FIGYELEM: a rele lab rogzitese (gpio_hold_en) nem sikerult.");
   }
+}
+
+// Igaz, ha a napló LEGUTOLSÓ bejegyzése már ez a kód. A sorozatok elleni
+// spam-védelem közös alapja: a 32 bejegyzéses körpuffer néhány másodperc
+// alatt kiszorítaná a kivizsgálandó eseményeket (BOOT, ROUTER RESET, FATAL),
+// ha egy ismétlődő állapot minden körben új sort írna.
+//
+// A mux ugyanazért kell, mint a logEvent()-ben: a naplóba az async_tcp task
+// is ír (a POST kezelő CONFIG_SAVED sora), tehát a pozíció és a slot együtt
+// nem olvasható atomian.
+bool lastEventWas(uint8_t code) {
+  bool egyezik = false;
+  portENTER_CRITICAL(&evLogMux);
+  if (rtcEvMagic == EVLOG_MAGIC && rtcEvNext > 0) {
+    egyezik = (rtcEvents[(rtcEvNext - 1) % EVLOG_SIZE].code == code);
+  }
+  portEXIT_CRITICAL(&evLogMux);
+  return egyezik;
 }
 
 // Igaz, ha a napló legutóbbi két bejegyzése már pontosan ez a beragadt-gomb
@@ -2719,9 +2738,22 @@ void loop() {
 
     case TESTING_STATE: {
       if (WiFi.status() != WL_CONNECTED) {
-        printUptime();
-        logEvent(EV_WIFI_LOST, (uint16_t)WiFi.status());
-        Serial.println("WiFi disconnected before test!");
+        // SPAM-VEDELEM. Egy pislákoló kapcsolatnál (a jel a határon van, a
+        // driver állapota másodpercenként többször vált) ez az ág körönként
+        // újra lefutna, és a 32 elemű körpuffer kiszorítaná a kivizsgálandó
+        // eseményeket. A SULYOSSAGROL OSZINTEN: védelem nélkül, REALIS
+        // pislákolási ütemeknél (500 / 1000 / 2000 / 5000 ms) a mérés 4 / 2 /
+        // 1 / 0 bejegyzést adott, tehát a puffert nem söpörte el - a
+        // mechanizmus viszont valós, és a pislákolás gyorsulásával arányosan
+        // romlik. Ugyanaz a szabály, mint a TEST FAIL sorozatoknál: csak a
+        // sorozat ELSŐ tagja kerül a naplóba és a soros portra. Egy közbeeső
+        // másik esemény után újra naplózunk. (Mérve: LOG4.)
+        const bool ismetles = lastEventWas((uint8_t)EV_WIFI_LOST);
+        if (!ismetles) {
+          printUptime();
+          logEvent(EV_WIFI_LOST, (uint16_t)WiFi.status());
+          Serial.println("WiFi disconnected before test!");
+        }
         digitalWrite(wifiledPin, LOW);
 
         // Egységes politika: 3 próba 30 mp szünetekkel.

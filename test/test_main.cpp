@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <set>
+#include <algorithm>
 #include <WiFi.h>
 #include <LittleFS.h>
 #include <ESPping.h>
@@ -68,6 +69,7 @@ extern bool staticConfigActive;
 extern bool watchdogEnabled;
 extern volatile bool btnResetLatched, btnWifiResetLatched;
 extern volatile uint32_t btnResetDownAt, btnWifiResetDownAt;
+extern int g_criticalMaxDepth;
 extern uint32_t resetDelayProbeLast;
 extern uint32_t firstStartProbeLast;
 bool onlineProbeDue(uint32_t& lastProbe, uint32_t now);
@@ -3686,6 +3688,102 @@ static void scAP4() {
   CHECK(g_fs["/gateway.txt"] == "192.168.1.1", "es a gateway is");
 }
 
+// Pislakolo kapcsolat: REALIS utemben, 5 masodpercenkent billen at a halozat
+// allapota. (Az elso valtozat minden delay()-nel billentett, azaz 50 Hz-cel -
+// az nem fizikai, es a mert ujracsatlakozas-szam is annak a mutermeke volt.)
+static uint32_t s_pislakolUtolso = 0;
+static uint32_t s_pislakolUtem = 5000;
+static void pislakol() {
+  if (g_millis - s_pislakolUtolso >= s_pislakolUtem) {
+    s_pislakolUtolso = g_millis;
+    wifiSim.willConnect = !wifiSim.willConnect;
+  }
+}
+
+// Egy pislakolasi utem vegigmerese: hany naplobejegyzes keletkezik 15 perc
+// alatt, es hany egymas utani WIFI LOST all a korpufferben.
+static void merjPislakolas(uint32_t utem, uint32_t& bejegyzes, int& maxEgymasUtan,
+                           uint32_t& sorPerc) {
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpBody = "Microsoft Connect Test"; pingSim.ok = true;
+  setup();
+  int guard = 0;
+  try { while (++guard < 50000 && uiFlags.firstStart) loop(); }
+  catch (DeepSleepSignal&) {}
+  rtcEvMagic = 0; rtcEvNext = 0;
+  g_serialLog.clear();
+  s_pislakolUtem = utem; s_pislakolUtolso = g_millis;
+  g_onDelay = pislakol;
+  const uint32_t t0 = g_millis;
+  guard = 0;
+  try { while (++guard < 400000 && g_millis - t0 < 15u * 60 * 1000) loop(); }
+  catch (DeepSleepSignal&) {}
+  g_onDelay = nullptr;
+  bejegyzes = rtcEvNext;
+  int egymas = 0; maxEgymasUtan = 0;
+  const uint32_t megvan = rtcEvNext < 32 ? rtcEvNext : 32;
+  for (uint32_t i = rtcEvNext - megvan; i < rtcEvNext; i++) {
+    if (rtcEvents[i % 32].code == 3) { egymas++;
+      if (egymas > maxEgymasUtan) maxEgymasUtan = egymas; }
+    else egymas = 0;
+  }
+  sorPerc = (uint32_t)(g_serialLog.size() * 60000ull / (g_millis - t0));
+}
+
+static void scLOG4() {
+  // A 32 bejegyzeses korpuffer akkor er valamit, ha a KIVIZSGALANDO esemenyek
+  // (BOOT, ROUTER RESET, FATAL) benne maradnak. Ezert vedekezik a projekt mar
+  // a TEST FAIL-nel es a STUCK BUTTON-nal is: csak a sorozat elso tagja kerul
+  // be. Az EV_WIFI_LOST volt az egyetlen vedtelen ismetlodo naplozas.
+  //
+  // A SULYOSSAGROL OSZINTEN: vedelem nelkul, REALIS pislakolasi utemeknel a
+  // meres 4 / 2 / 1 / 0 bejegyzest adott (500 / 1000 / 2000 / 5000 ms). Vagyis
+  // a 32-es puffert nem soporte el - a mechanizmus viszont valos, es a flapping
+  // gyorsulasaval aranyosan romlik. A vedelem 6 sor, illeszkedik a mar meglevo
+  // mintahoz, es nincs hatranya; ezert marad benne.
+  //
+  // Ez a teszt TOBB pislakolasi utemet mer vegig, hogy a vedelem ne csak egy
+  // szerencsesen valasztott esetre alljon.
+  const uint32_t utemek[] = { 500, 1000, 2000, 5000 };
+  for (uint32_t u : utemek) {
+    uint32_t bej, spm; int maxEgymas;
+    merjPislakolas(u, bej, maxEgymas, spm);
+    printf("     [info] %4u ms-os pislakolas: %4u bejegyzes, max %d egymas utani "
+           "WIFI LOST, %u sor/perc\n", u, bej, maxEgymas, spm);
+    CHECK(bej <= 60, "a naplo nem arad el");
+    CHECK(maxEgymas <= 1, "nincs ket egymas utani WIFI LOST");
+    CHECK(spm <= 120, "a soros kimenet is kordaban marad");
+  }
+}
+
+static void scLOG5() {
+  // A naplozas NEM akadalyozhatja a program mukodeset. Ket dolgot ellenorzunk:
+  //  1. a kritikus szakasz nem AGYAZODIK egymasba (a lastEventWas() es a
+  //     logEvent() kulon-kulon veszi fel a muxot, nem egymason belul),
+  //  2. es a naplozas nem ir fajlrendszerre - a naplo RTC memoriaban van,
+  //     tehat egy fajlrendszer-hiba NEM viheti magaval azt a diagnosztikat,
+  //     amivel epp azt a hibat kellene kivizsgalni.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpCode = -1; pingSim.ok = false;      // eszkalacio: sok esemeny
+  g_criticalMaxDepth = 0;
+  setup();
+  const size_t fsElotte = g_fs.size();
+  int guard = 0;
+  try { while (++guard < 200000 && !serialHas("Beginning Reset in FAILURE_STATE")) loop(); }
+  catch (DeepSleepSignal&) {}
+  CHECK(rtcEvNext > 3, "tenylegesen naplóztunk esemenyeket");
+  CHECK(g_criticalMaxDepth == 1,
+        "a kritikus szakasz sosem agyazodik egymasba (max melyseg 1)");
+  CHECK(g_fs.size() == fsElotte,
+        "a naplozas egyetlen fajlt sem hozott letre");
+  // A naplo tullelte volna a fajlrendszer teljes elvesztet is:
+  g_fs.clear();
+  const uint32_t elotte = rtcEvNext;
+  logEvent((EventCode)2, 7);
+  CHECK(rtcEvNext == elotte + 1,
+        "ures fajlrendszerrel is naplozhatunk - a naplo nem fugg tole");
+}
+
 static void scLOG1() {
   // A /log oldal EMBERI olvasasra keszul. Eddig a nyers enum-szamot irta ki
   // ("Utolso indulas oka: 8"), amihez az ESP-IDF fejlecet kellett kikeresni,
@@ -4690,6 +4788,8 @@ static const Scenario kScenarios[] = {
   { "RR1: befagyott DNS – 4 reset, két újraindítás közt legalább 3 perc", scRR1 },
   { "RR2: teljes kiesésnél a 10 perces bootvárakozás érintetlen marad", scRR2 },
   { "RR3: egyetlen sikeres teszt nullázza a reset-számlálót", scRR3 },
+  { "LOG4: pislákoló kapcsolat nem árasztja el az eseménynaplót", scLOG4 },
+  { "LOG5: a naplózás nem blokkol és nem függ a fájlrendszertől", scLOG5 },
   { "LOG1: a /log emberi olvasásra készül (reset ok, uptime, jelmagyarázat)", scLOG1 },
   { "LOG2: a naplóoldalon semmilyen konfigurációs érték nem jelenik meg", scLOG2 },
   { "LOG3: a körpuffer körbefordulása után is pontosan 32 sor", scLOG3 },
