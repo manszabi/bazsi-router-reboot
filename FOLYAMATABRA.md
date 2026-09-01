@@ -58,17 +58,20 @@ flowchart TD
     BOOTLOG --> WCHK{"checkWatchdogResets()<br>rendellenes reset volt?<br>(TASK_WDT / INT_WDT / PANIC / LOCKUP)"}
     WCHK -->|"igen, sorozatban a 3."| FATAL["enterFatal()<br>MODE_FATAL, EV_FATAL(3)"]
     WCHK -->|"nem, vagy még 3 alatt"| FS{"initLittleFS()<br>begin(formatOnFail = true)<br>formázás: 128 szektor, 4-7 s"}
+    FATAL --> FS
     FS -->|"csatolás sikertelen"| FATAL2["enterFatal()<br>EV_FATAL(1)"]
     FS -->|ok| CFG{"Konfig olvasása:<br>/ssid.txt /pass.txt /ip.txt /gateway.txt<br>(jelszó: v1 hexa dekódolás)"}
     CFG -->|"fájl létezik, de olvashatatlan"| FATAL3["enterFatal()<br>EV_FATAL(2)"]
     CFG -->|"ok vagy hiányzó fájl"| PERS["WiFi.persistent(false)"]
+    FATAL2 --> PERS
+    FATAL3 --> PERS
     PERS --> ISFATAL{MODE_FATAL?}
     ISFATAL -->|igen| TOLOOP([loop: hibajelzés])
     ISFATAL -->|nem| WIFI{"initWiFi()<br>statikus IP ha érvényes, különben DHCP<br>csatlakozás max 20 s"}
     WIFI -->|siker| MON["MODE_MONITOR<br>EV_WIFI_OK, rtcRetryRounds = 0<br>WiFi LED = HIGH"]
     WIFI -->|"ssid üres"| AP["startConfigPortal()<br>MODE_CONFIG, EV_AP_MODE(1)"]
     WIFI -->|"ssid van, de nem érhető el"| FIRST["MODE_MONITOR<br>first start várakozás indul<br>(3. ábra)"]
-    MON --> TOLOOP2([loop: állapotgép])
+    MON --> TOLOOP2([loop: ELŐBB handleFirstStart 3. ábra,<br>utána az állapotgép])
     FIRST --> TOLOOP2
     AP --> TOLOOP3([loop: portál])
 ```
@@ -84,7 +87,7 @@ ha mindkettő megvan, a várakozás azonnal véget ér.
 
 ```mermaid
 flowchart TD
-    IN([SSID mentve, de a WiFi nem jött össze]) --> PRB{"60 s-onként: onlineProbe()<br>1. Wi-Fi: van kapcsolat? (ha nincs: csak<br>aszinkron begin(), következmény nélkül)<br>2. CSAK ha van: ping 1.1.1.1 (DNS nélkül)"}
+    IN([MODE_MONITOR, firstStart = true<br>MINDKÉT úton ide jutunk: a WiFi MÁR élhet<br>ha az initWiFi sikerült, vagy még nem jött össze]) --> PRB{"60 s-onként: onlineProbe()<br>1. Wi-Fi: van kapcsolat? (ha nincs: csak<br>aszinkron begin(), következmény nélkül)<br>2. CSAK ha van: ping 1.1.1.1 (DNS nélkül)"}
     PRB -->|"mindkettő OK"| EARLY["firstStart AZONNAL lezárva<br>(nem várjuk ki a maradékot)"]
     EARLY --> DONE
     PRB -->|"bármelyik bukik"| WAIT{"Eltelt már 10 perc?<br>(firstStartDelay)"}
@@ -139,13 +142,17 @@ flowchart TD
 
 ### Teszt végpontok (ciklikus eszkaláció)
 
-| `cycleIndex` | Végpont | Elvárt válasz |
-|:---:|---|---|
-| 0 | `http://www.msftconnecttest.com/connecttest.txt` | `Microsoft Connect Test` |
-| 1 | `http://cp.cloudflare.com/generate_204` | 204 No Content |
-| 2 | `http://detectportal.firefox.com/success.txt` | `success` |
-| 3 | `http://nmcheck.gnome.org/check_network_status.txt` | `NetworkManager is online` |
-| 4 | `http://connectivitycheck.gstatic.com/generate_204` | 204 No Content |
+| Kiírt sorszám | `cycleIndex` | Végpont | Elvárt válasz |
+|:---:|:---:|---|---|
+| 1 | 0 | `http://www.msftconnecttest.com/connecttest.txt` | `Microsoft Connect Test` |
+| 2 | 1 | `http://cp.cloudflare.com/generate_204` | 204 No Content |
+| 3 | 2 | `http://detectportal.firefox.com/success.txt` | `success` |
+| 4 | 3 | `http://nmcheck.gnome.org/check_network_status.txt` | `NetworkManager is online` |
+| 5 | 4 | `http://connectivitycheck.gstatic.com/generate_204` | 204 No Content |
+
+A soros port és a `/log` oldal **1-től** számol, a `cycleIndex` változó viszont
+0-alapú marad – ahhoz kötődik a végpontválasztó `if`-lánc és a
+`RESET_TRIGGER_CYCLE` küszöb is.
 
 Router reset csak akkor indul, ha **mind az öt** üzemeltető végpontja elbukott
 – egyetlen szolgáltató kiesése így sosem látszik internetkimaradásnak.
@@ -189,7 +196,10 @@ flowchart TD
 ```
 
 Egy kör ébren töltött ideje ~25,5 perc (10 perc várakozás + 3 próba + 90 s
-reset + 10 perc bootvárás + 3 próba), a körök között 1 óra alvás:
+reset + 10 perc bootvárás + 3 próba). A két 10 perces tétel **felső korlát** –
+de erre a számításra ez nem hat: ha a hálózat végig halott (márpedig ez a
+szakasz pontosan arról szól), az `onlineProbe()` sosem sikerül, és a körök
+teljes hosszukban futnak. A körök között 1 óra alvás:
 33 × 25,5 perc + 32 × 60 perc ≈ **46 óra** türelem, mielőtt AP módba vált
 (mérve: `R8` teszt).
 
@@ -269,4 +279,4 @@ számláló és a diagnosztikai napló él túl.
 
 *Az ábrák a `bazsi_router_reboot.ino` aktuális állapotát dokumentálják.
 Módosításkor a kóddal együtt frissítendők – a viselkedést a `test/` alatti
-181 forgatókönyves (580 ellenőrzéses) tesztkészlet rögzíti.*
+195 forgatókönyves (636 ellenőrzéses) tesztkészlet rögzíti.*

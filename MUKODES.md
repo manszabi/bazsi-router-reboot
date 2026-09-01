@@ -21,14 +21,18 @@ Az eszköz mindig pontosan egy üzemmódban van.
 
 | Lépés | Időtartam | Következő |
 |---|---|---|
-| Kimenetek alapállapotba (relé `LOW`, státusz LED be) | azonnal | |
+| Kimenetek alapállapotba (relé `LOW`, státusz LED be, Wi-Fi LED ki) | azonnal | |
 | Soros port indítása | max. **3 mp** + 0,5 mp | |
+| **Watchdog bekapcsolása** | azonnal | Innentől a `setup()` maradéka is felügyelt – lásd 8. pont |
 | Beragadt gomb ellenőrzés (**mindkettő**: `D0` és `D1`) | azonnal | Ha bármelyik nyomva: LED-ek **felváltva** villognak 3 mp-ig, majd **60 mp** deep sleep |
 | Watchdog reset számláló ellenőrzés | azonnal | 3. rendellenes reset → `MODE_FATAL` |
-| LittleFS csatolás | azonnal | Hiba → `MODE_FATAL` |
+| LittleFS csatolás (első indításkor **formázás**: 4–7 mp) | azonnal | Hiba → `MODE_FATAL` |
 | Konfiguráció beolvasása | azonnal | Olvasási hiba → `MODE_FATAL` |
 | Wi-Fi csatlakozás | max. **20 mp** | siker → `MODE_MONITOR` |
-| Watchdog bekapcsolása | azonnal | |
+
+> A `MODE_FATAL` **nem állítja meg** a `setup()`-ot: az `enterFatal()` csak
+> beállítja a módot és kiírja az okot, a `setup()` pedig végigfut (a Wi-Fi
+> indítását már kihagyva), a jelzést utána a `loop()` végzi.
 
 ### Ha a csatlakozás nem sikerül
 
@@ -259,7 +263,7 @@ internet nem, tehát érdemes később újrapróbálni.
 
 | Lépés | Időtartam |
 |---|---|
-| Wi-Fi LED **villog 1 Hz**, státusz LED végig **be** | azonnal |
+| Wi-Fi LED **ki** (a kapcsolat tényleg nincs meg), státusz LED marad **be** | azonnal |
 | **3 újracsatlakozási próba**, köztük 30 mp | max. ~2 perc |
 | Sikertelen → azonnal **router újraindítás** (4. pont szerint) | |
 
@@ -272,6 +276,7 @@ Nem várunk további teszt ciklusokat: ha nincs Wi-Fi, a tesztnek nincs értelme
 | Esemény | Időtartam |
 |---|---|
 | Portál elérhető: `192.168.4.1` | |
+| Jelzés: **Wi-Fi LED villog 1 Hz**, státusz LED végig **be** | azonnal |
 | A beállító űrlap forrása | a programba fordítva (`CONFIG_FORM`), nincs feltöltendő `data/` mappa – a portál a LittleFS-ről semmit nem szolgál ki |
 | Tétlenség után deep sleep | **5 perc** (`AP_TIMEOUT_MS`) az utolsó kéréstől |
 | A nyitva lévő lap keep-alive-ja | **60 mp**-enként `GET /ping` (1 bájt válasz) |
