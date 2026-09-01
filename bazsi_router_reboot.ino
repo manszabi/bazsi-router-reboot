@@ -2406,6 +2406,21 @@ void loop() {
     ESP.restart();
   }
 
+  // Hibátlanul lefutott egy óra: a watchdog számláló nullázható.
+  //
+  // MIÉRT ITT, a mód-elágazás ELŐTT? Mert a "hibátlan működés" nem üzemmód
+  // kérdése. Korábban ez a monitor ág belsejében állt, így AP beállító módban
+  // (és a first start várakozás alatt) sosem futott le: egy órákig nyitva
+  // tartott portál mellett az eszköz régi, elavult watchdog-strike-okat
+  // cipelt volna magával, és egy jóval későbbi, magában ártalmatlan glitch
+  // vitte volna a hármas küszöbre - vagyis feleslegesen MODE_FATAL-ba.
+  // (Mérve: WDT9.)
+  if (rtcWdtResets != 0 && currentMillis >= WDT_COUNTER_CLEAR_MS) {
+    rtcWdtResets = 0;
+    printUptime();
+    Serial.println("1 ora hibatlan mukodes - a watchdog szamlalo nullazva.");
+  }
+
   if (deviceMode == MODE_FATAL) {
     // Mindkét LED együtt, gyorsan villog. A program szándékosan nem fut
     // tovább: nem tesztel és nem kapcsolja a relét.
@@ -2458,13 +2473,6 @@ void loop() {
 
   resetbutton();
   wifiresetbutton();
-
-  // Hibátlanul lefutott egy óra: a watchdog számláló nullázható.
-  if (rtcWdtResets != 0 && currentMillis >= WDT_COUNTER_CLEAR_MS) {
-    rtcWdtResets = 0;
-    printUptime();
-    Serial.println("1 ora hibatlan mukodes - a watchdog szamlalo nullazva.");
-  }
 
   switch (currentState) {
 

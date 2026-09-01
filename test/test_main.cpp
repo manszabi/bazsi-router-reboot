@@ -136,7 +136,7 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
                      const char* ip, const char* gw, uint32_t latency = 500,
                      bool deepSleepWake = false) {
   g_millis = 1; g_log.clear(); g_serialLog.clear(); g_pinState.clear(); g_pinRead.clear();
-  g_fs.clear(); g_fsMountOk = true; g_wakeupUs = 0;
+  g_fs.clear(); g_fsMountOk = true; g_fsMountMs = 0; g_wakeupUs = 0;
   g_fsWritable = true; g_fsCapacity = 0; g_fsRemoveOk = true; g_fsReadable = true;
   g_resetReason = deepSleepWake ? ESP_RST_DEEPSLEEP : ESP_RST_POWERON;
   if (!deepSleepWake) {
@@ -3478,6 +3478,146 @@ static uint32_t merjGombHezag(void (*forgatokonyv)()) {
   return g_btnMaxGap;
 }
 
+// ===========================================================================
+// LED-ek: hazudhat-e valamelyik, es meddig?
+// ===========================================================================
+
+static uint32_t s_wifiLedOffAt = 0;
+static void figyelWifiLed() {
+  if (s_wifiLedOffAt == 0 && g_pinState[PIN_WIFILED] != HIGH) s_wifiLedOffAt = g_millis;
+}
+
+// ===========================================================================
+// WATCHDOG: a formazas ideje - az UJ kockazat, mert a watchdog mar elotte eles
+// ===========================================================================
+
+static void scWDT9() {
+  // A dokumentacio igerete: "a szamlalo nullazodik aramtalanitaskor, VAGY
+  // 1 ora hibatlan mukodes utan". Ez a teszt azt kerdezi, hogy ez az igeret
+  // MINDEN uzemmodban all-e - kulonben egy hosszan AP modban allo eszkoz
+  // reg elavult watchdog-strike-okat cipelne magaval, es egy kesobbi
+  // glitch feleslegesen vinne MODE_FATAL-ba.
+  //
+  // AP mod, ket korabbi strike, tobb mint egy ora ebren (a nyitva tartott
+  // lap keep-alive-ja miatt a portal nem alszik el).
+  coldBoot(false, "", "", "", "");
+  setup();
+  CHECK(deviceMode == (DeviceMode)1, "AP modban vagyunk");
+  rtcWdtResets = 2;
+  const uint32_t t0 = g_millis;
+  int guard = 0;
+  try {
+    while (g_millis - t0 < 70u * 60 * 1000 && ++guard < 900000) {
+      touchApDeadline();          // a nyitott lap 60 mp-enkenti pingje
+      loop();
+    }
+  } catch (DeepSleepSignal&) {}
+  printf("     [info] AP modban %u perc ebren utan a szamlalo: %u\n",
+         (g_millis - t0) / 60000, (unsigned)rtcWdtResets);
+  CHECK(g_millis - t0 >= 60u * 60 * 1000, "tenyleg tobb mint egy orat futottunk");
+  CHECK(rtcWdtResets == 0,
+        "1 ora hibatlan mukodes AP modban is nullazza a szamlalot");
+}
+
+static void scWDT8b() {
+  // A watchdog a setup() ELEJEN elesedik, tehat a LittleFS FORMAZASA is a
+  // felugyelete alatt van. A partitions_custom.csv 512 KiB-os particiojanak
+  // formazasa 128 szektor: tipikusan 4-7 mp, a szelsosegesen lassu
+  // (400 ms/szektor) esetben ~51 mp. Mindketto a 90 mp-es WDT_TIMEOUT_MS
+  // alatt kell maradjon - kulonben az elso bekapcsolas watchdog resetbe
+  // futna, es a felhasznalo egy ujrainditasi hurkot latna.
+  //
+  // A regi, ~1,5 MB-os semanal ugyanez rossz esetben ~153 mp lett volna: a
+  // timeout FOLOTT. Ez a teszt azt rogziti, miert volt szabad a watchdogot
+  // elore hozni.
+  const uint32_t esetek[] = { 7000, 51000 };   // tipikus, illetve rossz eset
+  for (uint32_t formazas : esetek) {
+    coldBoot(true, "TestNet", "pw", "", "");
+    g_fsMountMs = formazas;
+    g_wdtTrack = true; g_wdtMaxFeedGap = 0; g_wdtLastFeed = g_millis;
+    try { setup(); } catch (DeepSleepSignal&) {}
+    g_wdtTrack = false;
+    printf("     [info] %2u mp-es formazas -> leghosszabb etetes nelkuli szakasz: %.1f mp\n",
+           formazas / 1000, g_wdtMaxFeedGap / 1000.0);
+    CHECK(g_wdtMaxFeedGap >= formazas,
+          "a formazas ideje tenyleg beleszamit (a meres ervenyes)");
+    CHECK(g_wdtMaxFeedGap < 90u * 1000,
+          "es meg a rossz esetben is a 90 mp-es timeout alatt marad");
+  }
+}
+
+static void scLED4() {
+  // A Wi-Fi LED "van kapcsolat"-ot jelent. Ha a kapcsolat elszall, mennyi ido
+  // alatt alszik el? A TESTING_STATE eszreveszi es azonnal lekapcsolja - de a
+  // SUCCESS_STATE 60 mp-es varakozasa alatt nincs status()-ellenorzes.
+  //
+  // A merest a delay() horgarol vegezzuk: a lekapcsolas a loop()-on BELUL
+  // tortenik, es az azt koveto reconnectWifi() 2 percig nem ad vissza. Egy
+  // loop()-onkenti mintavetel emiatt 180 mp-et mutatna 60 helyett.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpBody = "Microsoft Connect Test"; pingSim.ok = true;
+  setup();
+  int guard = 0;
+  // TESTING_STATE = 0, FAILURE_STATE = 1, SUCCESS_STATE = 2
+  try { while (++guard < 100000 && currentState != (State)2) loop(); }
+  catch (DeepSleepSignal&) {}
+  CHECK(currentState == (State)2, "SUCCESS_STATE-ben vagyunk");
+  CHECK(g_pinState[PIN_WIFILED] == HIGH, "es a Wi-Fi LED vilagit");
+
+  // Most elvagjuk a halozatot a SUCCESS_DELAY legelejen.
+  wifiSim.willConnect = false; wifiSim.begun = false;
+  const uint32_t t0 = g_millis;
+  s_wifiLedOffAt = 0;
+  g_onDelay = figyelWifiLed;
+  guard = 0;
+  try { while (++guard < 100000 && s_wifiLedOffAt == 0) loop(); }
+  catch (DeepSleepSignal&) {}
+  g_onDelay = nullptr;
+  const uint32_t hazugsag = s_wifiLedOffAt ? s_wifiLedOffAt - t0 : 0;
+  printf("     [info] a Wi-Fi LED %u mp-ig mutatott meg kapcsolatot\n", hazugsag / 1000);
+  CHECK(s_wifiLedOffAt != 0, "vegul elalszik");
+  CHECK(hazugsag <= 62u * 1000,
+        "legkesobb a SUCCESS_DELAY vegen (a TESTING_STATE veszi eszre)");
+  CHECK(hazugsag >= 55u * 1000,
+        "de a SUCCESS_DELAY alatt tenyleg nem ellenorizzuk - ez a mert ablak");
+}
+
+static void scLED5() {
+  // A statusz LED (D4) a "futok" jelzes. Sosem szabad tartosan sotetnek
+  // maradnia normal uzemben - a reset pulzus villogasan kivul.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpBody = "Microsoft Connect Test"; pingSim.ok = true;
+  setup();
+  CHECK(g_pinState[PIN_LED] == HIGH, "indulas utan vilagit");
+  int guard = 0, sotet = 0;
+  try {
+    while (++guard < 20000) {
+      loop();
+      if (g_pinState[PIN_LED] != HIGH) sotet++;
+    }
+  } catch (DeepSleepSignal&) {}
+  CHECK(sotet == 0, "normal monitor uzemben egyetlen korben sem alszik el");
+}
+
+static void scLED6() {
+  // AP modban a mentes utani ujrainditasi turelmi ido alatt is villognia
+  // kell: a felhasznalo lassa, hogy az eszkoz meg el.
+  coldBoot(false, "", "", "", "");
+  setup();
+  CHECK(postConfig("Halozat", "jelszo123", "", "") == 200, "mentes OK");
+  CHECK(restartPending, "ujrainditas beutemezve");
+  int valtas = 0, last = g_pinState[PIN_WIFILED];
+  const uint32_t t0 = g_millis;
+  try {
+    while (g_millis - t0 < 1500) {          // a 2 mp-es turelmi idon belul
+      loop();
+      if (g_pinState[PIN_WIFILED] != last) { valtas++; last = g_pinState[PIN_WIFILED]; }
+    }
+  } catch (RestartSignal&) {} catch (DeepSleepSignal&) {}
+  CHECK(valtas >= 2, "a Wi-Fi LED a turelmi ido alatt is villog");
+  CHECK(g_pinState[PIN_LED] == HIGH, "a statusz LED kozben vegig vilagit");
+}
+
 static void scBTN1() {
   // A HOSSZU VARAKOZASOK alatt mindket gombot 10 ms-onkent nezzuk.
   // Vegigjatszunk egy teljes first start varakozast + router resetet +
@@ -3942,6 +4082,11 @@ static const Scenario kScenarios[] = {
   { "OP7: élő Wi-Fi mellett is korán zárul, ha az internet menet közben visszajön", scOP7 },
 
   // --- Gombok a hosszu varakozasok alatt ---
+  { "WDT8b: a LittleFS formázása is belefér a watchdog ablakába", scWDT8b },
+  { "WDT9: 1 óra hibátlan működés AP módban is nullázza a WDT számlálót", scWDT9 },
+  { "LED4: a Wi-Fi LED nem hazudik tovább egy SUCCESS_DELAY-nél", scLED4 },
+  { "LED5: a státusz LED normál üzemben végig világít", scLED5 },
+  { "LED6: AP módban a mentés utáni türelmi idő alatt is villog", scLED6 },
   { "BTN1: a hosszú várakozások alatt 10 ms-onként nézzük mindkét gombot", scBTN1 },
   { "BTN2: a blokkoló HTTP kérés alatti vak ablak mérése (egy kérésnyi)", scBTN2 },
   { "BTN3: a végig nyomva tartott gomb a vak ablak után is hat", scBTN3 },

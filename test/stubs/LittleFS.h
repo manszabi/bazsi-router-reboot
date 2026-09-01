@@ -4,6 +4,7 @@
 
 extern std::map<std::string,std::string> g_fs;
 extern bool g_fsMountOk;
+extern uint32_t g_fsMountMs;   // a csatolas/formazas ideje (0 = azonnali)
 extern bool   g_fsWritable;   // false = minden megnyitás írásra elbukik
 extern size_t g_fsCapacity;   // 0 = korlátlan; egyébként a tárolható összméret
 extern bool   g_fsRemoveOk;   // a remove() sikerül-e
@@ -70,7 +71,11 @@ public:
   bool remove(const String& p) { return remove(p.c_str()); }
   size_t totalBytes() { return g_fsCapacity ? g_fsCapacity : 1048576; }
   size_t usedBytes() { return g_fsUsed(); }
-  bool begin(bool) { return g_fsMountOk; }
+  // A VALODI begin(true) elso indulaskor FORMAZ, es kozben senki nem eteti a
+  // watchdogot. A firmware epp erre meretezte a WDT_TIMEOUT_MS-t (a 512 KiB-os
+  // particio 128 szektora), tehat a harnessnek modelleznie kell az idot is -
+  // kulonben a "watchdog a setup() elejen" dontes tesztelhetetlen maradna.
+  bool begin(bool) { g_millis += g_fsMountMs; return g_fsMountOk; }
   bool exists(const char* p) { return g_fs.count(p) > 0; }
   bool exists(const String& p) { return g_fs.count(p.c_str()) > 0; }
 };

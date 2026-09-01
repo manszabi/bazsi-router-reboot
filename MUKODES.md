@@ -370,7 +370,7 @@ történik, és soha nem tér vissza. Kívülről nézve a viselkedés azonos.
 | Etetés a hosszú várakozások alatt | ~10 ms-onként |
 | Timeoutkor | panic → újraindulás |
 | 3 rendellenes újraindulás után | `MODE_FATAL` |
-| A számláló nullázódik | áramtalanításkor, vagy **1 óra** hibátlan működés után |
+| A számláló nullázódik | áramtalanításkor, vagy **1 óra** hibátlan működés után – **minden üzemmódban**, az AP portált és a first start várakozást is beleértve (mérve: `WDT9`) |
 
 Rendellenesnek számít: `ESP_RST_TASK_WDT`, `ESP_RST_INT_WDT`, `ESP_RST_WDT`,
 `ESP_RST_PANIC`, `ESP_RST_CPU_LOCKUP`.
@@ -490,6 +490,13 @@ Minden alvás előtt a **relé `LOW`**, tehát a router kap áramot.
 A négy villogó jelzés szándékosan elkülönül: az **AP mód** és a **router reset**
 csak az egyik LED-et villogtatja (a másik állapota is más), a két hibajelzés
 pedig mindkettőt, gyorsabban – az egyik együtt, a másik ellenfázisban.
+
+> **A Wi-Fi LED késhet, legfeljebb egy `SUCCESS_DELAY`-t.** A kapcsolat
+> állapotát a `TESTING_STATE` ellenőrzi; a sikeres teszt utáni 60 mp-es
+> várakozás alatt nincs `WiFi.status()` lekérdezés. Ha a kapcsolat épp ekkor
+> szakad meg, a LED **legfeljebb 60 másodpercig** még kapcsolatot mutat, aztán
+> a következő teszt elején elalszik (mérve: `LED4` – pontosan 60 mp). A
+> viselkedésre ez nem hat: a hibát a következő teszt így is elkapja.
 
 ---
 

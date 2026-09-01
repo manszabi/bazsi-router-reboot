@@ -16,6 +16,7 @@ std::map<int,int> g_pinRead;
 bool g_serialOn = false;
 std::map<std::string,std::string> g_fs;
 bool g_fsMountOk = true;
+uint32_t g_fsMountMs = 0;
 bool   g_fsWritable = true;
 size_t g_fsCapacity = 0;
 bool   g_fsRemoveOk = true;

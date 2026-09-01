@@ -58,6 +58,12 @@ eltér; a két hibajelzés mindkettőt villogtatja, gyorsabban – az egyik egy�
 a másik ellenfázisban. A reset pulzus alatt azért villog a státusz LED, mert
 90 másodpercnyi sötét LED ránézésre a halott eszköztől sem különböztethető meg.
 
+> **A Wi-Fi LED késhet, legfeljebb egy percet.** A kapcsolat állapotát a
+> tesztciklus ellenőrzi, a sikeres teszt utáni 60 mp-es várakozás alatt viszont
+> nem. Ha a kapcsolat épp ekkor szakad meg, a LED legfeljebb **60 másodpercig**
+> még világít, aztán a következő teszt elején elalszik (mérve: `LED4`). A
+> működésre ez nem hat – csak a kijelzés késik.
+
 ## ⚙️ Működés
 
 ### 1. Első indulás – Wi-Fi konfiguráció
