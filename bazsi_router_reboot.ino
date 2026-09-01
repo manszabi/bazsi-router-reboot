@@ -1320,7 +1320,21 @@ void checkHeap(uint32_t now) {
   // ingadozva ne kapcsolgasson oda-vissza.
   if (!heapWarnActive && szabad < HEAP_WARN_BYTES) {
     heapWarnActive = true;
-    logEvent(EV_LOW_HEAP, (uint16_t)(szabad / 1024));
+    // A NAPLOBA csak akkor, ha nem ez volt mar az elozo bejegyzes is.
+    //
+    // MIERT KELL EZ? A heapWarnActive jelzo a SOROS sort ritkitja (10%-os
+    // hiszterezissel), de a naplo bejegyzes ugyanezen a jelzon lovagolt -
+    // tehat MINDEN atlepes uj bejegyzest irt. Egy kuszob korul ingadozo
+    // heapnel (amit a szokasos AsyncTCP puffer-forgalom eloallithat) ez
+    // kisopri a 32 elemu korpuffert: merve 30 perc alatt 32 bejegyzes, mind
+    // egymas utan - vagyis epp azokat az esemenyeket veszitenenk el, amiket
+    // ki akarunk vizsgalni.
+    //
+    // Pontosan ugyanaz a hibaosztaly, mint a WIFI LOST-nal, es ugyanaz a
+    // megoldas is. (Merve: HP10.)
+    if (!lastEventWas((uint8_t)EV_LOW_HEAP)) {
+      logEvent(EV_LOW_HEAP, (uint16_t)(szabad / 1024));
+    }
     printUptime();
     Serial.printf("FIGYELEM: alacsony a szabad heap (%u B), a kuszob %u B.\n",
                   (unsigned)szabad, (unsigned)HEAP_WARN_BYTES);
@@ -1347,7 +1361,7 @@ void checkHeap(uint32_t now) {
     return;
   }
 
-  // MIKOR NEM SZABAD UJRAINDULNI. Mind a negy kizaras arrol szol, hogy az
+  // MIKOR NEM SZABAD UJRAINDULNI. Mind az OT kizaras arrol szol, hogy az
   // ujraindulas ne rontson tobbet, mint amennyit javit:
   //
   //  - AP beallito modban a felhasznalo epp a portalon dolgozik; az

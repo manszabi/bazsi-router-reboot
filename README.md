@@ -547,9 +547,11 @@ SUCCESS_DELAY delay start.
 
 ### Mennyit ír?
 
-A kimenet nem áraszthatja el a konzolt: a mért felső korlát **30 sor/perc**
-normál működésben és tartós internetkiesésben egyaránt, az AP beállító mód és a
-végzetes hiba villogó ciklusa pedig **egyetlen sort sem ír**. Ezt az
+A kimenet nem áraszthatja el a konzolt: a költségvetés **30 sor/perc**, és ez a
+legellenségesebb helyzetekben is tartja magát – pislákoló Wi-Fi (9–12), a küszöb
+körül ingadozó heap (15), mindig bukó naplómentés tartós kiesés alatt (10) –,
+míg normál működésben 9. Az AP beállító mód és a végzetes hiba villogó ciklusa a
+ritkított heap-soron kívül **egyetlen sort sem ír**. Ezt az
 ismétlődő események szűrése tartja fenn (`TEST FAIL`, `WIFI LOST`,
 `STUCK BUTTON` sorozatokból csak az első).
 

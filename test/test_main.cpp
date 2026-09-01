@@ -1793,6 +1793,95 @@ static void scSER3() {
         "hibajelző módban sem ír a villogó ciklus a heap-soron kívül");
 }
 
+// SER8 segedje: a heap a figyelmeztetesi kuszob KORUL ingadozik.
+static uint32_t ser8Fazis = 0;
+static void ser8Hook() {
+  // 20 mp-enkent vult a kuszob ala es fole - gyorsabban, mint a 10 mp-es
+  // mintaveteli koz, tehat minden meres masik oldalon talalja.
+  const bool alacsony = ((g_millis / 20000) % 2) == 0;
+  g_freeHeap = alacsony ? 20000 : 40000;
+  g_maxAllocHeap = g_freeHeap;
+  ser8Fazis++;
+}
+
+static void scSER8() {
+  // ELLENSEGES ESET: A HEAP A KUSZOB KORUL INGADOZIK.
+  //
+  // A figyelmeztetes csak ATLEPESKOR szol, es a visszaallashoz 10% tartalek
+  // kell - de mi van, ha a heap ENNEL nagyobbat ugral? Akkor minden ugras egy
+  // "FIGYELEM" es egy "visszaallt" sort adhat. A mintaveteli koz 10 mp, tehat
+  // elmeletileg 12 sor/perc is lehetne. Megmerjuk, hogy tenyleg belefer-e a
+  // koltsegvetesbe.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpBody = "Microsoft Connect Test";
+  setup();
+  int guard = 0;
+  while (uiFlags.firstStart && ++guard < 2000000) loop();
+  ser8Fazis = 0;
+  g_onDelay = ser8Hook;
+  const uint32_t lpm = serialLinesPerMinute(30u * 60 * 1000);
+  g_onDelay = nullptr;
+  printf("     [info] a kuszob korul ingadozo heap: %u sor/perc\n", lpm);
+  CHECK(lpm <= 30, "a kuszob korul ingadozo heap sem lepi tul a 30 sor/percet");
+  CHECK(serialHas("FIGYELEM: alacsony"), "de a figyelmeztetes tenyleg megszolal");
+}
+
+static void scSER9() {
+  // ELLENSEGES ESET: A NAPLO MENTESE MINDIG BUKIK.
+  //
+  // Megtelt fajlrendszer mellett a saveEventLog() minden router resetnel es
+  // minden alvas elott lefut - es minden alkalommal 4-5 sort ir a hibarol.
+  // Ez a teljes eszkalacio alatt megsokszorozodhat. Megmerjuk.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpBody = "Rossz"; pingSim.ok = false;   // tartos internetkieses
+  g_fsCapacity = 24;                          // a naplo mentese mindig bukik
+  setup();
+  const uint32_t lpm = serialLinesPerMinute(90u * 60 * 1000);
+  printf("     [info] tartos kieses + mindig buko naplomentes: %u sor/perc\n", lpm);
+  CHECK(lpm <= 30, "a buko naplomentes sem arasztja el a soros portot");
+  CHECK(serialHas("rovid iras") || serialHas("NEM sikerult"),
+        "kozben a hibat tenyleg jelezte");
+}
+
+static void scSER10() {
+  // ELLENSEGES ESET: A 33 KORES, KETNAPOS LETRA.
+  //
+  // A leghosszabb menet, amit a program egyaltalan lejatszik: a halozat
+  // egyaltalan nem latszik, es 33 koron at probalkozunk. Minden kor
+  // ujracsatlakozasi probakat es router resetet is tartalmaz - ez az a menet,
+  // ahol a legtobb sor keletkezik.
+  coldBoot(false, "TestNet", "pw", "", "");
+  setup();
+  const size_t elotte = g_serialLog.size();
+  const uint32_t t0 = g_millis;
+  int guard = 0;
+  int alvasok = 0;
+  // Tobb kort vegigjatszunk: minden alvas utan "ebredunk" (a harness a deep
+  // sleepet kivetellel modellezi, es a coldBoot ebredeskent indit ujra).
+  try {
+    while (alvasok < 5 && ++guard < 5000000) {
+      try { loop(); }
+      catch (DeepSleepSignal&) {
+        alvasok++;
+        const uint32_t rounds = rtcRetryRounds;
+        const uint32_t most = g_millis;
+        coldBoot(false, "TestNet", "pw", "", "", 500, true);
+        g_millis = most + 3600u * 1000;      // egy ora alvas
+        rtcRetryRounds = rounds;
+        setup();
+      }
+    }
+  } catch (RestartSignal&) {}
+  const uint32_t percek = (g_millis - t0) / 60000;
+  const uint32_t lpm = percek ? (uint32_t)((g_serialLog.size() - elotte) / percek) : 0;
+  printf("     [info] %d kor a ketnapos letrabol (%u perc, %u sor osszesen): "
+         "%u sor/perc\n", alvasok, percek,
+         (unsigned)(g_serialLog.size() - elotte), lpm);
+  CHECK(alvasok == 5, "ot teljes kort lejatszottunk");
+  CHECK(lpm <= 30, "a ketnapos letra sem lepi tul a 30 sor/percet");
+  CHECK(rtcRetryRounds >= 5, "es a korszamlalo tenyleg no");
+}
+
 static void scOV1() {
   // A szamlalok nem csordulnak tul: az internet tartos kieseseben a
   // failedCount / cycleIndex korlatos marad, mert a router reset nullazza oket.
@@ -4678,6 +4767,55 @@ static void scHP1() {
   CHECK(!serialHas("FIGYELEM: alacsony"), "egeszseges heapnel nem figyelmeztet");
 }
 
+// HP10 segedje: a heap a figyelmeztetesi kuszob korul ingadozik.
+static void hp10Hook() {
+  const bool alacsony = ((g_millis / 20000) % 2) == 0;
+  g_freeHeap = alacsony ? 20000 : 40000;
+  g_maxAllocHeap = g_freeHeap;
+}
+
+static void scHP10() {
+  // TALALT HIANY: A LOW HEAP BEJEGYZESNEK NINCS SPAM-VEDELME.
+  //
+  // A figyelmeztetes SOROS sora csak atlepeskor szol (10% hiszterezissel) -
+  // de a NAPLO bejegyzes ugyanezen a jelzon lovagol, tehat minden atlepes egy
+  // uj bejegyzest ir. Egy kuszob korul ingadozo heapnel (amit a szokasos
+  // AsyncTCP puffer-forgalom eloallithat) ez percenkent tobb bejegyzest is
+  // jelent, es a 32 elemu korpuffert kisoporheti - epp azokat az esemenyeket
+  // veszitve el, amiket ki akarunk vizsgalni.
+  //
+  // Pontosan ugyanaz a hibaosztaly, mint a WIFI LOST-nal, amit mar javitottunk
+  // - csak ott eszrevettem, itt nem. A megoldas is ugyanaz: lastEventWas().
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpBody = "Microsoft Connect Test";
+  setup();
+  int guard = 0;
+  while (uiFlags.firstStart && ++guard < 2000000) loop();
+
+  rtcEvMagic = 0; rtcEvNext = 0;          // tiszta naplo, hogy szamolhassunk
+  g_onDelay = hp10Hook;
+  const uint32_t t0 = g_millis;
+  guard = 0;
+  try { while (g_millis - t0 < 30u * 60 * 1000 && ++guard < 2000000) loop(); }
+  catch (DeepSleepSignal&) {} catch (RestartSignal&) {}
+  g_onDelay = nullptr;
+
+  int lowHeap = 0, egymasUtan = 0, maxEgymasUtan = 0;
+  for (uint32_t i = 0; i < rtcEvNext && i < 32; i++) {
+    if (rtcEvents[i].code == 13) {
+      lowHeap++; egymasUtan++;
+      if (egymasUtan > maxEgymasUtan) maxEgymasUtan = egymasUtan;
+    } else {
+      egymasUtan = 0;
+    }
+  }
+  printf("     [info] 30 perc ingadozas: %d LOW HEAP bejegyzes, max %d egymas utan\n",
+         lowHeap, maxEgymasUtan);
+  CHECK(maxEgymasUtan <= 1, "nincs ket EGYMAS UTANI LOW HEAP a naplóban");
+  CHECK(lowHeap >= 1, "de az elso alkalommal tenyleg naplozunk");
+  CHECK(rtcEvNext < 32, "a korpuffer nem fordult korbe a figyelmeztetesektol");
+}
+
 static void scHP2() {
   // A FIGYELMEZTETES CSAK AZ ATLEPESKOR SZOL - nem minden meresnel. Ugyanaz
   // a "csak a sorozat elso tagja" szabaly, mint a TEST FAIL / WIFI LOST
@@ -6824,6 +6962,9 @@ static const Scenario kScenarios[] = {
   { "SER1: normál működés soros terhelése", scSER1 },
   { "SER2: internet kiesés soros terhelése", scSER2 },
   { "SER3: AP és hibajelző mód néma", scSER3 },
+  { "SER8: a kuszob korul ingadozo heap sem araszt el", scSER8 },
+  { "SER9: mindig buko naplomentes sem araszt el", scSER9 },
+  { "SER10: a 33 kores ketnapos letra soros terhelese", scSER10 },
   { "OV1: több reset ciklus, számlálók korlátosak", scOV1 },
   { "WDT6: nem futó TWDT esetén a sketch felhúzza és tényleg feliratkozik", scWDT6 },
   { "WDT7: sikertelen feliratkozásnál nem etet és nem hazudik védelmet", scWDT7 },
@@ -6965,6 +7106,7 @@ static const Scenario kScenarios[] = {
   { "HP7: egy ora hibatlan mukodes nullazza a heap szamlalot", scHP7 },
   { "HP8: a ket uj esemenykod a /log oldalon is ertelmezheto", scHP8 },
   { "HP9: valodi lassu szivargas vegponttol vegpontig", scHP9 },
+  { "HP10: a LOW HEAP bejegyzes sem araszthatja el a naplot", scHP10 },
   { "GWH1: a router reset utani ellenorzo ablakban nincs heap-ujraindulas", scGWH1 },
   { "GWH2: es az ablak utan a gateway-dontes rendesen megszuletik", scGWH2 },
   { "GWH3: mi marad meg es mi szamolodik ujra egy heap-ujraindulas utan", scGWH3 },

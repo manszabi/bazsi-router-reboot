@@ -61,7 +61,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 
 ## Lefedett esetek
 
-**286 forgatókönyv, 1065 ellenőrzés. Sorlefedettség: 98,64%.**
+**290 forgatókönyv, 1075 ellenőrzés. Sorlefedettség: 98,64%.**
 
 | | |
 |---|---|
@@ -83,6 +83,8 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 | `PWR1`–`PWR4` | **Áramszünet és kézi router-áramtalanítás**: 3 perces router-boot alatt az ESP hozzá sem nyúl a reléhez és 3:21-kor kezd tesztelni; ha a router egyáltalán nem áll fel, az első reset 12 perckor; üzem közbeni kézi áramtalanításnál a türelmi idő **2,0 perc**, és a 90 mp-en belül visszadugott routernél nincs relé-impulzus |
 | `BNC1`–`BNC4` | **Gombpattogás**: a pattogó nyomás egyszer reteszel és nem hagy hátra „félig lenyomott" állapotot (különben egy későbbi magányos felfutó él spontán újraindítást okozna); a pattogó tüske nem kerüli meg a debounce-t; a folyamatosan recsegő, kopott gomb **nem** indít újra; a beragadt-gomb ellenőrzés egyetlen beolvasásból dönt |
 | `SER6`–`SER7` | **A soros port életciklusa**: 115200 baud, az első sor csak a CDC beállása után megy ki, alvás előtt `flush` majd `end` **a legvégén**, és a lezárás után egyetlen sort sem írunk – a beragadt gomb ágát is beleértve |
+| `SER8`–`SER10` | **Ellenséges soros terhelés**: a küszöb körül ingadozó heap (15 sor/perc), a mindig bukó naplómentés tartós kiesés alatt (10 sor/perc), és a 33 körös kétnapos létra – mind a 30 sor/perces költségvetés alatt |
+| `HP10` | **A `LOW HEAP` bejegyzés spam-védelme**: a küszöb körüli ingadozás védelem nélkül 30 perc alatt **32 bejegyzést** írt (a teljes körpuffert kisöpörve), a `lastEventWas()` után **1** |
 | `AP1`–`AP4` | **AP portál űrlap**: az üres címmező törlést jelent (a DHCP-re váltás útja); az előkitöltés **soha nem tartalmazza a jelszót**; az SSID **HTML-escape-elve** kerül a lapra (XSS ellen); az előkitöltéssel a statikus IP megmarad jelszócserénél |
 | `LOG1`–`LOG3` | **Naplóoldal**: emberi olvasásra készül (szöveges reset ok, nap/óra/perc/mp uptime, `Param` jelmagyarázat, ami nem ütközik a táblázatcella-mintával); **semmilyen konfigurációs érték nem jelenik meg**; a körpuffer körbefordulása után is pontosan 32 sor |
 | `LOG4`–`LOG5` | **A napló írása**: pislákoló Wi-Fi mellett egy `WIFI LOST` sorozatból csak az első kerül be (ugyanaz a szabály, mint a `TEST FAIL`-nél), a soros port sem árad meg; a naplózás **nem nyúl a fájlrendszerhez** (nem hoz létre fájlt, üres tárral is működik) és **nem ágyaz kritikus szakaszt kritikus szakaszba** |

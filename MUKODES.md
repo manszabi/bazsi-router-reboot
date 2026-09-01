@@ -876,9 +876,22 @@ Mérve: `SER6` (a normál alvási út) és `SER7` (a beragadt gomb ága).
 ### Mennyit ír?
 
 A soros kimenet **nem áraszthatja el** a konzolt – se normál működésben, se
-tartós hibában. A mért felső korlát mindkettőben **30 sor/perc** (`SER1`,
-`SER2`), és az AP beállító mód meg a végzetes hiba villogó ciklusa **egyetlen
-sort sem ír** (`SER3`).
+tartós hibában. A költségvetés **30 sor/perc**, és ezt nem csak a szokásos
+esetekben mértük meg, hanem a legellenségesebbekben is:
+
+| Helyzet | Mért |
+|---|---|
+| Normál működés | 9 sor/perc (`SER1`) |
+| Tartós internetkiesés | 9 sor/perc (`SER2`) |
+| AP mód, végzetes hiba (villogó ciklus) | **0** a ritkított heap-soron kívül (`SER3`) |
+| **Pislákoló Wi-Fi** (0,5–5 mp) | 9–12 sor/perc (`LOG4`) |
+| **A küszöb körül ingadozó heap** | 15 sor/perc (`SER8`) |
+| **Mindig bukó naplómentés** tartós kiesés alatt | 10 sor/perc (`SER9`) |
+| A 33 körös, kétnapos létra | `SER10` |
+
+> A pislákoló Wi-Fi korábban **132 sor/perc**-et adott: az óraszinkron minden
+> újracsatlakozásnál bejelentkezett. Ezért jelent be a `startNtp()` csak
+> egyszer bootonként.
 
 Ezt három szabály tartja fenn:
 
@@ -1134,7 +1147,14 @@ veszítenénk el – azt, ami a diagnózishoz kell. Három helyen van ilyen szű
 | `TEST FAIL` | csak `failedCount == 1`-nél |
 | `STUCK BUTTON` | `stuckCycleAlreadyLogged` jelző |
 | `WIFI LOST` | `lastEventWas(EV_WIFI_LOST)` – ha az előző bejegyzés is ez volt, kimarad |
-| `LOW HEAP` | `heapWarnActive` jelző – csak a küszöb átlépésekor |
+| `LOW HEAP` | **kettős**: a `heapWarnActive` jelző a soros sort ritkítja (10% hiszterézissel), a naplóba pedig a `lastEventWas(EV_LOW_HEAP)` enged csak egyet |
+
+> A `LOW HEAP` eredetileg **csak** a `heapWarnActive` jelzőn lovagolt, tehát
+> minden küszöb-átlépés új naplóbejegyzést írt. Egy a küszöb körül ingadozó
+> heapnél (amit a szokásos AsyncTCP puffer-forgalom előállíthat) ez **kisöpri**
+> a 32 elemű körpuffert: mérve **30 perc alatt 32 bejegyzés, mind egymás után**.
+> Ugyanaz a hibaosztály, mint a `WIFI LOST`-nál – csak ott észrevettük, itt nem.
+> A javítás után ugyanez a mérés **1 bejegyzést** ad. (Mérve: `HP10`.)
 
 A `WIFI LOST` szűrése volt a legutolsó hiányzó darab. **Az arányokról
 őszintén:** védelem nélkül, valósághű pislákolási ütemek mellett (500 / 1000 /
