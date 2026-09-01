@@ -3607,6 +3607,107 @@ static void gombNyomas(int pin, uint32_t tartasMs) {
   g_pinRead[pin] = HIGH; simIsr(pin);          // felfuto el
 }
 
+// ===========================================================================
+// FAJLKEZELES: hibainjektalas a meg nem fedett eshetosegekre
+// ===========================================================================
+
+static void scFS11() {
+  // Sorvegek es csupa-whitespace tartalom. A readConfigValue() az ELSO sort
+  // veszi, majd trimInPlace()-t hiv - ami isspace()-t hasznal, tehat a CRLF
+  // \r-jet is vagja. Ha csak szokozt vagna, egy Windows-on szerkesztett vagy
+  // regi firmware-tol maradt fajl lathatatlan \r-rel szennyezne az SSID-t,
+  // es a csatlakozas rejtelyesen bukna.
+  char out[40];
+  coldBoot(true, "x", "", "", "");
+  g_fs["/t.txt"] = "MyNetwork\r\n";
+  CHECK(readConfigValue(LittleFS, "/t.txt", out, sizeof(out)) == (ConfigStatus)0
+        && strcmp(out, "MyNetwork") == 0, "CRLF: a \\r is levagodik");
+  g_fs["/t.txt"] = "  Halozat  \n masodik sor";
+  CHECK(readConfigValue(LittleFS, "/t.txt", out, sizeof(out)) == (ConfigStatus)0
+        && strcmp(out, "Halozat") == 0, "csak az elso sor, trimmelve");
+  g_fs["/t.txt"] = "   \t  \r\n";
+  CHECK(readConfigValue(LittleFS, "/t.txt", out, sizeof(out)) == (ConfigStatus)0
+        && out[0] == '\0', "csupa whitespace -> ures ertek (nem hiba)");
+  g_fs["/t.txt"] = "";
+  CHECK(readConfigValue(LittleFS, "/t.txt", out, sizeof(out)) == (ConfigStatus)0
+        && out[0] == '\0', "ures fajl -> ures ertek (a wifireset ezt hagyja)");
+}
+
+static void scFS12() {
+  // Binaris szemet a konfigfajlban (pl. felbeszakadt iras utan). Nem szabad
+  // sem osszeomlani, sem tulcsordulni - a beagyazott NUL utani resz egyszeruen
+  // nem letezik a C-string szempontjabol.
+  char out[16];
+  coldBoot(true, "x", "", "", "");
+  std::string szemet("AB", 2); szemet.push_back('\0'); szemet += "CDEFGH";
+  g_fs["/t.txt"] = szemet;
+  CHECK(readConfigValue(LittleFS, "/t.txt", out, sizeof(out)) == (ConfigStatus)0,
+        "beagyazott NUL: nem hiba, csak rovid ertek");
+  CHECK(strcmp(out, "AB") == 0, "a NUL-ig tarto resz jon vissza");
+
+  // A puffernel HOSSZABB fajl: csonkolas, tulcsordulas nelkul.
+  g_fs["/t.txt"] = std::string(200, 'x');
+  CHECK(readConfigValue(LittleFS, "/t.txt", out, sizeof(out)) == (ConfigStatus)0,
+        "tul hosszu fajl: csonkolas, nem hiba");
+  CHECK(strlen(out) == sizeof(out) - 1, "pontosan a puffer hataraig");
+}
+
+static void scFS13() {
+  // MENET KOZBEN megtelo fajlrendszer: az SSID meg kifer, a jelszo mar nem.
+  // Ellenorizni: a valasz 500, a ZAR FELSZABADUL (kulonben az eszkoz sosem
+  // aludna el es a gombok is nemak lennenek), es NINCS ujrainditas utemezve.
+  coldBoot(false, "", "", "", "");
+  setup();
+  // Akkora kapacitas, hogy az SSID beleferjen, a kodolt jelszo mar ne.
+  g_fsCapacity = 12;
+  const int kod = postConfig("Halozat", "hosszabbJelszo", "", "");
+  CHECK(kod == 500, "irasi hibanal 500-as valasz");
+  CHECK(!savingConfig, "a ZAR felszabadult (a mentes nem ragadt be)");
+  CHECK(!restartPending, "es NINCS ujrainditas utemezve");
+  // A gomboknak tovabbra is hatniuk kell.
+  g_pinRead[3] = LOW;
+  bool restarted = false;
+  try { resetbutton(); g_millis += 100; resetbutton(); }
+  catch (RestartSignal&) { restarted = true; }
+  CHECK(restarted, "a reset gomb az irasi hiba utan is mukodik");
+}
+
+static void scFS14() {
+  // MIT VESZITUNK egy felbeszakadt mentesnel? A fs.open(path, FILE_WRITE) a
+  // megnyitas pillanataban CSONKOL - vagyis mire kiderul, hogy az iras nem
+  // fer ki, a REGI ertek mar odaveszett. Ez a teszt nem hibat allit, hanem
+  // ROGZITI a tenyleges viselkedest, hogy egy kesobbi valtoztatas ne tudja
+  // eszrevetlenul elmozditani.
+  // SSID nelkul indulunk, hogy AP modba jussunk - kulonben a portal el sem
+  // indul, es nem lenne POST kezelo. (Ezen bukott el a teszt elso valtozata.)
+  coldBoot(false, "", "", "", "");
+  setup();
+  CHECK(deviceMode == (DeviceMode)1, "AP modban vagyunk, a portal fut");
+  // A "regi" konfiguraciot a sajat utjan mentjuk el, hogy valodi kodolt
+  // tartalom legyen a fajlban.
+  CHECK(postConfig("RegiHalozat", "regiJelszo", "", "") == 200, "elso mentes OK");
+  const std::string regiPass = g_fs["/pass.txt"];
+  CHECK(!regiPass.empty(), "a regi jelszo a fajlban van");
+  restartPending = false;
+
+  // Most a fajlrendszer megtelik: az SSID meg kifer, a jelszo mar nem.
+  g_fsCapacity = g_fs["/ssid.txt"].size() + 4;
+  const int kod = postConfig("UjHalozat", "ujHosszabbJelszo", "", "");
+  CHECK(kod == 500, "a mentes hibat jelez");
+
+  printf("     [info] a mentes utan /ssid.txt='%s', /pass.txt hossza=%u\n",
+         g_fs["/ssid.txt"].c_str(), (unsigned)g_fs["/pass.txt"].size());
+  CHECK(g_fs["/pass.txt"] != regiPass,
+        "a REGI jelszo mar NINCS meg (a FILE_WRITE megnyitaskor csonkol)");
+  // A lenyeg: az eszkoz ettol NEM valik hasznalhatatlanna. Ures jelszoval a
+  // csatlakozas bukik, es a szokasos uton AP modba kerul, ahol ujra
+  // beallithato - ugyanaz az ongyogyulo ut, mint a serult jelszonal (CFG2).
+  g_fsCapacity = 0;
+  CHECK(postConfig("UjHalozat", "ujHosszabbJelszo", "", "") == 200,
+        "a hely felszabadulasa utan a mentes ujra sikerul");
+  CHECK(!g_fs["/pass.txt"].empty(), "es a jelszo helyreall");
+}
+
 static void scLAT1() {
   // A LENYEG: egy teljes erteku gombnyomas, ami VEGIG egy blokkolo szakaszba
   // esett (a loop egyszer sem mintavetelezett), es a gombot mar fel is
@@ -4421,6 +4522,10 @@ static const Scenario kScenarios[] = {
   { "RR1: befagyott DNS – 4 reset, két újraindítás közt legalább 3 perc", scRR1 },
   { "RR2: teljes kiesésnél a 10 perces bootvárakozás érintetlen marad", scRR2 },
   { "RR3: egyetlen sikeres teszt nullázza a reset-számlálót", scRR3 },
+  { "FS11: sorvégek és whitespace a konfigfájlban", scFS11 },
+  { "FS12: bináris szemét és túl hosszú fájl - nincs túlcsordulás", scFS12 },
+  { "FS13: menet közben megtelő fájlrendszer - a zár felszabadul", scFS13 },
+  { "FS14: félbeszakadt mentés - a régi érték is odavész (rögzített viselkedés)", scFS14 },
   { "LAT1: blokkoló szakaszba eső rövid gombnyomás sem vész el", scLAT1 },
   { "LAT2: a retesz NEM kerüli meg a debounce-t (zajtüske nem indít újra)", scLAT2 },
   { "LAT3: a wifireset gomb reteszelése is működik", scLAT3 },

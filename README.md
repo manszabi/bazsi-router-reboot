@@ -832,6 +832,7 @@ kezelve van – és ami fontosabb, **egyik sem hazudik sikert**.
 
 | Hiba | Viselkedés |
 |---|---|
+| A mentés félbeszakad (megtelt / haldokló flash) | A **régi érték is odavész**: a `FILE_WRITE` már a megnyitáskor csonkol, tehát mire kiderül, hogy az írás nem fér ki, a korábbi tartalom nincs meg. A válasz 500, az eszköz **nem indul újra**, és a következő induláskor üres SSID-vel **AP módba** kerül, ahol újra beállítható (mérve: `FS14`) |
 | A fájlrendszer nem csatolható | Konkrét ok kiírása (a `begin()` csak `ESP_FAIL`-nél formáz, hiányzó partíciónál nem), majd végzetes hibajelzés – lásd fent |
 | Hiányzó konfigurációs fájl | `CONFIG_MISSING` – nem hiba, AP beállító portál |
 | A fájl nem nyitható írásra | `writeConfigValue()` `false`-t ad, a mentés nem történik meg |
