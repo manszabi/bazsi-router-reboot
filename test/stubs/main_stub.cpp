@@ -247,3 +247,19 @@ size_t strlcpy(char* d, const char* s, size_t n) {
   if (n) { size_t c = l >= n ? n - 1 : l; memcpy(d, s, c); d[c] = 0; }
   return l;
 }
+
+// --- Ido (NTP) modell ------------------------------------------------------
+uint32_t g_epochNow = 0;
+int      g_ntpStarts = 0;
+void configTzTime(const char* tz, const char* server) {
+  (void)tz; (void)server;
+  g_ntpStarts++;
+  simLog("configTzTime");
+}
+// A makro miatt a sajat definiciot is ki kell vedeni.
+#undef time
+time_t stub_time(time_t* out) {
+  const time_t t = (time_t)g_epochNow;
+  if (out) *out = t;
+  return t;
+}

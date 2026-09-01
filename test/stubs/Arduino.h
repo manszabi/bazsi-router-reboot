@@ -337,3 +337,20 @@ public:
   uint32_t getMaxAllocHeap();
 };
 extern EspClass ESP;
+
+// --- Ido (NTP) modell ------------------------------------------------------
+// A valodi eszkozon a configTzTime() elinditja az SNTP klienst, es a
+// rendszerora a hatterben all be. A harness ezt egyetlen valtozoval modellezi:
+// g_epochNow = 0 -> nincs szinkron (a time() 1970-et ad), egyebkent ennyi.
+extern uint32_t g_epochNow;
+extern int      g_ntpStarts;
+void configTzTime(const char* tz, const char* server);
+
+// A time() ATIRANYITASA. A hoston a valodi time() a mai datumot adna, es
+// azzal a "nincs meg oraszinkron" ag SOSEM futna le - epp az, amit meg kell
+// merni. A <time.h>-t ITT hozzuk be, es CSAK utana definialjuk a makrot: a
+// sketch kesobbi #include <time.h> sora igy az include guard miatt ures, tehat
+// a makro sosem ir at egy fejlecbeli deklaraciot.
+#include <time.h>
+time_t stub_time(time_t* out);
+#define time(p) stub_time(p)

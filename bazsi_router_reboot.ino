@@ -15,6 +15,7 @@
 // Az esp_timer_get_time()-ot a core is expliciten includeolja (esp32-hal-misc.c),
 // nem hagyatkozik a FreeRTOS fejlecek atteteles behuzasara. Mi sem tesszuk.
 #include "esp_timer.h"
+#include <time.h>
 // A rele labanak rogzitese deep sleep idejere: gpio_hold_en() +
 // gpio_deep_sleep_hold_en(). A C3-on a digitalis padek (GPIO6-21) holdjat csak
 // ez a paros tartja meg alvas alatt (driver/gpio.h, a gpio_hold_en 3. megj.).
@@ -231,6 +232,23 @@ constexpr uint32_t STUCK_BUTTON_CONFIRM_MS = 3000;
 // eszkoz "csak ugy" nem mukodik - allokacios hiba eseten a legtobb konyvtar
 // csendben elbukik, nem panikol. Ezert merunk, kiirunk, es vegso esetben
 // magunktol ujraindulunk, MIELOTT barmi elromlana.
+// --- Valos ido (NTP) -------------------------------------------------------
+//
+// MIERT KELL? A naplo eddig csak uptime belyeget hordozott, ami minden
+// indulaskor nullarol kezd - ket bootolas esemenyei igy nem rendezhetok
+// egymashoz. A LittleFS-re mentett naplo ertelmezesehez viszont epp ez kell:
+// melyik a frissebb, a fajlban levo vagy az RTC-ben levo?
+//
+// A szinkronizalas NEM BLOKKOL: a configTzTime() csak elinditja az SNTP
+// klienst, a valasz a hatterben erkezik. Amig nem erkezett meg, az epoch mezo
+// 0 marad - a naplo attol meg mukodik, csak uptime-ot mutat.
+constexpr char NTP_SERVER[] = "hu.pool.ntp.org";
+// Magyarorszag: CET/CEST, a nyari idoszamitas valtasaival egyutt (POSIX TZ).
+constexpr char NTP_TZ[] = "CET-1CEST,M3.5.0,M10.5.0/3";
+// Ennel korabbi ertek nem lehet valodi szinkron (2025-01-01). A rendszerora
+// szinkron nelkul 1970-bol indul, tehat egy egyszeru also korlat elegendo.
+constexpr uint32_t NTP_MIN_VALID_EPOCH = 1735689600UL;
+
 constexpr uint32_t HEAP_CHECK_INTERVAL_MS = 10 * 1000;        // mintaveteli koz
 constexpr uint32_t HEAP_LOG_INTERVAL_MS   = 30 * 60 * 1000;   // rendszeres sor
 
@@ -449,10 +467,15 @@ enum EventCode : uint8_t {
   EV_HEAP_RESTART = 14  // param: a szabad heap KiB-ban az ujrainditas elott
 };
 
-// Pontosan 8 bájt. A kitöltő mező explicit, hogy a RTC memóriában tárolt
-// elrendezés akkor se változzon, ha a fordító igazítási szabályai eltérnek.
+// Pontosan 12 bájt. A kitöltő mező explicit, hogy a RTC memóriában tárolt
+// elrendezés akkor se változzon, ha a fordító igazítási szabályai eltérnek -
+// és ez most már nem csak az RTC-re igaz: ez a struktúra megy ki bájtról
+// bájtra a LittleFS-re mentett naplófájlba is (lásd saveEventLog()), tehát a
+// méret és a sorrend a FÁJLFORMÁTUM része. Ha valaha változik, a fájl
+// verziószámát (EVFILE_VERSION) is emelni kell.
 struct EventEntry {
   uint32_t uptimeSec;
+  uint32_t epoch;     // valos ido (unix), 0 ha az NTP meg nem szinkronizalt
   uint16_t param;
   uint8_t code;
   uint8_t reserved;
@@ -463,6 +486,36 @@ constexpr uint32_t EVLOG_MAGIC = 0x42415A4CUL;  // "BAZL"
 RTC_NOINIT_ATTR uint32_t rtcEvMagic;
 RTC_NOINIT_ATTR uint32_t rtcEvNext;   // következő írási pozíció (monoton nő)
 RTC_NOINIT_ATTR EventEntry rtcEvents[EVLOG_SIZE];
+
+// --- A naplo mentese LittleFS-re -------------------------------------------
+//
+// MIERT? Az RTC naplo az aramszunetet NEM eli tul - epp azt a hibat nem, ami
+// utan a leginkabb tudni akarnank, mi tortent elotte. Ezert a program a
+// FONTOS pillanatokban kiirja a naplot a fajlrendszerre is: router reset
+// elott, AP modba valtas elott, es az 1 oras alvas elott. Ezek azok a
+// pontok, ahol vagy hosszabb ido kovetkezik, vagy az eszkoz beavatkozik -
+// mindketto olyan, amit egy kesobbi vizsgalat latni akar.
+//
+// A fajl a teljes korpuffer pillanatkepe, tehat mindig "az utolso 32 esemeny,
+// ahogy a legutobbi fontos pillanatban allt".
+constexpr char evLogPath[] = "/evlog.bin";
+constexpr uint32_t EVFILE_MAGIC = 0x42415A46UL;   // "BAZF"
+constexpr uint16_t EVFILE_VERSION = 1;
+
+// A fajl fejlece. Fix meretu, es a struktura elrendezese a formatum resze.
+struct EvFileHeader {
+  uint32_t magic;
+  uint16_t version;
+  uint16_t count;        // hany bejegyzes kovetkezik (0..EVLOG_SIZE)
+  uint32_t evNextAtSave; // az rtcEvNext erteke a mentes pillanataban
+  uint32_t savedEpoch;   // mikor mentettuk (0 ha nem volt NTP)
+  uint32_t savedUptime;  // uptime a mentes pillanataban
+};
+
+// Az rtcEvNext erteke a legutobbi SIKERES mentesnel. Ket dolgot ad:
+//  - nem irunk feleslegesen (ha azota nem tortent esemeny, nincs mit menteni),
+//  - es igy a flash kopasa a tenyleges esemenyekhez igazodik.
+RTC_NOINIT_ATTR uint32_t rtcSavedEvNext;
 
 // --- A heap miatti ujraindulas atvitele ------------------------------------
 //
@@ -533,6 +586,11 @@ bool stuckCycleAlreadyLogged(uint16_t which);
 bool lastEventWas(uint8_t code);
 int pressedButtonNow();
 void checkHeap(uint32_t now);
+bool saveEventLog(const char* reason);
+bool loadEventLogHeader(EvFileHeader& fej);
+bool loadEventLogEntries(const EvFileHeader& fej, EventEntry* ki);
+uint32_t nowEpoch();
+void startNtp();
 void initHeapState();
 void applyHeapCarry();
 bool initWiFi();
@@ -557,10 +615,15 @@ void logEvent(EventCode code, uint16_t param) {
   if (rtcEvMagic != EVLOG_MAGIC) {
     rtcEvMagic = EVLOG_MAGIC;
     rtcEvNext = 0;
+    rtcSavedEvNext = 0;
     memset(rtcEvents, 0, sizeof(rtcEvents));
   }
   EventEntry& e = rtcEvents[rtcEvNext % EVLOG_SIZE];
   e.uptimeSec = (uint32_t)(esp_timer_get_time() / 1000000);
+  // Ha az NTP mar szinkronizalt, a valos idot is eltesszuk. Enelkul csak
+  // uptime van, ami minden indulaskor nullarol kezd - ket bootolas esemenyei
+  // igy nem rendezhetok egymashoz. A time() nem blokkol es nem allokal.
+  e.epoch = nowEpoch();
   e.code = (uint8_t)code;
   e.param = param;
   e.reserved = 0;
@@ -892,6 +955,228 @@ void enterFatal(const char* reason) {
 // megakad, az újraindítgatás önmagában nem megoldás - inkább jelezzünk.
 // A heap allapot RTC blokkjanak felelesztese. Ugyanaz a minta, mint a
 // watchdog szamlalonal: bekapcsolas utan a NOINIT terulet tartalma szemet.
+// A rendszerora aktualis erteke, ha az NTP mar szinkronizalt - kulonben 0.
+// Nem blokkol, nem allokal, es szinkron nelkul is biztonsagos.
+uint32_t nowEpoch() {
+  const time_t t = time(nullptr);
+  if (t < (time_t)NTP_MIN_VALID_EPOCH) {
+    return 0;
+  }
+  return (uint32_t)t;
+}
+
+// Az SNTP kliens elinditasa. CSAK elinditja: a valasz a hatterben erkezik, a
+// hivas nem var ra. Tobbszor is hivhato (ujracsatlakozasnal), a kliens
+// ujraindul. A rendszeroraval egyutt a nyari idoszamitas kezelese is beall.
+//
+// FONTOS: a valos ido a DEEP SLEEPET TULELI. Az esp_timer (es igy a millis())
+// ebredeskor nullarol indul, a gettimeofday() alapu rendszerora viszont az RTC
+// orabol jon, tehat egy 1 oras alvas utan is jo idot mutat - epp ezert
+// hasznalhato a naplo bejegyzesek rendezesere bootolasokon at.
+void startNtp() {
+  configTzTime(NTP_TZ, NTP_SERVER);
+  printUptime();
+  Serial.print("NTP inditva: ");
+  Serial.println(NTP_SERVER);
+}
+
+// Egy idopont ember altal olvashato alakja. Ha nincs valos ido, a hivo
+// dontse el, mit ir helyette - ez a fuggveny csak akkor ad true-t, ha tenyleg
+// van mit formazni.
+bool formatEpoch(uint32_t epoch, char* out, size_t outSize) {
+  if (epoch < NTP_MIN_VALID_EPOCH || outSize < 20) {
+    return false;
+  }
+  const time_t t = (time_t)epoch;
+  struct tm tmv;
+  if (localtime_r(&t, &tmv) == nullptr) {
+    return false;
+  }
+  strftime(out, outSize, "%Y-%m-%d %H:%M:%S", &tmv);
+  return true;
+}
+
+// A napló kiírása a fájlrendszerre.
+//
+// A ZAR. A muvelet ATOMIKUSAN szerzi meg a konfiguraciós zárat, ugyanazt,
+// amit a webes mentés és a wifireset gomb használ. Amíg a zár a miénk:
+//   - nem alszik el az eszköz és nem indul újra (a leállási út megvárja),
+//   - a gombok nem szólnak közbe,
+//   - és másik fájlírás sem indulhat.
+// Ha a zár épp foglalt, NEM várunk rá: a mentés kimarad. Ez helyes döntés -
+// a napló diagnosztika, nem szabad miatta blokkolni egy fontos műveletet
+// (router reset, alvás), és a következő fontos pillanatban úgyis próbáljuk.
+//
+// A zárat a végén FELOLDJUK - eltérően a leállási úttól, ami már nem tér vissza.
+bool saveEventLog(const char* reason) {
+  if (!fsReady) {
+    return false;   // nincs hova irni; ez nem hiba, csak nincs mentes
+  }
+
+  // Nincs mit menteni? Akkor a flasht sem koptatjuk. Ez nem optimalizacio,
+  // hanem a kopas es a tenyleges esemenyek osszehangolasa.
+  uint32_t evTotal;
+  portENTER_CRITICAL(&evLogMux);
+  evTotal = (rtcEvMagic == EVLOG_MAGIC) ? rtcEvNext : 0;
+  portEXIT_CRITICAL(&evLogMux);
+  if (evTotal == 0 || evTotal == rtcSavedEvNext) {
+    return false;
+  }
+
+  if (!beginConfigWrite()) {
+    printUptime();
+    Serial.println("A naplo mentese kimarad: eppen mas fajliras folyik.");
+    return false;
+  }
+
+  // Pillanatkep a mux alatt, ugyanugy, mint a /log oldalon: a naploba az
+  // async_tcp task is ir, tehat a pozicio es a tartalom egyutt nem olvashato
+  // atomian.
+  EvFileHeader fej;
+  EventEntry masolat[EVLOG_SIZE];
+  portENTER_CRITICAL(&evLogMux);
+  fej.evNextAtSave = rtcEvNext;
+  memcpy(masolat, rtcEvents, sizeof(masolat));
+  portEXIT_CRITICAL(&evLogMux);
+
+  fej.magic = EVFILE_MAGIC;
+  fej.version = EVFILE_VERSION;
+  fej.count = (uint16_t)(fej.evNextAtSave < EVLOG_SIZE ? fej.evNextAtSave : EVLOG_SIZE);
+  fej.savedEpoch = nowEpoch();
+  fej.savedUptime = (uint32_t)(esp_timer_get_time() / 1000000);
+
+  // A bejegyzeseket a LEGREGEBBITOL a legujabbig irjuk ki, kiegyenesitve -
+  // igy az olvasonak nem kell tudnia, hol tartott a korpuffer. Ehhez NEM
+  // masolunk egy ujabb 384 bajtos verempuffert: a korpuffer legfeljebb ket
+  // OSSZEFUGGO szakaszra bomlik (a kezdoponttol a tomb vegeig, majd a tomb
+  // elejetol), es ezt a kettot irjuk ki egymas utan. A loop task verme igy
+  // 384 bajttal kevesebbet visz.
+  const uint32_t elso = fej.evNextAtSave - fej.count;
+  const uint16_t kezdet = (uint16_t)(elso % EVLOG_SIZE);
+  const uint16_t elsoDb = (uint16_t)((kezdet + fej.count <= EVLOG_SIZE)
+                                     ? fej.count : (EVLOG_SIZE - kezdet));
+  const uint16_t masodikDb = (uint16_t)(fej.count - elsoDb);
+
+  printUptime();
+  Serial.print("Naplo mentese a fajlrendszerre (");
+  Serial.print(reason);
+  Serial.println(")...");
+
+  bool ok = false;
+  File f = LittleFS.open(evLogPath, FILE_WRITE);
+  if (!f) {
+    Serial.println("- a naplofajl nem nyithato irasra");
+  } else {
+    const size_t fejBytes = f.write((const uint8_t*)&fej, sizeof(fej));
+    size_t adatBytes = 0;
+    if (elsoDb) {
+      adatBytes += f.write((const uint8_t*)&masolat[kezdet],
+                           sizeof(EventEntry) * elsoDb);
+    }
+    if (masodikDb) {
+      adatBytes += f.write((const uint8_t*)&masolat[0],
+                           sizeof(EventEntry) * masodikDb);
+    }
+    f.flush();
+    f.close();
+    const size_t vart = sizeof(fej) + sizeof(EventEntry) * fej.count;
+    if (fejBytes + adatBytes != vart) {
+      Serial.print("- rovid iras: ");
+      Serial.print((unsigned)(fejBytes + adatBytes));
+      Serial.print(" / ");
+      Serial.print((unsigned)vart);
+      Serial.println(" bajt (megtelt a fajlrendszer?)");
+    } else {
+      // VISSZAOLVASAS. Ugyanaz az elv, mint a writeConfigValue()-nal: a siker
+      // nem az, hogy az iras nem panaszkodott, hanem hogy a tartalom tenyleg
+      // ott van. Csak a fejlecet olvassuk vissza - ha az ep, a fajlmeret
+      // pedig egyezik, a tartalom is kiirodott.
+      File v = LittleFS.open(evLogPath, "r");
+      if (!v) {
+        Serial.println("- verify: a fajl nem nyithato olvasasra");
+      } else {
+        EvFileHeader vissza;
+        const size_t olvasott = v.read((uint8_t*)&vissza, sizeof(vissza));
+        const size_t meret = v.size();
+        v.close();
+        if (olvasott != sizeof(vissza) || meret != vart
+            || vissza.magic != EVFILE_MAGIC || vissza.count != fej.count
+            || vissza.evNextAtSave != fej.evNextAtSave) {
+          Serial.println("- verify FAILED: a visszaolvasott fejlec nem egyezik");
+        } else {
+          ok = true;
+        }
+      }
+    }
+  }
+
+  if (ok) {
+    rtcSavedEvNext = fej.evNextAtSave;
+    Serial.print("- naplo mentve, ");
+    Serial.print((unsigned)fej.count);
+    Serial.println(" bejegyzes");
+  } else {
+    // A SIKERTELENSEG NEM VEGZETES. A naplo diagnosztika: ha nem sikerul
+    // kiirni, az RTC-ben tovabbra is ott van, es a program dolga (router
+    // reset, alvas) fontosabb. Csak szolunk rola.
+    Serial.println("- a naplo mentese NEM sikerult, az RTC naplo ettol meg el");
+  }
+  savingConfig = false;   // a zar feloldasa - itt meg VISSZATERUNK
+  return ok;
+}
+
+// A mentett naplo FEJLECENEK beolvasasa es ellenorzese. Igaz, ha a fajl
+// letezik, ep, es van benne legalabb egy bejegyzes. Minden mas esetben (nincs
+// fajl, ures fajl, rossz magic, csonka tartalom, ismeretlen verzio, a
+// fejlecben igert darabszamnal rovidebb fajl) hamis - a hivo ilyenkor az RTC
+// naplot hasznalja, kulon hibauzenet nelkul.
+//
+// MIERT KULON A FEJLEC ES A TARTALOM? Az async_tcp task verme veges, es 32
+// bejegyzes mar 384 bajt. Ha itt is puffert kernenk, a /log kezelo EGYSZERRE
+// ket ilyet tartana (az RTC pillanatkepet es a fajlet). Igy viszont eloszb
+// eldontjuk a fejlecbol, melyik forras kell - es csak azt toltjuk be, EGY
+// pufferbe.
+bool loadEventLogHeader(EvFileHeader& fej) {
+  if (!fsReady || !LittleFS.exists(evLogPath)) {
+    return false;
+  }
+  File f = LittleFS.open(evLogPath, "r");
+  if (!f) {
+    return false;
+  }
+  const size_t meret = f.size();
+  if (meret < sizeof(EvFileHeader)
+      || f.read((uint8_t*)&fej, sizeof(fej)) != sizeof(fej)) {
+    f.close();   // ures vagy csonka fajl
+    return false;
+  }
+  f.close();
+  if (fej.magic != EVFILE_MAGIC || fej.version != EVFILE_VERSION
+      || fej.count == 0 || fej.count > EVLOG_SIZE) {
+    return false;
+  }
+  // A fejlec tobbet igerhet, mint amennyi tenyleg ott van (megtelt fajlrendszer,
+  // felbeszakadt iras). Ezt MOST ellenorizzuk, hogy a betoltes mar biztos legyen.
+  return meret >= sizeof(EvFileHeader) + sizeof(EventEntry) * fej.count;
+}
+
+// A bejegyzesek betoltese - csak akkor, ha a fejlec mar rendben volt.
+bool loadEventLogEntries(const EvFileHeader& fej, EventEntry* ki) {
+  File f = LittleFS.open(evLogPath, "r");
+  if (!f) {
+    return false;
+  }
+  EvFileHeader eldobando;    // a fejlecet atugorjuk (a stream nem kereshet)
+  if (f.read((uint8_t*)&eldobando, sizeof(eldobando)) != sizeof(eldobando)) {
+    f.close();
+    return false;
+  }
+  const size_t kell = sizeof(EventEntry) * fej.count;
+  const size_t olvasott = f.read((uint8_t*)ki, kell);
+  f.close();
+  return olvasott == kell;
+}
+
 void initHeapState() {
   if (rtcHeapMagic != HEAP_MAGIC) {
     rtcHeapMagic = HEAP_MAGIC;
@@ -1647,6 +1932,9 @@ bool initWiFi() {
   Serial.print("Signal strength (RSSI): ");
   Serial.print(WiFi.RSSI());
   Serial.println(" dBm");
+  // Most van halozat: elinditjuk az oraszinkront. Nem varunk ra - a valasz a
+  // hatterben erkezik, addig a naplo epoch mezoje 0 marad.
+  startNtp();
   return true;
 }
 
@@ -1657,6 +1945,12 @@ bool reset_device() {
       internetFailSleep();
     }
     logEvent(EV_ROUTER_RESET, (uint16_t)testState.resetEvents);
+    // A naplo kiirasa a fajlrendszerre, MIELOTT a relehez nyulnank. Ha a
+    // router ujrainditasa kozben aramszunet jon (nem ritka: epp azert
+    // piszkaljuk a halozatot, mert valami nem stimmel), az RTC naplo elveszne
+    // - a fajl viszont megmarad. A mentes NEM blokkolja a resetet: ha nem
+    // sikerul, csak szolunk rola.
+    saveEventLog("router reset elott");
     Serial.println("Router resetting");
     Serial.print("Powering OFF the router. Instance = ");
     Serial.println(testState.resetEvents);
@@ -1780,6 +2074,9 @@ void internetFailSleep() {
   Serial.print((unsigned long)(SLEEP_DURATION_US / 60000000ULL));
   Serial.println(" percre, utana automatikus ujraprobalkozas.");
   logEvent(EV_SLEEP, 2);
+  // Egy ora alvas kovetkezik. Ha kozben aramszunet lesz, az RTC naplo
+  // elveszik - ezert a fajlba is kiirjuk, mielott elalszunk.
+  saveEventLog("tartos internetkieses, alvas elott");
   enterDeepSleep(SLEEP_DURATION_US);
 }
 
@@ -1820,6 +2117,7 @@ void retrySleep() {
   Serial.println(MAX_RETRY_ROUNDS);
   Serial.println("Alvas 1 orara, utana automatikus ujraprobalkozas.");
   logEvent(EV_SLEEP, 1);
+  saveEventLog("ujraprobalkozasi alvas elott");
   enterDeepSleep(SLEEP_DURATION_US);
 }
 
@@ -2403,6 +2701,12 @@ void startConfigPortal() {
   if (deviceMode == MODE_CONFIG) {
     return;  // már fut
   }
+  // Naplomentes MEG a modvaltas elott. Az AP mod azt jelenti, hogy az eszkoz
+  // feladta a csatlakozast - epp ezt az elozmenyt akarja latni az, aki
+  // odamegy es megnyitja a portalt. A mentes ugyanabban a pillanatban meg
+  // MODE_MONITOR-ban tortenik, tehat a webszerver meg nem fut: a fajlirasnak
+  // nincs versenytarsa a masik taskbol.
+  saveEventLog("AP modba valtas elott");
   deviceMode = MODE_CONFIG;
   touchApDeadline();
   // Jelzés: a Wi-Fi LED villog (a villogtatást a loop() végzi), a státusz LED
@@ -2473,7 +2777,11 @@ void startConfigPortal() {
 
     // Pillanatkép a naplóról a mux alatt: az író (logEvent) a loop taskból
     // fut, ez a kezelő az async_tcp taskból - enélkül félig kiírt bejegyzést
-    // is olvashatnánk. A másolat 264 bájt, a kritikus szakasz egy memcpy.
+    // is olvashatnánk. A kritikus szakasz egy memcpy.
+    //
+    // EGYETLEN puffert hasznalunk mindkét forráshoz (RTC és fájl): az
+    // async_tcp task veremje véges, és 32 bejegyzés már 384 bájt. Előbb
+    // eldöntjük, melyik forrás kell, és csak azt töltjük be.
     uint32_t evTotal;
     EventEntry evCopy[EVLOG_SIZE];
     portENTER_CRITICAL(&evLogMux);
@@ -2481,16 +2789,102 @@ void startConfigPortal() {
     memcpy(evCopy, rtcEvents, sizeof(evCopy));
     portEXIT_CRITICAL(&evLogMux);
 
+    // MELYIK A FRISSEBB? Az RTC naplo vagy a fajlba mentett?
+    //
+    // A fajl mindig az RTC naplo egy KORABBI pillanatkepe. Ebbol kovetkezik a
+    // szabaly:
+    //  - Ha az RTC naplo TULELTE a mentes ota eltelt idot (nem volt
+    //    aramszunet), akkor bovebb is nala: mindent tartalmaz, ami a fajlban
+    //    van, PLUSZ ami azota tortent. Ilyenkor az RTC nyer.
+    //  - Ha az RTC naplot torolte egy aramszunet, a szamlalo nullarol indult,
+    //    tehat a fajl tobb elozmenyt orzott meg. Ilyenkor a fajl nyer - es
+    //    epp ez a mentes ertelme.
+    //  - Ha viszont az RTC ota mar 32 UJ esemeny keletkezett, akkor a
+    //    korpuffer teljesen tele van friss adattal, ami idoben mindenkeppen
+    //    ujabb a fajlnal.
+    //  - Ha MINDKETTONEK van valos ideje (NTP), az dont: a nagyobb idobelyeg
+    //    nyer. Ez a legpontosabb valasz, ezert ez az elso szabaly.
+    //
+    // Ha epp fajliras folyik a masik taskbol, a fajlt NEM olvassuk: az RTC
+    // naplo ilyenkor is ep, es ez az egyszeru kizaras eleg.
+    // A dontes CSAK a fejlecbol tortenik, es a bejegyzeseket utana toltjuk be -
+    // igy egyszerre csak EGY 384 bajtos puffer all a vermen.
+    //
+    // Ha epp fajliras folyik a masik taskbol, a fajlt NEM olvassuk. Ez a
+    // kizaras nem atomi (az iras a kerdes utan is elindulhat), de nem is kell
+    // annak lennie: egy felig kiirt fajlon a fejlec ellenorzese bukik, es a
+    // lap ugyanoda jut - az RTC naplohoz.
+    EvFileHeader fej;
+    bool vanFajl = false;
+    if (!savingConfig && loadEventLogHeader(fej)) {
+      bool rtcNyer;
+      if (evTotal == 0) {
+        rtcNyer = false;                       // nincs mit mutatni az RTC-bol
+      } else {
+        // A fajl sajat idobelyege (mikor mentettuk) a helyes osszehasonlitasi
+        // alap: pontosan azt mondja meg, mikori a tartalma.
+        const uint32_t rtcEpoch = evCopy[(evTotal - 1) % EVLOG_SIZE].epoch;
+        if (rtcEpoch >= NTP_MIN_VALID_EPOCH
+            && fej.savedEpoch >= NTP_MIN_VALID_EPOCH) {
+          rtcNyer = (rtcEpoch >= fej.savedEpoch);   // valos ido dont
+        } else {
+          rtcNyer = (evTotal >= fej.evNextAtSave) || (evTotal >= EVLOG_SIZE);
+        }
+      }
+      if (!rtcNyer) {
+        if (loadEventLogEntries(fej, evCopy)) {
+          // A fajl bejegyzesei mar KIEGYENESITVE vannak (a legregebbitol a
+          // legujabbig), es a puffer elejen allnak; az evTotal a darabszam
+          // lesz, igy a lenti kiiro ciklus mindket forrasra ugyanaz.
+          vanFajl = true;
+          evTotal = fej.count;
+        } else {
+          // A BETOLTES FELUTON BUKOTT. Mivel EGY puffert hasznalunk, az
+          // olvasas addigra mar felulirhatta az RTC pillanatkep elejet -
+          // a puffer most fel fajl, fel RTC adat lenne. Ezert nem eleg
+          // "visszalepni" az RTC-re: UJRA kell venni a pillanatkepet.
+          portENTER_CRITICAL(&evLogMux);
+          evTotal = (rtcEvMagic == EVLOG_MAGIC) ? rtcEvNext : 0;
+          memcpy(evCopy, rtcEvents, sizeof(evCopy));
+          portEXIT_CRITICAL(&evLogMux);
+        }
+      }
+    }
+
     if (evTotal == 0) {
+      // Sem az RTC-ben, sem a fajlban nincs semmi (vagy a fajl nem letezik,
+      // ures, csonka). Ez nem hiba: egyszeruen nincs mit mutatni.
       r->print(F("<p>Nincs rogzitett esemeny.</p>"));
     } else {
-      r->print(F("<table border=1 cellpadding=4><tr><th>Uptime</th>"
+      if (vanFajl) {
+        char mikor[24];
+        r->print(F("<p><b>Forras:</b> a fajlrendszerre mentett naplo"));
+        if (formatEpoch(fej.savedEpoch, mikor, sizeof(mikor))) {
+          r->printf(" (mentve: %s)", mikor);
+        }
+        r->print(F(" - az RTC naplo ennel regebbi vagy ures "
+                   "(pl. aramszunet torolte).</p>"));
+      } else {
+        r->print(F("<p><b>Forras:</b> az RTC memoriaban levo naplo "
+                   "(ez a frissebb).</p>"));
+      }
+      r->print(F("<table border=1 cellpadding=4><tr><th>Ido</th><th>Uptime</th>"
                  "<th>Esemeny</th><th>Param</th></tr>"));
-      // A legregebbi meg meglevo bejegyzestol indulunk
+      // A legregebbi meg meglevo bejegyzestol indulunk. Fajlbol olvasva a
+      // bejegyzesek mar sorban allnak, tehat a "% EVLOG_SIZE" ott is helyes.
       const uint32_t shown = evTotal < EVLOG_SIZE ? evTotal : EVLOG_SIZE;
       for (uint32_t i = evTotal - shown; i < evTotal; i++) {
         const EventEntry& e = evCopy[i % EVLOG_SIZE];
-        r->printf("<tr><td>%u:%02u:%02u</td><td>%s</td><td>%u</td></tr>",
+        char mikor[24];
+        r->print(F("<tr><td>"));
+        if (formatEpoch(e.epoch, mikor, sizeof(mikor))) {
+          r->print(mikor);
+        } else {
+          // Nem volt (meg) oraszinkron ennel a bejegyzesnel. Nem hiba - a
+          // uptime oszlop ilyenkor is elmond mindent.
+          r->print(F("-"));
+        }
+        r->printf("</td><td>%u:%02u:%02u</td><td>%s</td><td>%u</td></tr>",
                   (unsigned)(e.uptimeSec / 3600), (unsigned)((e.uptimeSec % 3600) / 60),
                   (unsigned)(e.uptimeSec % 60), eventName(e.code), (unsigned)e.param);
       }

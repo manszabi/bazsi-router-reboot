@@ -29,6 +29,7 @@ public:
   void close() {}
   size_t size() { return data_.size(); }
   size_t read(uint8_t* b, size_t n) {
+    if (pos_ >= data_.size()) return 0;      // tullepett olvasasi pozicio
     size_t c = n < data_.size() - pos_ ? n : data_.size() - pos_;
     if (g_fsShortRead && c > 0) c--;      // sérült FS: rövidebb olvasás
     memcpy(b, data_.data() + pos_, c); pos_ += c; return c;
@@ -52,6 +53,27 @@ public:
     g_fs[path_] = want;
     return want.size();
   }
+  // BINARIS iras. A naplo mentese (saveEventLog) nem szoveget ir, hanem a
+  // strukturak nyers bajtjait - ugyanazt a kapacitas- es nema-hiba modellt
+  // kell kovetnie, mint a print()-nek, kulonben a hibainjektalas nem hatna ra.
+  size_t write(const uint8_t* b, size_t n) {
+    if (!ok_) return 0;
+    std::string want(reinterpret_cast<const char*>(b), n);
+    if (g_fsCapacity) {
+      size_t other = 0;
+      for (auto& kv : g_fs) if (kv.first != path_) other += kv.second.size();
+      const size_t mar = g_fs[path_].size();
+      if (other + mar + want.size() > g_fsCapacity) {
+        size_t room = g_fsCapacity > other + mar ? g_fsCapacity - other - mar : 0;
+        want = want.substr(0, room);
+        g_fs[path_] += want;
+        return want.size();
+      }
+    }
+    if (g_fsSilentWriteFail) return want.size();   // "sikeres" iras, ures fajl
+    g_fs[path_] += want;
+    return n;
+  }
   void flush() {}
 private:
   std::string path_, data_; size_t pos_ = 0; bool ok_;
@@ -62,7 +84,12 @@ class FS {
 public:
   File open(const char* p) { return File(p, g_fsReadable && g_fs.count(p) > 0); }
   File open(const char* p, const char* mode) {
-    (void)mode;
+    // OLVASASI mod: NEM csonkol. Korabban a stub minden mode-ra csonkolt,
+    // mert a sketch csak FILE_WRITE-tal hivta; a naplo visszaolvasasa viszont
+    // "r"-rel nyit, es az igy toroltte tette volna a friss mentest.
+    if (mode && mode[0] == 'r') {
+      return File(p, g_fsReadable && g_fs.count(p) > 0);
+    }
     if (!g_fsWritable) return File();   // nem nyitható írásra
     g_fs[p] = "";                        // FILE_WRITE csonkol
     return File(p, true);

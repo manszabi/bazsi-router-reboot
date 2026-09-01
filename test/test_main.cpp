@@ -46,7 +46,12 @@ extern uint32_t rtcRetryRounds;
 extern uint32_t rtcEvMagic;
 extern uint32_t rtcEvNext;
 enum EventCode : uint8_t;
-struct EventEntry { uint32_t uptimeSec; uint16_t param; uint8_t code; uint8_t pad; };
+// FIGYELEM: ennek BAJTROL BAJTRA egyeznie kell a sketch definiciojaval - nem
+// csak az RTC memoria elrendezese miatt, hanem mert ez a struktura megy ki a
+// LittleFS-re mentett naplofajlba is, tehat a FAJLFORMATUM resze.
+struct EventEntry { uint32_t uptimeSec; uint32_t epoch; uint16_t param;
+                    uint8_t code; uint8_t pad; };
+static_assert(sizeof(EventEntry) == 12, "az EventEntry merete a fajlformatum resze");
 extern EventEntry rtcEvents[];
 // A sketch allapot-structjai. Sima globalisok, tehat egy valodi ujraindulas
 // (a deep sleepbol ebredes is) nullazza oket - a coldBoot()-nak ugyanezt kell
@@ -77,6 +82,9 @@ void logEvent(EventCode code, uint16_t param);
 bool lastEventWas(uint8_t code);
 bool stuckCycleAlreadyLogged(uint16_t which);
 void lockConfigBeforeShutdown();
+extern uint32_t g_epochNow;
+extern int g_ntpStarts;
+void startConfigPortal();
 bool beginConfigWrite();
 void checkHeap(uint32_t now);
 extern uint32_t heapCheckLast;
@@ -2367,9 +2375,16 @@ static void scL6() {
 
 static void scL7() {
   // Ures naplo: a /log oldal ne dobjon tablat fejlec nelkul.
+  //
+  // A KOVETELMENY BOVULT. Amiota a naplo a fajlrendszerre is kimegy, ket
+  // forras van, es a lap csak akkor nema, ha MINDKETTO ures. Ez pontosan az a
+  // viselkedes, amit el is varunk: ha egyik sem letezik vagy mindketto ures,
+  // egyszeruen nincs naplo az AP mod weboldalan - nem hibauzenet, nem ures
+  // tablazat.
   coldBoot(false, "", "", "", "");
   setup();
   rtcEvMagic = 0; rtcEvNext = 0;      // a setup() BOOT sora utan uritjuk
+  g_fs.erase("/evlog.bin");           // ...es a mentett fajlt is
   AsyncWebServerRequest req;
   g_handlers["/log#1"](&req);
   CHECK(req._body.find("Nincs rogzitett esemeny") != std::string::npos,
@@ -3837,8 +3852,17 @@ static void scLOG5() {
   CHECK(rtcEvNext > 3, "tenylegesen naplóztunk esemenyeket");
   CHECK(g_criticalMaxDepth == 1,
         "a kritikus szakasz sosem agyazodik egymasba (max melyseg 1)");
-  CHECK(g_fs.size() == fsElotte,
-        "a naplozas egyetlen fajlt sem hozott letre");
+  // A logEvent() maga tovabbra sem nyul a fajlrendszerhez - a naplo RAM-beli
+  // korpuffer. A LittleFS-re valo mentes KULON muvelet (saveEventLog), amit
+  // csak a fontos pillanatok inditanak, es aminek sajat zarja van; ezt az
+  // NV1-NV7 meri. Itt tehat legfeljebb EGY uj fajl jelenhet meg (a naplofajl),
+  // es semmi mas.
+  {
+    size_t ujak = 0;
+    for (auto& kv : g_fs) if (kv.first == "/evlog.bin") ujak++;
+    CHECK(g_fs.size() <= fsElotte + ujak,
+          "a naplozas a naplofajlon kivul egyetlen fajlt sem hozott letre");
+  }
   // A naplo tullelte volna a fajlrendszer teljes elvesztet is:
   g_fs.clear();
   const uint32_t elotte = rtcEvNext;
@@ -3877,6 +3901,7 @@ static void scLOG1() {
   //
   // URES naplóval merunk: itt a BOOT sor jogosan lenne benne a tablazatban.
   rtcEvMagic = 0; rtcEvNext = 0;
+  g_fs.erase("/evlog.bin");    // a mentett naplo is, kulonben ONNAN jonne a sor
   AsyncWebServerRequest ures; g_handlers["/log#1"](&ures);
   CHECK(ures._body.find("Param jelentese") != std::string::npos,
         "a jelmagyarazat ures naplónal is ott van");
@@ -3918,19 +3943,274 @@ static void scLOG3() {
   CHECK(b.find("</table>") != std::string::npos, "a tabla rendesen lezarul");
 }
 
-// --- Heap felugyelet -------------------------------------------------------
-
-// A sketch heap-allapotanak elerese a tesztekbol.
-extern uint32_t rtcHeapMagic;
-extern uint32_t rtcHeapRestarts;
-extern uint8_t  rtcCarryResetEvents;
-
 // Monitor uzembe vitel: lefuttatja a firstStartot egeszseges halozattal.
 static void monitorUzembe() {
   g_httpBody = "Microsoft Connect Test";
   int guard = 0;
   while (uiFlags.firstStart && ++guard < 2000000) loop();
 }
+
+// --- A naplo mentese a fajlrendszerre --------------------------------------
+
+extern uint32_t rtcSavedEvNext;
+bool saveEventLog(const char* reason);
+
+// A mentett naplofajl fejleceben levo darabszam - a nyers bajtokbol.
+static uint16_t fajlCount() {
+  auto it = g_fs.find("/evlog.bin");
+  if (it == g_fs.end() || it->second.size() < 16) return 0;
+  uint16_t c;
+  memcpy(&c, it->second.data() + 6, sizeof(c));
+  return c;
+}
+
+static void scNV1() {
+  // MIKOR MENT KI A NAPLO? Harom fontos pillanatban: router reset elott, AP
+  // modba valtas elott, es az 1 oras alvas elott. Mind a harom olyan, ahol
+  // vagy hosszabb ido kovetkezik, vagy az eszkoz beavatkozik - es mindketto
+  // olyan, amit egy kesobbi vizsgalat latni akar. Kozos bennuk, hogy utanuk
+  // egy aramszunet konnyen elviheti az RTC naplot.
+
+  // (a) AP modba valtas elott
+  {
+    coldBoot(false, "", "", "", "");        // nincs SSID -> AP mod
+    setup();
+    CHECK(deviceMode == (DeviceMode)1, "AP modba valtottunk");
+    CHECK(g_fs.count("/evlog.bin") == 1, "es a naplo kiment a fajlrendszerre");
+    CHECK(fajlCount() > 0, "van benne bejegyzes");
+  }
+
+  // (b) router reset elott
+  {
+    coldBoot(true, "TestNet", "pw", "", "");
+    g_httpBody = "Rossz"; pingSim.ok = false;   // minden teszt bukik
+    setup();
+    g_fs.erase("/evlog.bin");
+    int guard = 0;
+    try {
+      while (g_fs.count("/evlog.bin") == 0 && ++guard < 300000) loop();
+    } catch (DeepSleepSignal&) {}
+    CHECK(g_fs.count("/evlog.bin") == 1, "a router reset elott is kiment");
+    CHECK(serialIndex("Naplo mentese") < serialIndex("Router resetting"),
+          "es tenyleg a rele kapcsolasa ELOTT");
+  }
+
+  // (c) az 1 oras alvas elott
+  {
+    coldBoot(true, "TestNet", "pw", "", "");
+    g_httpBody = "Rossz"; pingSim.ok = false;
+    setup();
+    int guard = 0;
+    bool slept = false;
+    try { while (!slept && ++guard < 900000) loop(); }
+    catch (DeepSleepSignal&) { slept = true; }
+    CHECK(slept, "eljutottunk az alvasig");
+    CHECK(serialHas("alvas elott"), "az alvas elott is mentettunk");
+    CHECK(logIndex("Naplo mentese") < logIndex("DEEP_SLEEP")
+          || serialIndex("alvas elott") >= 0, "a mentes az elalvas elott tortent");
+  }
+}
+
+static void scNV2() {
+  // AZ IRAS SIKERESSEGET FIGYELJUK. Nem eleg, hogy az iras nem panaszkodott:
+  // vissza is olvassuk a fejlecet. Ugyanaz az elv, mint a writeConfigValue()
+  // eseteben - a "nema irasi hiba" (a fajlrendszer sikert jelent, de a
+  // tartalom nem kerul ki) csak igy deriil ki.
+  coldBoot(false, "", "", "", "");
+  g_fsSilentWriteFail = true;             // az iras "sikeres", a fajl ures
+  setup();
+  CHECK(serialHas("verify FAILED") || serialHas("NEM sikerult"),
+        "a nema irasi hibat eszrevesszuk");
+  CHECK(rtcSavedEvNext == 0, "es NEM jegyezzuk be sikeres mentesnek");
+
+  // ...es a sikertelenseg NEM vegzetes: a naplo diagnosztika, a program dolga
+  // fontosabb. Az RTC naplo ettol meg el.
+  CHECK(deviceMode == (DeviceMode)1, "a mukodes zavartalanul folytatodik");
+  CHECK(rtcEvNext > 0, "es az RTC naplo tovabbra is ep");
+}
+
+static void scNV3() {
+  // A ZAR. A mentes ATOMIKUSAN szerzi meg a konfiguracios zarat - ugyanazt,
+  // amit a webes mentes es a wifireset gomb hasznal. Ket dolgot mer ez:
+  //  - ha a zar FOGLALT, a mentes kimarad (nem var ra, nem blokkol),
+  //  - es a mentes UTAN a zar fel is szabadul (elteroen a leallasi uttol,
+  //    ami mar nem ter vissza).
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  monitorUzembe();
+  g_fs.erase("/evlog.bin");
+
+  savingConfig = true;                    // valaki mas eppen ir
+  const bool ok = saveEventLog("teszt");
+  CHECK(!ok, "foglalt zarnal a mentes kimarad");
+  CHECK(g_fs.count("/evlog.bin") == 0, "es tenyleg nem is irt semmit");
+  CHECK(savingConfig, "a mas altal tartott zarat nem engedte el");
+  CHECK(serialHas("kimarad"), "es meg is mondja, miert");
+
+  savingConfig = false;
+  const bool ok2 = saveEventLog("teszt");
+  CHECK(ok2, "szabad zarnal viszont lefut");
+  CHECK(!savingConfig, "es a mentes UTAN feloldja a zarat");
+}
+
+static void scNV4() {
+  // NINCS KOZBEN ALVAS, UJRAINDULAS VAGY MASIK IRAS. Ezt nem kulon kod
+  // biztositja, hanem maga a zar: amig a savingConfig a miénk, a leallasi ut
+  // megvarja (lockConfigBeforeShutdown), a gombok kimaradnak, es masik iras
+  // sem indulhat. A meres ezt a KOVETKEZMENYT rogziti.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  monitorUzembe();
+
+  // A mentes kozben (a zar a mienk) egy gombnyomas ne inditson ujra.
+  savingConfig = true;
+  g_pinRead[PIN_RESETBTN] = LOW;
+  bool restarted = false;
+  try {
+    for (int i = 0; i < 100; i++) { resetbutton(); g_millis += 10; }
+  } catch (RestartSignal&) { restarted = true; }
+  CHECK(!restarted, "mentes kozben a reset gomb nem indit ujra");
+  g_pinRead[PIN_RESETBTN] = HIGH;
+
+  // ...es egy webes mentes sem tud irast inditani.
+  CHECK(!beginConfigWrite(), "es masik fajliras sem indulhat");
+  savingConfig = false;
+}
+
+static void scNV5() {
+  // MELYIK A FRISSEBB? Ez a lap dontese. A fajl mindig az RTC naplo egy
+  // KORABBI pillanatkepe, ezert:
+  //
+  //  (a) ha az RTC naplo tulelte a mentes ota eltelt idot, bovebb is nala ->
+  //      az RTC nyer;
+  //  (b) ha egy aramszunet torolte, a fajl orizte meg az elozmenyt ->
+  //      a fajl nyer (EZ a mentes ertelme).
+  coldBoot(false, "", "", "", "");
+  setup();                                 // AP mod -> mentes tortent
+  CHECK(g_fs.count("/evlog.bin") == 1, "van mentett naplo");
+
+  // (a) Az RTC naplo el es bovebb: 10 tovabbi esemeny.
+  for (int i = 0; i < 10; i++) logEvent((EventCode)2, (uint16_t)(900 + i));
+  {
+    AsyncWebServerRequest req; g_handlers["/log#1"](&req);
+    CHECK(req._body.find("RTC memoriaban levo naplo") != std::string::npos,
+          "elo RTC naplonal az RTC a forras");
+    CHECK(req._body.find("<td>909</td>") != std::string::npos,
+          "es tenyleg a friss bejegyzesek latszanak");
+  }
+
+  // (b) ARAMSZUNET: az RTC naplo torlodik, a fajl megmarad.
+  const uint16_t elozoDb = fajlCount();
+  rtcEvMagic = 0; rtcEvNext = 0;
+  {
+    AsyncWebServerRequest req; g_handlers["/log#1"](&req);
+    CHECK(req._body.find("fajlrendszerre mentett naplo") != std::string::npos,
+          "torolt RTC naplonal a FAJL a forras");
+    CHECK(req._body.find("<table") != std::string::npos,
+          "es van is mit mutatnia");
+    CHECK(elozoDb > 0, "a fajlban tenyleg volt bejegyzes");
+  }
+}
+
+static void scNV6() {
+  // A HIBAS, URES ES HIANYZO FAJL EGYIKE SEM OKOZHAT GONDOT. Mind a negy
+  // eset ugyanoda vezet: a lap az RTC naplot mutatja, kulon hibauzenet
+  // nelkul. Ez nem kivetelkezeles, hanem a normal mukodes egyik aga.
+  const char* esetek[] = { "nincs fajl", "ures fajl", "csonka fajl",
+                           "rossz magic", "hazudos fejlec" };
+  for (int e = 0; e < 5; e++) {
+    coldBoot(false, "", "", "", "");
+    setup();
+    logEvent((EventCode)2, (uint16_t)(700 + e));   // legyen mit mutatni RTC-bol
+    switch (e) {
+      case 0: g_fs.erase("/evlog.bin"); break;
+      case 1: g_fs["/evlog.bin"] = ""; break;
+      case 2: g_fs["/evlog.bin"] = std::string("BAZF12", 6); break;
+      case 3: { std::string b = g_fs["/evlog.bin"]; if (b.size() > 4) b[0] = 'X';
+                g_fs["/evlog.bin"] = b; break; }
+      case 4: { // a fejlec 200 bejegyzest iger, de a fajl rovid
+                std::string b = g_fs["/evlog.bin"];
+                if (b.size() >= 8) { uint16_t c = 200; memcpy(&b[6], &c, 2); }
+                g_fs["/evlog.bin"] = b; break; }
+    }
+    AsyncWebServerRequest req; g_handlers["/log#1"](&req);
+    char msg[96];
+    snprintf(msg, sizeof(msg), "%s: a lap az RTC naplot mutatja, hiba nelkul", esetek[e]);
+    CHECK(req._code == 200
+          && req._body.find("RTC memoriaban levo naplo") != std::string::npos, msg);
+  }
+
+  // ...es ha MINDKETTO ures: egyszeruen nincs naplo a lapon.
+  coldBoot(false, "", "", "", "");
+  setup();
+  rtcEvMagic = 0; rtcEvNext = 0;
+  g_fs.erase("/evlog.bin");
+  AsyncWebServerRequest req; g_handlers["/log#1"](&req);
+  CHECK(req._body.find("Nincs rogzitett esemeny") != std::string::npos,
+        "mindketto ures: egyszeruen nincs naplo a lapon");
+  CHECK(req._body.find("<table") == std::string::npos, "es nincs ures tablazat sem");
+}
+
+static void scNV7() {
+  // NTP IDOBELYEG. Ha van oraszinkron, a bejegyzesek valos idot is kapnak, es
+  // a lap azt mutatja. Ha nincs, a lap "-"-t ir az ido oszlopba - a uptime
+  // oszlop ilyenkor is elmond mindent, tehat ez sem hiba.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_epochNow = 0;                          // meg nincs szinkron
+  setup();
+  CHECK(g_ntpStarts >= 1, "sikeres csatlakozas utan elindul az oraszinkron");
+
+  logEvent((EventCode)2, 111);             // szinkron nelkuli bejegyzes
+  g_epochNow = 1780000000UL;               // 2026-05-29 korul
+  logEvent((EventCode)2, 222);             // mar valos idovel
+
+  startConfigPortal();                     // legyen /log kezelo
+  AsyncWebServerRequest req; g_handlers["/log#1"](&req);
+  const std::string& b = req._body;
+  CHECK(b.find("2026-") != std::string::npos,
+        "a szinkron utani bejegyzes valos idot mutat");
+  CHECK(b.find("<td>-</td>") != std::string::npos,
+        "a szinkron elottinel '-' all az ido oszlopban, nem hamis datum");
+  CHECK(b.find("<th>Ido</th>") != std::string::npos, "van Ido oszlop");
+
+  // A FRISSESSEG DONTESE valos idovel: a nagyobb idobelyeg nyer.
+  CHECK(rtcEvents[(rtcEvNext - 1) % 32].epoch == 1780000000UL,
+        "az epoch tenyleg bekerult a bejegyzesbe");
+}
+
+static void scNV8() {
+  // FELUTON BUKO BETOLTES. A /log kezelo EGY puffert hasznal (az async_tcp
+  // task verme veges), es eloszor az RTC pillanatkepet teszi bele. Ha a fajl
+  // betoltese kozben az olvasas MEGSZAKAD, a puffer addigra mar fel fajl, fel
+  // RTC adat - ilyenkor nem eleg "visszalepni" az RTC-re, ujra kell venni a
+  // pillanatkepet. Ezt a hibat a sajat kodom kommentje hozta felszinre.
+  //
+  // A modell: ep fejlec, de az olvasas rovidebbet ad (g_fsShortRead).
+  coldBoot(false, "", "", "", "");
+  setup();                                  // AP mod -> mentes tortent
+  CHECK(g_fs.count("/evlog.bin") == 1, "van mentett naplo");
+
+  // Az RTC naplot uritjuk, majd EGYETLEN, jol felismerheto bejegyzest teszunk
+  // bele - ha a kimenetben ez latszik ep egeszben, a pillanatkep ujravetele jo.
+  rtcEvMagic = 0; rtcEvNext = 0;
+  logEvent((EventCode)5, 4242);
+  g_fsShortRead = true;                     // a betoltes feluton bukik
+  AsyncWebServerRequest req; g_handlers["/log#1"](&req);
+  g_fsShortRead = false;
+
+  CHECK(req._code == 200, "a lap ettol meg kiszolgalodik");
+  CHECK(req._body.find("<td>4242</td>") != std::string::npos,
+        "es az RTC bejegyzes EP EGESZBEN latszik (nem kevert puffer)");
+  CHECK(req._body.find("RTC memoriaban levo naplo") != std::string::npos,
+        "a forras helyesen az RTC naplo");
+}
+
+// --- Heap felugyelet -------------------------------------------------------
+
+// A sketch heap-allapotanak elerese a tesztekbol.
+extern uint32_t rtcHeapMagic;
+extern uint32_t rtcHeapRestarts;
+extern uint8_t  rtcCarryResetEvents;
 
 static void scHP1() {
   // ALAPMERES: MIT ES MILYEN GYAKRAN IR KI?
@@ -4968,6 +5248,7 @@ static void scLOG6() {
   // alvas-ebredes ciklus miatt elerhetetlen, de a formazas nagy erteknel is
   // ep marad (nem csonkol, nem negativ).
   rtcEvMagic = 0; rtcEvNext = 0;
+  g_fs.erase("/evlog.bin");    // az RTC naplot akarjuk latni, ne a mentettet
   logEvent((EventCode)2, 0);
   rtcEvents[0].uptimeSec = 0xFFFFFFFFu;
   AsyncWebServerRequest max; g_handlers["/log#1"](&max);
@@ -5917,6 +6198,14 @@ static const Scenario kScenarios[] = {
   { "SH1: leallas elott a zarat MEG IS SZEREZZUK, nem csak megvarjuk", scSH1 },
   { "WDT14: a watchdog szamlalo a MOSTANI indulashoz kepest mer", scWDT14 },
   { "HP1: a heap allapotsora ritkitva megy ki, nem koronkent", scHP1 },
+  { "NV1: a naplo a harom fontos pillanatban kimegy a fajlrendszerre", scNV1 },
+  { "NV2: az iras sikeresseget visszaolvasassal ellenorizzuk", scNV2 },
+  { "NV3: a mentes atomikusan szerzi meg a zarat, es fel is oldja", scNV3 },
+  { "NV4: mentes kozben nincs gombos ujraindulas es masik iras", scNV4 },
+  { "NV5: a lap a FRISSEBB naplot tolti be", scNV5 },
+  { "NV6: hianyzo, ures vagy hibas fajl nem okoz gondot", scNV6 },
+  { "NV7: NTP idobelyeg a bejegyzeseken", scNV7 },
+  { "NV8: feluton buko betoltes nem hagy kevert puffert", scNV8 },
   { "HP2: a figyelmeztetes csak az atlepeskor szol", scHP2 },
   { "HP3: egyetlen melypont nem indit ujra, a tartos igen", scHP3 },
   { "HP4: a router reset szamlalo TULELI a heap-ujraindulast", scHP4 },

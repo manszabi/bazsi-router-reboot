@@ -840,7 +840,7 @@ portál `/log` oldalán kiírja. Soros kábel nélkül is megtudható, mi tört�
 | Deep sleep | igen |
 | Watchdog / panic reset | igen |
 | Reset gomb | igen |
-| **Áramtalanítás** | **nem** |
+| **Áramtalanítás** | **nem** – de a fájlba mentett napló igen, lásd lent |
 
 `RTC_NOINIT_ATTR`-ben van, ezért éli túl a resetet is – pont azokat a hibákat,
 amiket ki akarunk vizsgálni. Mérete 264 bájt a C3 ~8 KB-os RTC memóriájából.
@@ -882,9 +882,87 @@ A naplóoldalon **semmilyen konfigurációs érték nem jelenik meg** – sem az
 sem az IP, sem a jelszó (nyíltan vagy kódolva). A mentés *ténye* viszont igen
 (`CONFIG SAVED`), mert az a diagnózishoz kell. (Mérve: `LOG2`.)
 
-### Hová és mikor íródik a napló
+### A napló mentése a fájlrendszerre
 
-**A napló nem fájl.** Nem megy a LittleFS-re, nincs `/log.txt`, nincs flash
+Az RTC napló az **áramszünetet nem éli túl** – épp azt a hibát nem, ami után a
+leginkább tudni akarnánk, mi történt előtte. Ezért a program a **fontos
+pillanatokban** kiírja a naplót a LittleFS-re is (`/evlog.bin`):
+
+| Mikor | Miért |
+|---|---|
+| **Router reset előtt** | épp azért nyúlunk a hálózathoz, mert valami nem stimmel – itt a legnagyobb az esély egy áramszünetre |
+| **AP módba váltás előtt** | az AP mód azt jelenti, hogy az eszköz feladta; épp ezt az előzményt akarja látni az, aki odamegy és megnyitja a portált |
+| **Az 1 órás alvás előtt** | hosszú idő következik, ami alatt egy áramszünet elviheti az RTC naplót |
+
+A fájl a teljes körpuffer pillanatképe, **kiegyenesítve** (a legrégebbitől a
+legújabbig), így az olvasónak nem kell tudnia, hol tartott a gyűrű.
+
+**Írás közben nincs alvás, újraindulás vagy másik írás.** Ezt nem külön kód
+biztosítja, hanem ugyanaz a **konfigurációs zár**, amit a webes mentés és a
+wifireset gomb használ – a mentés **atomikusan** szerzi meg. Ha a zár épp
+foglalt, a mentés **kimarad**: nem várunk rá, mert a napló diagnosztika, és nem
+szabad miatta blokkolni egy fontos műveletet. A következő fontos pillanatban
+úgyis próbáljuk. A zárat a végén **feloldjuk** – eltérően a leállási úttól, ami
+már nem tér vissza. (Mérve: `NV3`, `NV4`.)
+
+**Az írás sikerességét visszaolvasással ellenőrizzük**, ugyanúgy, mint a
+konfigurációs fájloknál: a siker nem az, hogy az írás nem panaszkodott, hanem
+hogy a fejléc tényleg ott van. A **néma írási hiba** (a fájlrendszer sikert
+jelent, de a tartalom nem kerül ki) csak így derül ki. **A sikertelenség nem
+végzetes**: az RTC naplóban minden ott marad, a program dolga fontosabb – csak
+szólunk róla. (Mérve: `NV2`.)
+
+> A flasht nem koptatjuk feleslegesen: ha a legutóbbi mentés óta nem történt
+> esemény, nem írunk újra.
+
+### Melyiket tölti be az AP mód weboldala?
+
+A fájl mindig az RTC napló egy **korábbi** pillanatképe. Ebből következik a
+szabály:
+
+| Helyzet | Melyik nyer | Miért |
+|---|---|---|
+| Mindkettőnek van **NTP időbélyege** | a **nagyobb** | ez a legpontosabb válasz, ezért ez az első szabály |
+| Az RTC napló túlélte a mentés óta eltelt időt | **RTC** | bővebb is nála: mindent tartalmaz, ami a fájlban van, plusz ami azóta történt |
+| Áramszünet törölte az RTC naplót | **fájl** | a fájl őrizte meg az előzményt – **ez a mentés értelme** |
+| Az RTC-ben már 32 új esemény van | **RTC** | a körpuffer tele van friss adattal, ami időben mindenképp újabb |
+
+A lap **kiírja, melyik forrásból** dolgozik, és ha a fájlé, azt is, mikor
+mentettük. (Mérve: `NV5`.)
+
+**Ha a fájl hiányzik, üres, csonka, rossz a magic-je vagy a fejléce többet ígér,
+mint amennyi ott van** – mind az öt eset ugyanoda vezet: a lap az RTC naplót
+mutatja, külön hibaüzenet nélkül. Ez nem kivételkezelés, hanem a normál működés
+egyik ága. **Ha mindkettő üres**, egyszerűen nincs napló a lapon – nem
+hibaüzenet, nem üres táblázat. (Mérve: `NV6`.)
+
+> A `/log` kezelő **egyetlen** 384 bájtos puffert használ, mert az `async_tcp`
+> task verme véges: előbb a fejlécből eldönti, melyik forrás kell, és csak azt
+> tölti be. Ha a betöltés félúton bukik, a puffer fél fájl, fél RTC adat lenne –
+> ezért ilyenkor **újra vesszük** az RTC pillanatképet, nem csak
+> „visszalépünk". (Mérve: `NV8`.)
+
+### Valós idő (NTP)
+
+A napló eddig csak uptime bélyeget hordozott, ami minden induláskor nulláról
+kezd – két bootolás eseményei így nem rendezhetők egymáshoz. Ez pontosan az,
+ami a mentett napló értelmezéséhez kell.
+
+| | |
+|---|---|
+| Szerver | `hu.pool.ntp.org` |
+| Időzóna | `CET-1CEST,M3.5.0,M10.5.0/3` – magyar idő, a nyári időszámítás váltásaival |
+| Indítás | sikeres Wi-Fi csatlakozás után, **nem blokkol** (a válasz a háttérben érkezik) |
+| Amíg nincs szinkron | az `epoch` mező 0 marad, a lap `-`-t ír az Idő oszlopba – a napló ettől még működik |
+
+> A valós idő a **deep sleepet túléli**. Az `esp_timer` (és így a `millis()`)
+> ébredéskor nulláról indul, a `gettimeofday()` alapú rendszeróra viszont az RTC
+> órából jön – egy 1 órás alvás után is jó időt mutat. Épp ezért használható a
+> bejegyzések rendezésére bootolásokon át.
+
+### Hová és mikor íródik a napló (RTC)
+
+**Az elsődleges napló nem fájl.** Nem megy a LittleFS-re, nincs `/log.txt`, nincs flash
 írás. Egy 32 elemű körpuffer az RTC memóriában, amibe a `logEvent()` egyetlen
 struktúra-értékadással ír. Ennek három következménye van, és mindhárom
 szándékos:

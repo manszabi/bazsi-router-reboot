@@ -410,8 +410,8 @@ bazsi-router-reboot/
 
 A Wi-Fi beállító weboldal a sketch `CONFIG_FORM` konstansában él, a flash
 `.rodata` szekciójában – nincs külön feltöltendő `data/` mappa. A LittleFS-re
-így csak a négy konfigurációs fájl kerül (`/ssid.txt`, `/pass.txt`, `/ip.txt`,
-`/gateway.txt`).
+így csak a négy konfigurációs fájl és a mentett napló kerül (`/ssid.txt`,
+`/pass.txt`, `/ip.txt`, `/gateway.txt`, `/evlog.bin` – ez utóbbi ~400 bájt).
 
 ## 📦 Szükséges könyvtárak
 
@@ -474,7 +474,7 @@ a fájlrendszernek nem kell weblapot tárolnia.
 | `nvs` | data / nvs | `0x9000` | 20 KiB | a core saját kulcs-érték tára |
 | `phy_init` | data / phy | `0xE000` | 4 KiB | rádió kalibrációs adatok |
 | `factory` | app / factory | `0x10000` | **3520 KiB (~3,44 MB)** | a program |
-| `spiffs` | data / spiffs | `0x380000` | **512 KiB** | LittleFS (`/ssid.txt`, `/pass.txt`, `/ip.txt`, `/gateway.txt`) |
+| `spiffs` | data / spiffs | `0x380000` | **512 KiB** | LittleFS (`/ssid.txt`, `/pass.txt`, `/ip.txt`, `/gateway.txt`, `/evlog.bin`) |
 
 A tábla pontosan kitölti a XIAO ESP32-C3 4 MB-os flash-ét. Az app partíció
 kezdőcíme 64 KB-ra, a data partíciók 4 KB-ra igazítottak (a `0xF000`–`0x10000`
@@ -1043,7 +1043,26 @@ szekvencia, AP portál, alvás/ébredés:
 
 Az utolsó 32 esemény RTC memóriában, a beállító portál **`/log`** oldalán
 olvasható – soros kábel nélkül is. Túléli a deep sleepet, a watchdog resetet és
-a reset gombot; csak az áramtalanítás törli.
+a reset gombot.
+
+**Az áramszünetet is túléli** – mert a program a fontos pillanatokban kiírja a
+naplót a LittleFS-re is (`/evlog.bin`): **router reset előtt**, **AP módba
+váltás előtt**, és **az 1 órás alvás előtt**. Ezek azok a pontok, ahol vagy
+hosszabb idő következik, vagy az eszköz beavatkozik – és mindkettő után könnyen
+jöhet egy áramszünet, ami az RTC naplót elvinné.
+
+| | |
+|---|---|
+| Írás közben | nincs alvás, újraindulás és másik írás – ugyanaz a **konfigurációs zár**, amit a webes mentés használ; foglalt zárnál a mentés **kimarad**, nem blokkol |
+| Sikeresség | **visszaolvasással** ellenőrizve; a sikertelenség **nem végzetes**, az RTC napló ettől még ép |
+| A `/log` oldal | a **frissebbet** tölti be, és kiírja, melyik forrásból dolgozik |
+| Hiányzó / üres / hibás fájl | nem hiba: az RTC naplót mutatja |
+| Ha mindkettő üres | egyszerűen nincs napló a lapon |
+
+**Valós idő:** sikeres csatlakozás után elindul az óraszinkron
+(`hu.pool.ntp.org`, magyar időzóna a nyári időszámítással). Amíg nincs szinkron,
+a lap `-`-t ír az Idő oszlopba – a napló ettől még működik. A valós idő a deep
+sleepet **túléli**, ezért használható a bejegyzések rendezésére bootolásokon át.
 
 **Nem fájlba megy**, hanem egy körpufferbe az RTC memóriában: nincs flash írás,
 nincs naplóírási hiba, amit kezelni kellene, és akkor is olvasható marad, ha
