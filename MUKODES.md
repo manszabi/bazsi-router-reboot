@@ -404,6 +404,13 @@ A gombokat 10 ms-onként mintavételezzük, és csak a végig lenyomva maradt
 
 > ⚠️ A Wi-Fi reset gomb lába (`D0` = **GPIO2**) az ESP32-C3 egyik *strapping*
 > lába: a chip csak akkor bootol, ha a reset pillanatában GPIO2 = 1.
+> **Fájlírás közben egyik gomb sem hat.** Mindkét gombkezelő **atomikusan**
+> megszerzi a konfigurációs zárat (`beginConfigWrite()`), mielőtt újraindítana
+> vagy törölne – a puszta jelző-ellenőrzés kevés lenne, mert a gyors kapu és a
+> tényleges újraindítás között az aszinkron webszerver taskja még elindíthatna
+> egy mentést. Ha a zár nem szerezhető meg, a következő 10 ms-os mintavételi
+> kör újra próbálkozik. (Mérve: `BTN4`.)
+
 > **Mennyire gyorsan reagál?** A firmware minden saját várakozó ciklusában
 > **10 ms-onként** olvassa mindkét gombot – a `waitWithButtons()`, a
 > `waitWithButtonsUntilOnline()`, az `initWiFi()` 20 mp-es várakozása, a reset

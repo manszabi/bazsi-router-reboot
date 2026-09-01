@@ -3491,6 +3491,108 @@ static void figyelWifiLed() {
 // WATCHDOG: a formazas ideje - az UJ kockazat, mert a watchdog mar elotte eles
 // ===========================================================================
 
+// ===========================================================================
+// WI-FI: a korai kilepes uj utjai - jelszo es statikus IP
+// ===========================================================================
+
+static void scBTN4() {
+  // A reset gomb ujrainditasa is ATOMIKUSAN szerzi meg a konfigzarat, nem
+  // csak a gyors savingConfig-ellenorzest vegzi. Enelkul az async_tcp task
+  // epp a ket println() + Serial.flush() alatt inditott mentese felbevagodna,
+  // es csonka konfiguraciot hagyna a flashben. (A wifiresetbutton() eddig is
+  // igy csinalta - a resetbutton() nem, ez volt az inkonzisztencia.)
+  coldBoot(false, "", "", "", "");
+  setup();
+  savingConfig = false;
+  g_pinRead[3] = LOW;                 // reset gomb lenyomva
+  resetbutton();                      // elso mintavetel: csak megjegyzi
+  g_millis += 100;                    // a debounce letelik
+  bool restarted = false;
+  try { resetbutton(); } catch (RestartSignal&) { restarted = true; }
+  CHECK(restarted, "az ujrainditas megtortent");
+  CHECK(savingConfig,
+        "es kozben a zar a miénk volt - mentes nem indulhatott bele");
+
+  // A masik irany: ha MAR fut egy mentes, a gomb NEM indit ujra.
+  coldBoot(false, "", "", "", "");
+  setup();
+  g_pinRead[3] = LOW;
+  resetbutton();
+  g_millis += 100;
+  savingConfig = true;                // az async task epp ir
+  bool restarted2 = false;
+  try { resetbutton(); } catch (RestartSignal&) { restarted2 = true; }
+  CHECK(!restarted2, "folyamatban levo mentes alatt NEM indit ujra");
+}
+
+static void scSE11() {
+  // Az onlineProbe() sajat WiFi.begin()-t hiv (aszinkron ujracsatlakozas).
+  // Ennek is a NYILT jelszot kell adnia, nem a fajlban tarolt kodolt alakot -
+  // kulonben a proba sosem tudna visszahozni a kapcsolatot, es a korai
+  // kilepes csendben halott kod lenne. (Az SE8-SE10 a tobbi utat fedi.)
+  char enc[200];   // a SECRET_ENC_MAX constexpr, nem lathato a tesztbol
+  CHECK(encodeSecret("titkosJelszo", enc, sizeof(enc)), "a kodolas sikerult");
+  coldBoot(true, "MyNetwork", enc, "", "");
+  wifiSim.availableFrom = 0xFFFFFFFFu;   // a halozat sosem jon vissza
+  setup();
+  wifiSim.lastPass.clear();
+  const uint32_t t0 = g_millis;
+  int guard = 0;
+  try { while (g_millis - t0 < 3u*60*1000 && ++guard < 200000) loop(); }
+  catch (DeepSleepSignal&) {}
+  CHECK(!wifiSim.lastPass.empty(), "a proba tenyleg hivott WiFi.begin()-t");
+  CHECK(wifiSim.lastPass == "titkosJelszo",
+        "es a NYILT jelszot adta at, nem a 'v1:' kodolt alakot");
+  CHECK(wifiSim.lastPass.rfind("v1:", 0) != 0, "a radioig nem jut el a kodolt alak");
+}
+
+static void scWF10() {
+  // A RESET_DELAY korai kilepese SZANDEKOSAN kihagyja a
+  // WiFi.disconnect(true) + reconnectWifi() kort. Ez viszont egy TOREKENY
+  // invarianst hoz be: a proba WiFi.begin()-je NEM hiv WiFi.config()-ot,
+  // tehat a statikus IP/DNS konfignak erintetlennek KELL maradnia a netifben.
+  // Ha valaki kesobb egy disconnect(true)-t tenne a varakozas ele, a proba
+  // csendben DHCP-vel jonne vissza - ez a teszt azt fogna meg.
+  coldBoot(true, "TestNet", "pw", "192.168.1.200", "192.168.1.1");
+  g_httpCode = -1; pingSim.ok = false;     // nincs internet -> eszkalacio
+  setup();
+  CHECK(staticConfigActive, "statikus IP-vel indultunk");
+  CHECK(wifiSim.staticApplied, "a netif megkapta a konfigot");
+
+  int guard = 0;
+  try { while (++guard < 400000 && logIndex(RELAY_HIGH) < 0) loop(); }
+  catch (DeepSleepSignal&) {}
+  // a router feltamadt: mostantol minden megy
+  g_httpCode = 200; g_httpBody = "Microsoft Connect Test"; pingSim.ok = true;
+  guard = 0;
+  try { while (++guard < 400000 && !serialHas("RESET_DELAY korai vege")) loop(); }
+  catch (DeepSleepSignal&) {}
+
+  CHECK(serialHas("RESET_DELAY korai vege"), "a korai agon jottunk ki");
+  CHECK(wifiSim.staticApplied,
+        "a statikus konfig ERINTETLEN maradt (nem volt disconnect(true))");
+  CHECK(wifiSim.cfgIp.str() == "192.168.1.200", "es tenyleg a mentett cim el");
+  CHECK(staticConfigActive, "a staticConfigActive jelzo is helyes maradt");
+}
+
+static void scCFG2() {
+  // Serult kodolt jelszo (paratlan hosszu hexa): a decodeSecretInPlace()
+  // VALTOZATLANUL hagyja. Ez SZANDEKOSAN nem vegzetes hiba - rossz jelszoval
+  // a Wi-Fi nem jon ossze, es az eszkoz a szokasos uton AP modba kerul, ahol
+  // ujra beallithato. Egy MODE_FATAL itt zsakutca lenne.
+  coldBoot(true, "TestNet", "v1:abc", "", "");   // paratlan hexa
+  wifiSim.willConnect = false;
+  wifiSim.authFail = true;                        // a rossz jelszo latszik
+  try { setup(); } catch (DeepSleepSignal&) {}
+  CHECK(deviceMode != (DeviceMode)2, "NEM megy vegzetes hibaba a serult jelszo miatt");
+  CHECK(strcmp(pass, "v1:abc") == 0,
+        "a dekodolas valtozatlanul hagyta (nem 'javitott' bele)");
+  int guard = 0;
+  try { while (deviceMode == (DeviceMode)0 && ++guard < 400000) loop(); }
+  catch (DeepSleepSignal&) {}
+  CHECK(deviceMode == (DeviceMode)1, "hanem AP modba jut, ahol ujra beallithato");
+}
+
 static void scWDT9() {
   // A dokumentacio igerete: "a szamlalo nullazodik aramtalanitaskor, VAGY
   // 1 ora hibatlan mukodes utan". Ez a teszt azt kerdezi, hogy ez az igeret
@@ -4084,6 +4186,10 @@ static const Scenario kScenarios[] = {
   // --- Gombok a hosszu varakozasok alatt ---
   { "WDT8b: a LittleFS formázása is belefér a watchdog ablakába", scWDT8b },
   { "WDT9: 1 óra hibátlan működés AP módban is nullázza a WDT számlálót", scWDT9 },
+  { "BTN4: a reset gomb is atomikusan szerzi meg a konfigzárat", scBTN4 },
+  { "SE11: az onlineProbe() WiFi.begin()-je is a NYÍLT jelszót adja", scSE11 },
+  { "WF10: a RESET_DELAY korai kilépése után a statikus IP érintetlen", scWF10 },
+  { "CFG2: sérült kódolt jelszó -> nem végzetes hiba, AP módban javítható", scCFG2 },
   { "LED4: a Wi-Fi LED nem hazudik tovább egy SUCCESS_DELAY-nél", scLED4 },
   { "LED5: a státusz LED normál üzemben végig világít", scLED5 },
   { "LED6: AP módban a mentés utáni türelmi idő alatt is villog", scLED6 },

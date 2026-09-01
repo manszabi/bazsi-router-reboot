@@ -61,7 +61,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 
 ## Lefedett esetek
 
-**204 forgatókönyv, 662 ellenőrzés. Sorlefedettség: 98,48%.**
+**208 forgatókönyv, 678 ellenőrzés. Sorlefedettség: 98,48%.**
 
 | | |
 |---|---|
@@ -95,6 +95,10 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 | `IP1`–`IP3` | Csak IPv4 fogadható el (IPv6 és `0.0.0.0` nem) |
 | `LED4`–`LED6` | **LED-ek őszintesége**: a Wi-Fi LED legfeljebb egy `SUCCESS_DELAY`-ig késhet (mérve: 60 mp), a státusz LED normál üzemben végig világít, AP módban a mentés utáni türelmi idő alatt is villog |
 | `WDT8b` | **A LittleFS formázása** is belefér a watchdog ablakába: 7,5 mp tipikus és 51,5 mp rossz eset, mindkettő a 90 mp alatt |
+| `BTN4` | **A reset gomb is atomikusan szerzi meg a konfigzárat** újraindítás előtt (regresszió: korábban csak a gyors jelző-ellenőrzést végezte, a `wifiresetbutton()`-nal ellentétben) |
+| `SE11` | Az `onlineProbe()` `WiFi.begin()`-je is a **nyílt** jelszót adja, nem a `v1:` kódolt alakot |
+| `WF10` | A `RESET_DELAY` korai kilépése után a **statikus IP/DNS érintetlen** – a próba nem hív `config()`-ot, ezért ez az invariáns kötelező |
+| `CFG2` | Sérült kódolt jelszó → **nem** végzetes hiba, AP módban javítható |
 | `WDT9` | **1 óra hibátlan működés AP módban is nullázza** a watchdog számlálót (regresszió: korábban csak monitor módban) |
 | `LED1`–`LED3` | LED-jelzések: a reset pulzus alatt a **státusz LED villog** (2 Hz) és a Wi-Fi LED sötét, **AP módban** a Wi-Fi LED villog (1 Hz) és a státusz LED végig világít, a villogás üteme és határa |
 | `OP1`–`OP7` | **Korai kilépés a hosszú várakozásokból**: a `firstStartDelay` korán zárul, ha a hálózat *és* az internet is megvan; csak hálózatnál végigfut; ép induláskor az első próba azonnal fut; **flash kímélés** (nincs fájlírás, percenként max egy `WiFi.begin()`, kapcsolat nélkül nincs ping); a `RESET_DELAY` korai zárása nem bontja le az igazolt kapcsolatot; **a próba órái túlélik a `millis()` körbefordulását**; **élő Wi-Fi mellett is korán zárul, ha az internet menet közben jön vissza** |

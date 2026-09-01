@@ -916,6 +916,15 @@ bool onlineProbe() {
     // kezdeményezünk, a választ a KÖVETKEZŐ próba status()-a adja meg. A
     // hívások közt egy teljes ONLINE_PROBE_INTERVAL_MS telik, ami sokszorosa
     // egy asszociáció idejének - így nem szakítunk félbe egy futó próbát.
+    // FONTOS INVARIANS: itt NINCS WiFi.mode() és NINCS WiFi.config(). Ez azért
+    // helyes, mert a próba csak olyan helyekről fut, ahol a netif konfigurációja
+    // ÉRINTETLEN az utolsó initWiFi() óta - a WiFi.disconnect(true) ugyanis
+    // eldobná a statikus IP/DNS beállítást, és a begin() csendben DHCP-vel
+    // jönne vissza. A sketchben mindössze két disconnect(true) van: az egyik
+    // az enterDeepSleep()-ben (utána újraindulás), a másik a FAILURE_STATE
+    // ágán, közvetlenül egy reconnectWifi() ELŐTT, ami újra alkalmazza a
+    // konfigot. Ha valaha új disconnect(true) kerülne egy VÁRAKOZÁS elé, ezt
+    // a függvényt is ki kell egészíteni. (Regresszió: WF10.)
     if (ssid[0] != '\0') {
       WiFi.begin(ssid, pass);
     }
@@ -1459,6 +1468,19 @@ void resetbutton() {
   }
   // Csak akkor fogadjuk el, ha végig lenyomva maradt (valódi debounce)
   if (now - timing.resetBtnDownSince >= BUTTON_DEBOUNCE_MS) {
+    // A zár ATOMIKUS megszerzése - ugyanaz az indok, mint a
+    // wifiresetbutton()-ben. A fenti gyors savingConfig-ellenőrzés és az
+    // ESP.restart() között az async_tcp taskban ELINDULHAT egy webes mentés,
+    // és a köztük lévő két println() + Serial.flush() nem is elhanyagolható
+    // idő. Az újraindítás ilyenkor félbevágná a fájlírást, és csonka
+    // konfigurációt hagyna a flashben.
+    //
+    // A zárral ez kizárt: ha megkaptuk, mentés már nem indulhat; ha nem
+    // kaptuk meg, a következő 10 ms-os mintavételi kör újra próbálkozik.
+    // Feloldani nem kell - a zár az újraindulással hal el.
+    if (!beginConfigWrite()) {
+      return;
+    }
     Serial.println("Reset button pressed.");
     Serial.println("RESTART ESP32C3 device.");
     Serial.flush();
@@ -1468,7 +1490,8 @@ void resetbutton() {
 
 void wifiresetbutton() {
   // Mentés közben a törlés és az újraindítás is végzetes lenne: két task írná
-  // egyszerre ugyanazokat a fájlokat. Lásd resetbutton().
+  // egyszerre ugyanazokat a fájlokat. Ez itt csak a GYORS kapu; az igazi
+  // védelem lent a beginConfigWrite() - ugyanúgy, mint a resetbutton()-ben.
   if (savingConfig) {
     return;
   }
