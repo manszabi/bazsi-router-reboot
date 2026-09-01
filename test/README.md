@@ -61,7 +61,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 
 ## Lefedett esetek
 
-**211 forgatókönyv, 688 ellenőrzés. Sorlefedettség: 98,48%.**
+**218 forgatókönyv, 714 ellenőrzés. Sorlefedettség: 98,48%.**
 
 | | |
 |---|---|
@@ -74,7 +74,8 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 | `PG1`–`PG2` | Ping (a gateway-ellenőrzéshez és a várakozások korai lezárásához): 2-a-4-ből szabály és korai kilépés |
 | `C1` | Konfig fájlok írása/olvasása, csonkítás, hiányzó fájl |
 | `B1` | Gomb debounce: zajtüske vs. tartós nyomás |
-| `BTN1`–`BTN3` | **A gombok mintavételezése hosszú várakozás alatt**: a saját ciklusaink 10 ms-onként nézik mindkettőt; a blokkoló `http.GET()` alatti vak ablak **mérve** (33 010 ms halott DNS-nél, egy kérésnyi); a végig nyomva tartott gomb az ablak után is hat |
+| `LAT1`–`LAT7` | **Megszakítás-alapú gombretesz**: blokkoló szakaszba eső rövid nyomás sem vész el; a retesz nem kerüli meg a debounce-t (zajtüske); a wifireset is reteszel; fájlírás alatt a nyomás késik, de megmarad; beragadt gomb nem reteszel; **foglalt zárnál a retesz megmarad**; alvás előtt a megszakítások leválasztva |
+| `BTN1`–`BTN3` | **A gombok mintavételezése hosszú várakozás alatt**: a saját ciklusaink 10 ms-onként nézik mindkettőt; a blokkoló `http.GET()` alatti **pollozási** vak ablak mérve (33 010 ms halott DNS-nél, egy kérésnyi) – ezt a `LAT*` retesz hidalja át; a végig nyomva tartott gomb az ablak után is hat |
 | `F1`–`F4` | Webszerver: a **programba fordított** beállító űrlap üres fájlrendszer mellett is, **a LittleFS-ről semmit nem szolgál ki** (akkor sem, ha ott vannak a régi fájlok), 404, AP-határidő kitolása |
 | `WDT1`–`WDT8` | Watchdog: konfiguráció, etetés a hosszú blokkolások alatt, `delay()` vs. CPU-pörgetés, a feliratkozás tényleges ellenőrzése |
 | `SN1`–`SN2` | Biztonsági háló: ha a gomb-ébresztés armolása hibázik, időzítő |

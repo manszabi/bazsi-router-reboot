@@ -66,6 +66,8 @@ extern TimingState timing;
 extern UIFlags uiFlags;
 extern bool staticConfigActive;
 extern bool watchdogEnabled;
+extern volatile bool btnResetLatched, btnWifiResetLatched;
+extern volatile uint32_t btnResetDownAt, btnWifiResetDownAt;
 extern uint32_t resetDelayProbeLast;
 extern uint32_t firstStartProbeLast;
 bool onlineProbeDue(uint32_t& lastProbe, uint32_t now);
@@ -74,6 +76,8 @@ constexpr uint8_t EV_TEST_FAIL_C = 4;
 constexpr uint8_t EV_FATAL_C = 9;
 void resetbutton();
 void wifiresetbutton();
+void restartFromButton(const char* reason);
+void enterDeepSleep(uint64_t timerUs);
 void waitWithButtons(uint32_t);
 void touchApDeadline();
 void printUptime();
@@ -162,6 +166,9 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   watchdogEnabled = false;
   g_gpioWakeResult = 0;
   g_gpioWakeMask = 0; g_gpioWakeMode = -1;
+  g_isr.clear(); g_isrMode.clear();
+  btnResetLatched = false; btnWifiResetLatched = false;
+  btnResetDownAt = 0; btnWifiResetDownAt = 0;
   // A GPIO hold a valosagban tuleli az ebredest (reset), csak az
   // aramtalanitas torli - a modell is igy tesz.
   g_gpioHoldFails = false;
@@ -3588,6 +3595,138 @@ static void scRR3() {
         "es a ciklus is tiszta lappal indul");
 }
 
+// ===========================================================================
+// MEGSZAKITAS-ALAPU GOMBRETESZ
+// ===========================================================================
+
+// Egy teljes gombnyomas szimulalasa: lenyomas, tartas, felengedes - mindket
+// elen "elsutve" az ISR-t, ugyanabban a sorrendben, ahogy a hardver tenne.
+static void gombNyomas(int pin, uint32_t tartasMs) {
+  g_pinRead[pin] = LOW;  simIsr(pin);          // lefuto el
+  g_millis += tartasMs;
+  g_pinRead[pin] = HIGH; simIsr(pin);          // felfuto el
+}
+
+static void scLAT1() {
+  // A LENYEG: egy teljes erteku gombnyomas, ami VEGIG egy blokkolo szakaszba
+  // esett (a loop egyszer sem mintavetelezett), es a gombot mar fel is
+  // engedtek - ezt a retesz nelkul nyom nelkul elvesztettuk volna.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  CHECK(g_isr.count(3) == 1 && g_isr.count(2) == 1,
+        "mindket gomb megszakitasa elesitve");
+  gombNyomas(3, 200);                          // 200 ms-os nyomas, mar felengedve
+  CHECK(btnResetLatched, "az ISR reteszelte a teljes erteku nyomast");
+  CHECK(g_pinRead[3] == HIGH, "a gomb kozben fel is lett engedve");
+  bool restarted = false;
+  try { resetbutton(); } catch (RestartSignal&) { restarted = true; }
+  CHECK(restarted, "a kovetkezo pollozas mar ujrainditja az eszkozt");
+}
+
+static void scLAT2() {
+  // A ZAJTUSKE tovabbra sem indit ujra: az ISR MEGMERI a hosszat, es 50 ms
+  // alatt nem reteszel. Enelkul a retesz megkerulte volna a debounce-t.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  gombNyomas(3, 5);                            // 5 ms-os tuske
+  CHECK(!btnResetLatched, "5 ms-os tuske NEM reteszel");
+  bool restarted = false;
+  try { resetbutton(); } catch (RestartSignal&) { restarted = true; }
+  CHECK(!restarted, "es nem is indit ujra");
+  gombNyomas(3, 49);                           // epp a hatar alatt
+  CHECK(!btnResetLatched, "49 ms sem eleg (BUTTON_DEBOUNCE_MS = 50)");
+  gombNyomas(3, 50);                           // pontosan a hatar
+  CHECK(btnResetLatched, "50 ms viszont igen");
+}
+
+static void scLAT3() {
+  // A wifireset gomb reteszelese ugyanigy mukodik, es a torlest inditja.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  g_fs["/ssid.txt"] = "TestNet";
+  gombNyomas(2, 200);
+  CHECK(btnWifiResetLatched, "a wifireset is reteszelt");
+  bool restarted = false;
+  try { wifiresetbutton(); } catch (RestartSignal&) { restarted = true; }
+  CHECK(restarted, "ujraindult");
+  CHECK(g_fs["/ssid.txt"].empty(), "es a mentett SSID torlodott");
+}
+
+static void scLAT4() {
+  // A retesz NEM kerul meg semmit: fajliras kozben a gomb NEM hat, es a
+  // jelzo MEGMARAD - a nyomas csak KESIK, nem vesz el.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  gombNyomas(3, 200);
+  CHECK(btnResetLatched, "reteszelve");
+  savingConfig = true;                         // epp ir az async task
+  bool restarted = false;
+  try { resetbutton(); } catch (RestartSignal&) { restarted = true; }
+  CHECK(!restarted, "mentes alatt NEM indit ujra");
+  CHECK(btnResetLatched, "a jelzo MEGMARADT - a nyomas nem veszett el");
+  savingConfig = false;                        // a mentes befejezodott
+  try { resetbutton(); } catch (RestartSignal&) { restarted = true; }
+  CHECK(restarted, "a mentes utan viszont lefut");
+}
+
+static void scLAT5() {
+  // Beragadt gomb: a lefuto el megvan, felfuto SOSEM jon - tehat nem
+  // reteszel, es nem okoz vegtelen ujrainditasi hurkot.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  g_pinRead[3] = LOW; simIsr(3);               // lenyomva marad
+  g_millis += 10u * 60 * 1000;                 // 10 percig
+  CHECK(!btnResetLatched, "beragadt gomb NEM reteszel (nincs felfuto el)");
+  CHECK(btnResetDownAt != 0, "de a lenyomas ideje rogzult");
+  // A pollozott ag viszont eszreveszi - ez a regi, valtozatlan viselkedes.
+  bool restarted = false;
+  try { resetbutton(); g_millis += 100; resetbutton(); }
+  catch (RestartSignal&) { restarted = true; }
+  CHECK(restarted, "a pollozott ag a tartos nyomast tovabbra is elfogadja");
+}
+
+static void scLAT6() {
+  // A HIBA, amit a friss szemu atnezes talalt a sajat uj kodomban: eloszor a
+  // reteszt MEG a restartFromButton() elott toroltem. Ha a konfigzar epp
+  // foglalt volt, a fuggveny visszatert - es a mar felengedett gomb nyomasa
+  // NYOM NELKUL elveszett, mert a pollozott ag nem tudja potolni.
+  //
+  // A helyes viselkedes: a jelzo maradjon meg, amig tenylegesen ujra nem
+  // indulunk. Itt kozvetlenul a helper-t hivjuk, hogy a hivo savingConfig
+  // kapujat megkeruljuk, es pontosan a szuk versenyhelyzetet modellezzuk.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  gombNyomas(3, 200);
+  CHECK(btnResetLatched, "reteszelve");
+
+  savingConfig = true;                // a zar mar valakie
+  bool restarted = false;
+  try { restartFromButton("teszt"); } catch (RestartSignal&) { restarted = true; }
+  CHECK(!restarted, "foglalt zarnal nem indul ujra");
+  CHECK(btnResetLatched, "es a RETESZ MEGMARAD - a nyomas nem veszett el");
+
+  savingConfig = false;               // a zar felszabadult
+  try { resetbutton(); } catch (RestartSignal&) { restarted = true; }
+  CHECK(restarted, "a felszabadulas utan a reteszelt nyomas lefut");
+}
+
+static void scLAT7() {
+  // Alvas elott a gomb-megszakitasokat le kell valasztani: az attachInterrupt()
+  // es az esp_deep_sleep_enable_gpio_wakeup() ugyanazokat a GPIO
+  // megszakitas-regisztereket allitja, es az egymasra hatasuk nem dokumentalt.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  CHECK(g_isr.count(3) == 1, "eleles utan van kezelo a reset gombon");
+  try { enterDeepSleep(0); } catch (DeepSleepSignal&) {}
+  CHECK(g_isr.count(3) == 0 && g_isr.count(2) == 0,
+        "alvas elott mindket megszakitas levalasztva");
+  const int det = logIndex("detachInterrupt(3)");
+  const int arm = logIndex("gpio_wakeup(");
+  CHECK(det >= 0, "a levalasztas tenyleg megtortent");
+  CHECK(arm < 0 || det < arm,
+        "MEG az ebresztoforras elesitese ELOTT");
+}
+
 static void scBTN4() {
   // A reset gomb ujrainditasa is ATOMIKUSAN szerzi meg a konfigzarat, nem
   // csak a gyors savingConfig-ellenorzest vegzi. Enelkul az async_tcp task
@@ -4282,6 +4421,13 @@ static const Scenario kScenarios[] = {
   { "RR1: befagyott DNS – 4 reset, két újraindítás közt legalább 3 perc", scRR1 },
   { "RR2: teljes kiesésnél a 10 perces bootvárakozás érintetlen marad", scRR2 },
   { "RR3: egyetlen sikeres teszt nullázza a reset-számlálót", scRR3 },
+  { "LAT1: blokkoló szakaszba eső rövid gombnyomás sem vész el", scLAT1 },
+  { "LAT2: a retesz NEM kerüli meg a debounce-t (zajtüske nem indít újra)", scLAT2 },
+  { "LAT3: a wifireset gomb reteszelése is működik", scLAT3 },
+  { "LAT4: fájlírás alatt a retesz megmarad – a nyomás késik, nem vész el", scLAT4 },
+  { "LAT5: beragadt gomb nem reteszel (nincs felfutó él)", scLAT5 },
+  { "LAT6: foglalt zárnál a retesz megmarad – a nyomás nem vész el", scLAT6 },
+  { "LAT7: alvás előtt a gomb-megszakítások leválasztva", scLAT7 },
   { "BTN4: a reset gomb is atomikusan szerzi meg a konfigzárat", scBTN4 },
   { "SE11: az onlineProbe() WiFi.begin()-je is a NYÍLT jelszót adja", scSE11 },
   { "WF10: a RESET_DELAY korai kilépése után a statikus IP érintetlen", scWF10 },

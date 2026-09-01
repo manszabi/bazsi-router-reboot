@@ -150,6 +150,15 @@ void digitalWrite(uint8_t p, uint8_t v) {
 // enelkul nem lehetne kimutatni, hogy egy blokkolo konyvtarhivas (http.GET,
 // Ping.ping) alatt a gomb masodpercekig eszrevetlen marad. A gombok a
 // D0 = GPIO2 (wifireset) es a D1 = GPIO3 (reset).
+std::map<int, IsrFn> g_isr;
+std::map<int, int>   g_isrMode;
+void attachInterrupt(uint8_t pin, IsrFn fn, int mode) {
+  g_isr[pin] = fn; g_isrMode[pin] = mode;
+  simLog("attachInterrupt(" + std::to_string(pin) + "," + std::to_string(mode) + ")");
+}
+void detachInterrupt(uint8_t pin) { g_isr.erase(pin); simLog("detachInterrupt(" + std::to_string(pin) + ")"); }
+void simIsr(int pin) { auto it = g_isr.find(pin); if (it != g_isr.end() && it->second) it->second(); }
+
 bool     g_btnTrack = false;
 uint32_t g_btnLastPoll = 0;
 uint32_t g_btnMaxGap = 0;

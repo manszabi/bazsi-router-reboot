@@ -314,6 +314,29 @@ bool fsReady = false;
 // definíció szerint helyes - ott nincs mit ellenőrizni.
 bool staticConfigActive = false;
 
+// MEGSZAKITAS-ALAPU GOMBRETESZ
+//
+// MIERT KELL? A gombokat a sajat varakozo ciklusaink 10 ms-onkent nezik - de
+// egy futo HTTP teszt alatt nem tudjak: a http.GET() a core blokkolo hivasa,
+// nincs benne visszahivas. Ez az ablak halott DNS mellett 33 masodperc (merve:
+// BTN2), es egy rovid koppintas nyom nelkul elveszett benne, mert a lab
+// allapotat csak mintavetelkor olvastuk.
+//
+// A MEGOLDAS NEM az, hogy a megszakitas azonnal cselekszik - az kikerulne a
+// debounce-t, es egy zajtuske ujrainditana az eszkozt (lasd B1 teszt). Ehelyett
+// a megszakitas MEGMERI a lenyomas hosszat: a lefuto elen jegyzi az idot, a
+// felfuton pedig csak akkor reteszel, ha a gomb legalabb BUTTON_DEBOUNCE_MS-ig
+// lent volt. Igy a debounce ugyanaz marad, csak hardveresen tortenik - es
+// akkor is mukodik, amikor a loop epp nem tud mintavetelezni.
+//
+// A retesz nem kerul meg semmi mast: a savingConfig kaput es a konfigzarat a
+// feldolgozas ugyanugy tiszteletben tartja, tehat egy blokkolo szakasz alatt
+// erkezett gombnyomas csak KESIK, de nem vagja felbe a fajlirast.
+volatile bool btnResetLatched = false;
+volatile bool btnWifiResetLatched = false;
+volatile uint32_t btnResetDownAt = 0;
+volatile uint32_t btnWifiResetDownAt = 0;
+
 // A korai kilépés próbáinak sebességkorlátozó órái. Nem a TimingState-ben
 // vannak, mert az a struct a valódi állapotgép idejeit tartja; ez csak
 // "mikor pingettünk utoljára". Kettő kell belőlük: a két várakozás egymás
@@ -392,6 +415,9 @@ volatile bool savingConfig = false;
 void printUptime();
 void resetbutton();
 void wifiresetbutton();
+void armButtonLatches();
+void restartFromButton(const char* reason);
+void doWifiReset();
 void blockingDelay(uint32_t duration);
 void waitWithButtons(uint32_t duration);
 bool waitWithButtonsUntilOnline(uint32_t duration);
@@ -857,6 +883,49 @@ void initWatchdog() {
 }
 
 // Csak akkor etetünk, ha a loop task már fel van iratkozva.
+// A ket megszakitas-kezelo. IRAM_ATTR: a flash epp foglalt lehet (SPI olvasas),
+// ezert az ISR nem elhet flashben. Mindketto CSAK jelzoket allit - semmi mas.
+// A millis() ISR-bol is hivhato: a core-ban esp_timer_get_time()-ra epul, ami
+// IRAM-ban van es megszakitasbol is ervenyes.
+void IRAM_ATTR onResetButtonEdge() {
+  if (digitalRead(resetPin) == LOW) {
+    // A 0 a "nincs folyamatban levo lenyomas" jelolese; ha a millis() eppen 0
+    // (korbefordulas), 1-re kerekitunk - ugyanaz a sentinel-kezeles, mint a
+    // pollozott agban. Enelkul a korbefordulas pillanataban indult nyomas
+    // sosem reteszelne.
+    const uint32_t now = millis();
+    btnResetDownAt = (now != 0) ? now : 1;
+    return;
+  }
+  // Felfuto el: csak akkor reteszelunk, ha a lenyomas TELJES ERTEKU volt.
+  const uint32_t down = btnResetDownAt;
+  btnResetDownAt = 0;
+  if (down != 0 && millis() - down >= BUTTON_DEBOUNCE_MS) {
+    btnResetLatched = true;
+  }
+}
+
+void IRAM_ATTR onWifiResetButtonEdge() {
+  if (digitalRead(wifiresetPin) == LOW) {
+    const uint32_t now = millis();      // lasd a 0 sentinelt az onResetButtonEdge()-ben
+    btnWifiResetDownAt = (now != 0) ? now : 1;
+    return;
+  }
+  const uint32_t down = btnWifiResetDownAt;
+  btnWifiResetDownAt = 0;
+  if (down != 0 && millis() - down >= BUTTON_DEBOUNCE_MS) {
+    btnWifiResetLatched = true;
+  }
+}
+
+// A reteszek elesitese. A setup()-ban a beragadt gomb ellenorzese UTAN hivjuk:
+// egy beragadt gomb ugyis csak lefuto elt adna, felfutot sosem, tehat nem
+// reteszelne - de a sorrend igy is egyertelmubb.
+void armButtonLatches() {
+  attachInterrupt(digitalPinToInterrupt(resetPin), onResetButtonEdge, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(wifiresetPin), onWifiResetButtonEdge, CHANGE);
+}
+
 void feedWatchdog() {
   if (watchdogEnabled) {
     feedLoopWDT();
@@ -1261,6 +1330,17 @@ void enterDeepSleep(uint64_t timerUs) {
   Serial.flush();
   Serial.end();
 
+  // A gomb-megszakítások leválasztása MÉG az ébresztőforrások élesítése előtt.
+  //
+  // MIÉRT? Az attachInterrupt() és az esp_deep_sleep_enable_gpio_wakeup()
+  // UGYANAZOKAT a GPIO megszakítás-regisztereket állítja. A futásidejű
+  // "bármelyik él" beállítás és az alváshoz kért "LOW szint" ébresztés
+  // egymásra hatása nem dokumentált - ezért nem hagyatkozunk rá: előbb
+  // leválasztunk, aztán élesítünk. Ugyanaz az elv, mint egy sorral lejjebb a
+  // "tiszta lappal indulunk"-nál. Ébredés után a setup() újra élesíti őket.
+  detachInterrupt(digitalPinToInterrupt(resetPin));
+  detachInterrupt(digitalPinToInterrupt(wifiresetPin));
+
   // Tiszta lappal indulunk, hogy biztosan csak az legyen élesítve, amit akarunk.
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
 
@@ -1447,6 +1527,25 @@ void fatalHalt(const char* reason) {
   fatalSleep();  // időzített ébresztés NÉLKÜL - nem tér vissza
 }
 
+// A gombos újraindítás közös útja - a pollozott és a reteszelt ág is ezt hívja.
+//
+// A zár ATOMIKUS megszerzése: a hívó gyors savingConfig-ellenőrzése és az
+// ESP.restart() között az async_tcp taskban ELINDULHAT egy webes mentés, és a
+// köztük lévő két println() + Serial.flush() nem is elhanyagolható idő. Az
+// újraindítás ilyenkor félbevágná a fájlírást, és csonka konfigurációt hagyna
+// a flashben. A zárral ez kizárt: ha megkaptuk, mentés már nem indulhat; ha
+// nem kaptuk meg, visszatérünk, és a következő 10 ms-os kör újra próbálkozik.
+// Feloldani nem kell - a zár az újraindulással hal el.
+void restartFromButton(const char* reason) {
+  if (!beginConfigWrite()) {
+    return;
+  }
+  Serial.println(reason);
+  Serial.println("RESTART ESP32C3 device.");
+  Serial.flush();
+  ESP.restart();
+}
+
 void resetbutton() {
   // Fájlírás közben SEMMIKÉPP nem indítunk újra: a félbeszakadt mentés sérült
   // konfigurációt hagyna hátra. Ugyanaz a szabály, mint az elalvásnál.
@@ -1455,6 +1554,21 @@ void resetbutton() {
   if (savingConfig) {
     return;
   }
+  // A megszakitas-alapu retesz: egy TELJES ERTEKU (>= BUTTON_DEBOUNCE_MS)
+  // lenyomas, ami egy blokkolo szakasz alatt tortent, es a gombot azota
+  // felengedtek. A debounce-t nem kerulte meg - a hosszat az ISR merte meg.
+  //
+  // A jelzot SZANDEKOSAN NEM toroljuk: a restartFromButton() vagy ujraindit
+  // (es akkor a RAM-mal egyutt a jelzo is eltunik), vagy visszater, mert a
+  // konfigzar epp foglalt - ilyenkor a retesznek MEG KELL MARADNIA. A gomb
+  // ekkor mar fel van engedve, tehat a pollozott ag nem tudna potolni: a
+  // jelzo torlese a felhasznalo gombnyomasat NYOM NELKUL eldobna.
+  if (btnResetLatched) {
+    timing.resetBtnDownSince = 0;
+    restartFromButton("Reset button pressed (latched).");
+    return;  // idaig csak akkor jutunk, ha a zar foglalt volt
+  }
+
   if (digitalRead(resetPin) != LOW) {
     timing.resetBtnDownSince = 0;  // felengedve: debounce újraindul
     return;
@@ -1468,31 +1582,61 @@ void resetbutton() {
   }
   // Csak akkor fogadjuk el, ha végig lenyomva maradt (valódi debounce)
   if (now - timing.resetBtnDownSince >= BUTTON_DEBOUNCE_MS) {
-    // A zár ATOMIKUS megszerzése - ugyanaz az indok, mint a
-    // wifiresetbutton()-ben. A fenti gyors savingConfig-ellenőrzés és az
-    // ESP.restart() között az async_tcp taskban ELINDULHAT egy webes mentés,
-    // és a köztük lévő két println() + Serial.flush() nem is elhanyagolható
-    // idő. Az újraindítás ilyenkor félbevágná a fájlírást, és csonka
-    // konfigurációt hagyna a flashben.
-    //
-    // A zárral ez kizárt: ha megkaptuk, mentés már nem indulhat; ha nem
-    // kaptuk meg, a következő 10 ms-os mintavételi kör újra próbálkozik.
-    // Feloldani nem kell - a zár az újraindulással hal el.
-    if (!beginConfigWrite()) {
-      return;
-    }
-    Serial.println("Reset button pressed.");
-    Serial.println("RESTART ESP32C3 device.");
-    Serial.flush();
-    ESP.restart();
+    restartFromButton("Reset button pressed.");
   }
+}
+
+// A wifireset közös útja - a pollozott és a reteszelt ág is ezt hívja.
+// A zárat itt is atomikusan szerezzük meg (lásd restartFromButton()).
+void doWifiReset() {
+  if (!beginConfigWrite()) {
+    return;  // épp mentés folyik; a következő kör újra próbálja
+  }
+  Serial.println("WIFIRESET button is pulling down!");
+  Serial.println("RESET saved wifi data!");
+  // FONTOS a sorrend: az SSID megy ELŐSZÖR. A "wifireset" célja, hogy az
+  // eszköz a beállító portálon jöjjön fel, és ezt egyedül a /ssid.txt dönti
+  // el (setup(): ha üres az SSID -> AP mód). Ha a törlés közben elmegy az
+  // áram, így a legvalószínűbb, hogy a kívánt végállapotba kerülünk.
+  // A &= szándékosan nem rövidzáras: mind a négy törlés lefut akkor is, ha
+  // valamelyik elbukik.
+  bool cleared = true;
+  cleared &= clearConfigValue(LittleFS, ssidPath);
+  cleared &= clearConfigValue(LittleFS, passPath);
+  cleared &= clearConfigValue(LittleFS, ipPath);
+  cleared &= clearConfigValue(LittleFS, gatewayPath);
+  if (!cleared) {
+    // Ha a fájlrendszer nem írható, az eszköz NEM működhet tovább: a
+    // konfiguráció mentése ugyanígy elbukna, az újraindítás pedig a régi
+    // adatokkal jönne fel - a gomb a felhasználó szemszögéből "nem csinál
+    // semmit". Ez ugyanaz a hibaosztály, mint a többi LittleFS hiba, tehát
+    // ugyanaz a kezelés: mindkét LED gyorsan villog, 5 perc múlva alvás,
+    // amiből csak a gomb vagy az áramtalanítás hoz vissza.
+    Serial.println("!!! A mentett wifi adatok törlése NEM sikerült !!!");
+    logEvent(EV_FATAL, 4);
+    // A zár oldása még a hibajelzés előtt: a fatalHalt() gombkezelőjét a
+    // beragadt savingConfig némává tenné (a resetbutton() ellenőrzi).
+    savingConfig = false;
+    fatalHalt("A mentett wifi adatok nem torolhetok - serult fajlrendszer.");
+    // fatalHalt() nem tér vissza
+  }
+  Serial.println("RESTART ESP32C3 device.");
+  Serial.flush();
+  ESP.restart();  // a zár az újraindulással hal el
 }
 
 void wifiresetbutton() {
   // Mentés közben a törlés és az újraindítás is végzetes lenne: két task írná
   // egyszerre ugyanazokat a fájlokat. Ez itt csak a GYORS kapu; az igazi
-  // védelem lent a beginConfigWrite() - ugyanúgy, mint a resetbutton()-ben.
+  // védelem a doWifiReset()-ben lévő beginConfigWrite().
   if (savingConfig) {
+    return;
+  }
+  // Megszakítás-alapú retesz - lásd a resetbutton() megfelelő ágát, beleértve
+  // azt is, hogy a jelzőt NEM töröljük: ha a zár foglalt, a nyomás megmarad.
+  if (btnWifiResetLatched) {
+    timing.wifiResetBtnDownSince = 0;
+    doWifiReset();
     return;
   }
   if (digitalRead(wifiresetPin) != LOW) {
@@ -1506,45 +1650,7 @@ void wifiresetbutton() {
     return;
   }
   if (now - timing.wifiResetBtnDownSince >= BUTTON_DEBOUNCE_MS) {
-    // A zár ATOMIKUS megszerzése. A fenti gyors savingConfig-ellenőrzés és ez
-    // a pont között az async_tcp taskban elindulhatott egy webes mentés - a
-    // puszta jelző-olvasás után a törlés és a mentés ugyanazokat a fájlokat
-    // írná egyszerre. Ha a zár nem a miénk, a következő 10 ms-os mintavételi
-    // kör újra próbálkozik.
-    if (!beginConfigWrite()) {
-      return;
-    }
-    Serial.println("WIFIRESET button is pulling down!");
-    Serial.println("RESET saved wifi data!");
-    // FONTOS a sorrend: az SSID megy ELŐSZÖR. A "wifireset" célja, hogy az
-    // eszköz a beállító portálon jöjjön fel, és ezt egyedül a /ssid.txt dönti
-    // el (setup(): ha üres az SSID -> AP mód). Ha a törlés közben elmegy az
-    // áram, így a legvalószínűbb, hogy a kívánt végállapotba kerülünk.
-    // A &= szándékosan nem rövidzáras: mind a négy törlés lefut akkor is, ha
-    // valamelyik elbukik.
-    bool cleared = true;
-    cleared &= clearConfigValue(LittleFS, ssidPath);
-    cleared &= clearConfigValue(LittleFS, passPath);
-    cleared &= clearConfigValue(LittleFS, ipPath);
-    cleared &= clearConfigValue(LittleFS, gatewayPath);
-    if (!cleared) {
-      // Ha a fájlrendszer nem írható, az eszköz NEM működhet tovább: a
-      // konfiguráció mentése ugyanígy elbukna, az újraindítás pedig a régi
-      // adatokkal jönne fel - a gomb a felhasználó szemszögéből "nem csinál
-      // semmit". Ez ugyanaz a hibaosztály, mint a többi LittleFS hiba, tehát
-      // ugyanaz a kezelés: mindkét LED gyorsan villog, 5 perc múlva alvás,
-      // amiből csak a gomb vagy az áramtalanítás hoz vissza.
-      Serial.println("!!! A mentett wifi adatok törlése NEM sikerült !!!");
-      logEvent(EV_FATAL, 4);
-      // A zár oldása még a hibajelzés előtt: a fatalHalt() gombkezelőjét a
-      // beragadt savingConfig némává tenné (a resetbutton() ellenőrzi).
-      savingConfig = false;
-      fatalHalt("A mentett wifi adatok nem torolhetok - serult fajlrendszer.");
-      // fatalHalt() nem tér vissza
-    }
-    Serial.println("RESTART ESP32C3 device.");
-    Serial.flush();
-    ESP.restart();  // a zár az újraindulással hal el
+    doWifiReset();
   }
 }
 
@@ -2334,6 +2440,12 @@ void setup() {
   if (stuckButton == 1) {
     handleStuckButton("Wifireset button got stuck.", 1, !stuckRepeat);
   }
+
+  // A beragadt gomb ellenőrzése lefutott, jöhetnek a megszakítások. Ezek
+  // teszik lehetővé, hogy egy blokkoló HTTP kérés (max. 33 mp) alatti
+  // gombnyomás se vesszen el - a hosszmérés, tehát a debounce, az ISR-ben
+  // történik. Lásd a btnResetLatched leírását.
+  armButtonLatches();
 
   checkWatchdogResets();
 

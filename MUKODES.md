@@ -441,11 +441,23 @@ A gombokat 10 ms-onként mintavételezzük, és csak a végig lenyomva maradt
 > `BTN1`, a leghosszabb ablak 10 ms).
 >
 > Egyetlen kivétel a futó **HTTP teszt**: a `http.GET()` a core blokkoló
-> hívása, nincs benne visszahívás, tehát alatta egyik gombot sem nézzük.
+> hívása, nincs benne visszahívás, tehát alatta egyik gombot sem *pollozzuk*.
 > Ez az ablak legfeljebb **egy kérésnyi** – 15 mp hallgató szervernél, 33 mp
-> halott DNS-nél (mérve: `BTN2`). Egy rövid koppintás ide eshet és elveszik;
-> a **végig nyomva tartott** gomb viszont az ablak után is hat (`BTN3`).
-> Gyakorlati szabály: **nyomd és tartsd, amíg reagál.**
+> halott DNS-nél (mérve: `BTN2`).
+>
+> Ezt **megszakítás-alapú retesz** hidalja át (`btnResetLatched`,
+> `btnWifiResetLatched`). Mindkét lábon `CHANGE` megszakítás fut, és a kezelő
+> **megméri a lenyomás hosszát**: lefutó élen jegyzi az időt, felfutón csak
+> akkor reteszel, ha a gomb legalább `BUTTON_DEBOUNCE_MS`-ig lent volt. A
+> debounce tehát változatlan, csak hardveresen történik. A blokkoló szakasz
+> alatti gombnyomás nem vész el, csak késik (`LAT1`).
+>
+> Amit a retesz **nem** kerül meg: a zajtüske nem reteszel (`LAT2`), a
+> `savingConfig` kaput és a konfigzárat a feldolgozás tiszteletben tartja, és
+> foglalt zárnál a jelző **megmarad**, hogy a nyomás ne vesszen el (`LAT4`,
+> `LAT6`). Beragadt gomb nem reteszel, mert felfutó éle sosem lesz (`LAT5`).
+> Alvás előtt a megszakításokat leválasztjuk, még az ébresztőforrás élesítése
+> előtt (`LAT7`).
 
 > **Bekapcsolás közben ne tartsd nyomva** – az eszköz el sem indulna, és ez
 > ellen szoftver nem védhet. Új hardver revízióban a gombot érdemes szabad,

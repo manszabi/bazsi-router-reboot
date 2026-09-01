@@ -317,17 +317,23 @@ választ, és ez a hiba némán, a redundancia elvesztésével jelentkezne. A
 | **Reset** (D1) | ESP32-C3 azonnali újraindítása; deep sleepből felébreszti az eszközt |
 | **Wi-Fi Reset** (D0) | Mentett Wi-Fi adatok törlése + ESP újraindítás → visszaáll AP módba |
 
-> ⚠️ **Tartsd nyomva a gombot ~1 másodpercig.** A firmware minden saját
-> várakozó ciklusában **10 ms-onként** mintavételezi mindkét gombot (mérve:
-> `BTN1`) – de egy futó **HTTP teszt alatt nem tud**: a `http.GET()` az ESP32
-> core blokkoló hívása, nincs benne visszahívás. Ez az ablak **legfeljebb egy
-> kérésnyi**: 15 mp, ha a szerver hallgat, és 33 mp, ha a DNS halott (mérve:
-> `BTN2` – 33 010 ms). A kérések *között* újra pollozunk.
+> **Egy rövid koppintás is elég.** A firmware minden saját várakozó ciklusában
+> 10 ms-onként mintavételezi mindkét gombot (mérve: `BTN1`) – egy futó **HTTP
+> teszt alatt viszont nem tud**, mert a `http.GET()` az ESP32 core blokkoló
+> hívása. Ez az ablak legfeljebb egy kérésnyi: 15 mp hallgató szervernél,
+> 33 mp halott DNS-nél (mérve: `BTN2`).
 >
-> Következmény: egy rövid koppintás ebbe az ablakba eshet, és nyom nélkül
-> elveszik – a láb állapotát ugyanis csak a mintavételkor olvassuk. A **végig
-> nyomva tartott** gomb viszont az ablak után is hat, a debounce nem „vész el"
-> (mérve: `BTN3`). Ezért a szabály: nyomd, és tartsd, amíg reagál.
+> Ezt az ablakot **megszakítás-alapú retesz** hidalja át. Mindkét gomb lábán
+> `CHANGE` megszakítás fut, és a kezelő **megméri a lenyomás hosszát**: a
+> lefutó élen jegyzi az időt, a felfutón pedig csak akkor reteszel, ha a gomb
+> legalább 50 ms-ig lent volt. A debounce tehát ugyanaz maradt, csak
+> hardveresen történik – és akkor is működik, amikor a `loop()` épp nem tud
+> mintavételezni. A blokkoló szakasz alatti gombnyomás így **nem vész el**,
+> csak a szakasz végéig késik (mérve: `LAT1`).
+>
+> A retesz nem kerül meg semmit: egy zajtüske továbbra sem indít újra (`LAT2`),
+> fájlírás közben a nyomás megmarad, de nem hat (`LAT4`), és egy beragadt gomb
+> nem reteszel, mert felfutó éle sosem lesz (`LAT5`).
 
 > ⚠️ Induláskor **mindkét** gombot ellenőrizzük. Ha bármelyik beragadva marad, a
 > két LED 3 másodpercig **felváltva** villog (megkülönböztetésül a végzetes

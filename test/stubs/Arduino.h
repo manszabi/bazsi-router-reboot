@@ -87,6 +87,20 @@ static const uint8_t D8 = 8;
 static const uint8_t D9 = 9;
 static const uint8_t D10 = 10;
 
+// --- megszakitasok ---
+// A sketch attachInterrupt()-tel reteszeli a gombnyomasokat. A harness NEM
+// szimulal valodi megszakitasokat: a regisztralt kezelot a teszt hivja meg
+// kezzel (simIsr), miutan beallitotta a lab allapotat. Igy pontosan az
+// ellenorizheto, amit a valodi ISR is latna.
+typedef void (*IsrFn)();
+extern std::map<int, IsrFn> g_isr;
+extern std::map<int, int>   g_isrMode;
+void attachInterrupt(uint8_t pin, IsrFn fn, int mode);
+void detachInterrupt(uint8_t pin);
+static inline uint8_t digitalPinToInterrupt(uint8_t p) { return p; }
+// A teszt ezzel "sut el" egy elt: eloszor allitsd be a g_pinRead[pin]-t.
+void simIsr(int pin);
+
 // --- gomb-mintavetelezes merese (lasd main_stub.cpp) ---
 extern bool     g_btnTrack;
 extern uint32_t g_btnLastPoll;
