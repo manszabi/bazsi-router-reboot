@@ -66,6 +66,9 @@ extern TimingState timing;
 extern UIFlags uiFlags;
 extern bool staticConfigActive;
 extern bool watchdogEnabled;
+extern uint32_t resetDelayProbeLast;
+extern uint32_t firstStartProbeLast;
+bool onlineProbeDue(uint32_t& lastProbe, uint32_t now);
 void logEvent(EventCode code, uint16_t param);
 constexpr uint8_t EV_TEST_FAIL_C = 4;
 constexpr uint8_t EV_FATAL_C = 9;
@@ -77,6 +80,17 @@ void printUptime();
 void decodeSecretInPlace(char* buf);
 bool encodeSecret(const char* plain, char* out, size_t outSize);
 void startConfigPortal();
+
+// A sketch pinjei (variants/XIAO_ESP32C3/pins_arduino.h szerint). NEVESITVE:
+// egy hardveres atkotes igy egyetlen sor a tesztekben is - korabban a relé
+// GPIO10 (D5) volt, es a szama 37 helyen szerepelt szo szerint.
+static const int PIN_RELAY   = 10;  // D10 - rele (kulso 22k lehuzoval)
+static const int PIN_LED     = 6;   // D4  - statusz LED
+static const int PIN_WIFILED = 5;   // D3  - Wi-Fi LED
+#define RELAY_HIGH "pin10=HIGH"
+#define RELAY_LOW  "pin10=LOW"
+#define LED_HIGH   "pin6=HIGH"
+#define LED_LOW    "pin6=LOW"
 
 static int failures = 0, checks = 0;
 #define CHECK(cond, msg) do { checks++; if(!(cond)) { printf("  \033[31mFAIL\033[0m %s\n", msg); failures++; } \
@@ -139,6 +153,11 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   testState = TestState();
   timing = TimingState();
   uiFlags = UIFlags();
+  // A korai kilepes probainak orai is sima globalisok: egy valodi ujraindulas
+  // nullazza oket. A setup() ugyan mindkettot beallitja hasznalat elott, de a
+  // coldBoot() szerzodese az, hogy MINDENT ugy hagy, mint egy hidegindulas.
+  resetDelayProbeLast = 0;
+  firstStartProbeLast = 0;
   staticConfigActive = false;
   watchdogEnabled = false;
   g_gpioWakeResult = 0;
@@ -306,14 +325,14 @@ static void sc10() {
         while (!reset_device() && ++guard < 200000) { yield(); }
       }
     } catch (DeepSleepSignal&) {}
-    CHECK(g_pinState[7] == LOW,  "relé (GPIO7) LOW - a router kap áramot");
+    CHECK(g_pinState[PIN_RELAY] == LOW,  "relé (GPIO10) LOW - a router kap áramot");
     CHECK(g_pinState[6] == LOW,  "státusz LED (GPIO6) LOW");
     CHECK(g_pinState[5] == LOW,  "wifi LED (GPIO5) LOW");
     CHECK(!g_serialOn, "Serial.end() megtörtént");
-    CHECK(logIndex("pin7=LOW") < logIndex("DEEP_SLEEP"), "a relé az alvás ELŐTT kapcsolt le");
-    CHECK(g_heldPins.count(7) == 1, "a relé láb (GPIO7) hold-dal rögzítve alvásra");
+    CHECK(logIndex(RELAY_LOW) < logIndex("DEEP_SLEEP"), "a relé az alvás ELŐTT kapcsolt le");
+    CHECK(g_heldPins.count(PIN_RELAY) == 1, "a relé láb (GPIO10) hold-dal rögzítve alvásra");
     CHECK(g_deepSleepHoldEnabled, "a hold deep sleep alatt is érvényes (deep_sleep_hold_en)");
-    { const int h = logIndex("gpio_hold_en(7)");
+    { const int h = logIndex("gpio_hold_en(10)");
       CHECK(h >= 0 && h < logIndex("DEEP_SLEEP"), "a rögzítés az elalvás ELŐTT történt"); }
     CHECK(g_gpioWakeMask == (1ULL << 3), "reset gomb (GPIO3) ébresztésre armolva");
     CHECK(g_gpioWakeMode == 0, "LOW szintre ébred");
@@ -365,9 +384,9 @@ static void sc13() {
     CHECK(guard < 200000, "reset_device() befejeződött");
     CHECK(pulse >= 90000, "a pulzus legalább 90s volt (nem ~0)");
     CHECK(pulse < 92000, "és nem lényegesen több");
-    CHECK(logIndex("pin7=HIGH") >= 0, "relé bekapcsolt (router áramtalanítva)");
-    CHECK(logIndex("pin7=HIGH") < logIndex("pin7=LOW"), "előbb be, aztán ki");
-    CHECK(g_pinState[7] == LOW, "a végén a router visszakapta az áramot"); }
+    CHECK(logIndex(RELAY_HIGH) >= 0, "relé bekapcsolt (router áramtalanítva)");
+    CHECK(logIndex(RELAY_HIGH) < logIndex(RELAY_LOW), "előbb be, aztán ki");
+    CHECK(g_pinState[PIN_RELAY] == LOW, "a végén a router visszakapta az áramot"); }
 
 }
 
@@ -484,33 +503,30 @@ static void sc22() {
 }
 
 static void sc23() {
-  // Flashelés után elfelejtett data/ feltöltés: a LittleFS csatolható (a
-  // begin(true) formáz), csak üres. Az eszköznek így is konfigurálhatónak
-  // kell maradnia.
+  // A beallito urlap a PROGRAMBAN van (CONFIG_FORM), nem a LittleFS-en.
+  // Barmilyen is a fajlrendszer allapota, az eszkoznek konfigurálhatónak
+  // kell maradnia - korabban egy elfelejtett data/ feltoltes utan a portal a
+  // tartalek urlapra esett vissza, most nincs mire visszaesni.
   coldBoot(false, "", "", "", "");
-  g_fs.clear();                       // a data/ mappa nincs feltöltve
+  g_fs.clear();                       // teljesen ures fajlrendszer
   try { setup(); } catch (DeepSleepSignal&) {}
   CHECK(deviceMode == (DeviceMode)1, "konfig portál elindult LittleFS tartalom nélkül is");
-  CHECK(!g_fs.count("/wifimanager.html"), "tényleg nincs feltöltve a HTML");
 
   AsyncWebServerRequest root; g_handlers["/#1"](&root);
-  CHECK(root._code == 200, "a / mégis 200-at ad");
-  CHECK(root._body.find("data/ mappa nincs feltoltve") != std::string::npos,
-        "a beépített tartalék űrlapot kapjuk");
+  CHECK(root._code == 200, "a / 200-at ad");
   CHECK(root._body.find("name=\"ssid\"") != std::string::npos
         && root._body.find("method=\"POST\"") != std::string::npos,
-        "és tényleg kitölthető űrlap, nem csak egy hibaüzenet");
+        "kitölthető űrlap, nem hibaüzenet");
+  CHECK(root._body.find("data/") == std::string::npos,
+        "nincs benne a régi 'nincs feltöltve a data/' figyelmeztetés");
+  CHECK(root._body.find("style.css") == std::string::npos
+        && root._body.find("favicon") == std::string::npos,
+        "az űrlap nem hivatkozik külső fájlra - egyetlen kérésből teljes");
 
-  // A hiányzó statikus fájlokra hibastátusz jár. A pontos kód a
-  // ESPAsyncWebServer verziójától függ (404 vagy 501), de 200 SEMMIKÉPP.
-  AsyncWebServerRequest css; g_handlers["/style.css#1"](&css);
-  CHECK(css._code != 200, "hiányzó /style.css -> hibastátusz, nem hamis 200");
-  AsyncWebServerRequest ico; g_handlers["/favicon.png#1"](&ico);
-  CHECK(ico._code != 200, "hiányzó /favicon.png -> hibastátusz");
-
-  // A tartalék űrlap nem hivatkozik rájuk, tehát a hiányuk nem is látszik.
-  CHECK(root._body.find("style.css") == std::string::npos,
-        "a tartalék űrlap nem is kéri a stíluslapot");
+  // BIZTONSAG: a statikus vegpontok NEM leteznek tobbe. Ez nem szepseghiba:
+  // amig voltak, egy elirt utvonal-szabaly a /pass.txt-t is kiadhatta volna.
+  CHECK(g_handlers.count("/style.css#1") == 0, "nincs /style.css útvonal");
+  CHECK(g_handlers.count("/favicon.png#1") == 0, "nincs /favicon.png útvonal");
 
   // A /log viszont működik - épp ilyenkor kell a legjobban.
   AsyncWebServerRequest lg; g_handlers["/log#1"](&lg);
@@ -645,7 +661,7 @@ static void scFT1() {
   CHECK(deviceMode == (DeviceMode)2, "MODE_FATAL");
   CHECK(wifiSim.softApCount == 0, "NEM indult AP portál");
   CHECK(wifiSim.beginCount == 0, "meg sem próbált csatlakozni");
-  CHECK(g_pinState[7] == LOW, "a relé LOW - a router kap áramot");
+  CHECK(g_pinState[PIN_RELAY] == LOW, "a relé LOW - a router kap áramot");
 }
 
 static void scFT2() {
@@ -714,7 +730,7 @@ static void scFT6() {
   setup();
   for (int i = 0; i < 50; i++) loop();
   CHECK(pingSim.calls == 0, "nem futott internet teszt");
-  CHECK(g_pinState[7] == LOW, "a relé végig LOW maradt");
+  CHECK(g_pinState[PIN_RELAY] == LOW, "a relé végig LOW maradt");
 
   bool restarted = false;
   g_pinRead[3] = LOW;
@@ -743,7 +759,7 @@ static void scFT7() {
   CHECK(elapsed < 5u * 60 * 1000 + 2000, "és nem sokkal később");
   CHECK(us == 0, "NINCS időzített ébresztés - magától nem ébred fel");
   CHECK(g_gpioWakeMask == (1ULL << 3), "a reset gomb viszont felébreszti");
-  CHECK(g_pinState[7] == LOW, "a relé LOW - a router kap áramot alvás közben is");
+  CHECK(g_pinState[PIN_RELAY] == LOW, "a relé LOW - a router kap áramot alvás közben is");
   CHECK(logIndex("wakeup_disable_all") < logIndex("DEEP_SLEEP"),
         "előbb minden ébresztőforrást töröltünk");
 }
@@ -770,7 +786,7 @@ static void scWF1() {
   setup();
   CHECK(deviceMode == (DeviceMode)0, "MONITOR mód - kivárja a first start delayt");
   CHECK(wifiSim.softApCount == 0, "nem indult AP portál");
-  CHECK(g_pinState[7] == LOW, "a relé LOW - a router kap áramot");
+  CHECK(g_pinState[PIN_RELAY] == LOW, "a relé LOW - a router kap áramot");
 }
 
 static void scWF2() {
@@ -786,9 +802,16 @@ static void scWF2() {
   CHECK(slept, "elaludt (nem AP módba ment)");
   CHECK(us == 3600ULL*1000000ULL, "1 óra múlva magától ébred és újrapróbálja");
   CHECK(rtcRetryRounds == 1, "egy kör elkönyvelve");
-  CHECK(wifiSim.beginCount - beginBefore == 6, "3 próba, router reset, majd újabb 3");
-  CHECK(logIndex("pin7=HIGH") >= 0, "a körben lefutott egy router újraindítás");
+  const int begins = wifiSim.beginCount - beginBefore;
   const uint32_t dt = g_millis - t0;
+  CHECK(begins >= 6, "megvan a 3 + 3 blokkoló csatlakozási kísérlet");
+  // A tobbi begin() az onlineProbe() 60 mp-enkenti ebresztgetese a ket hosszu
+  // varakozas alatt. A FELSO KORLAT maga a szerzodes: percenkent legfeljebb
+  // egy begin(), tehat sem a radio, sem (a persistent(false) miatt) a flash
+  // nem kap tobbet, mint amennyit a dokumentacio iger.
+  CHECK(begins <= 6 + (int)(dt / 60000) + 2,
+        "a proba percenkent legfeljebb egy begin()-t ad hozza");
+  CHECK(logIndex(RELAY_HIGH) >= 0, "a körben lefutott egy router újraindítás");
   CHECK(dt >= 10u*60*1000, "megvárta a 10 perces first start delayt");
   CHECK(dt >= 25u*60*1000, "és a reset + bootolási várakozást is (~25,5 perc)");
   CHECK(dt < 27u*60*1000, "de nem sokkal többet");
@@ -851,10 +874,10 @@ static void scWF6() {
   wifiSim.willConnect = false; wifiSim.begun = false;   // megszakad a kapcsolat
   g_log.clear();
   int guard = 0;
-  try { while (logIndex("pin7=HIGH") < 0 && ++guard < 200000) loop(); }
+  try { while (logIndex(RELAY_HIGH) < 0 && ++guard < 200000) loop(); }
   catch (DeepSleepSignal&) {}
   CHECK(wifiSim.beginCount - beginBefore == 3, "3 újrapróbálkozás a reset előtt");
-  CHECK(logIndex("pin7=HIGH") >= 0, "elindult a router újraindítás (relé be)");
+  CHECK(logIndex(RELAY_HIGH) >= 0, "elindult a router újraindítás (relé be)");
 }
 
 
@@ -887,7 +910,7 @@ static void scWD2() {
   setup();
   CHECK(deviceMode == (DeviceMode)2, "3. reset -> MODE_FATAL");
   CHECK(wifiSim.softApCount == 0, "nem indult AP portál");
-  CHECK(g_pinState[7] == LOW, "a relé LOW - a router kap áramot");
+  CHECK(g_pinState[PIN_RELAY] == LOW, "a relé LOW - a router kap áramot");
 }
 
 static void scWD3() {
@@ -974,10 +997,10 @@ static void scE2() {
   loop();
   g_log.clear();
   int guard = 0;
-  while (logIndex("pin7=HIGH") < 0 && ++guard < 300000) { loop(); g_millis += 10; }
+  while (logIndex(RELAY_HIGH) < 0 && ++guard < 300000) { loop(); g_millis += 10; }
   CHECK(guard < 300000, "eljutott a router resetig");
-  const int relayOn = logIndex("pin7=HIGH");
-  const int relayOff = logIndex("pin7=LOW");
+  const int relayOn = logIndex(RELAY_HIGH);
+  const int relayOff = logIndex(RELAY_LOW);
   CHECK(relayOn >= 0 && relayOff > relayOn, "relé be, majd ki");
   // a reset után visszatér tesztelni
   guard = 0;
@@ -1001,8 +1024,8 @@ static void scE3() {
   CHECK(slept, "a router reset után sem jött vissza -> alvás és újrapróbálkozás");
   CHECK(deviceMode == (DeviceMode)0, "NEM AP mód (a hálózat csak nem látszik)");
   CHECK(rtcRetryRounds == 1, "egy újrapróbálkozási kör elkönyvelve");
-  CHECK(logIndex("pin7=HIGH") >= 0, "közben lefutott egy router újraindítás");
-  CHECK(g_pinState[7] == LOW, "a relé a végén LOW - a router kap áramot");
+  CHECK(logIndex(RELAY_HIGH) >= 0, "közben lefutott egy router újraindítás");
+  CHECK(g_pinState[PIN_RELAY] == LOW, "a relé a végén LOW - a router kap áramot");
 }
 
 static void scE4() {
@@ -1179,12 +1202,12 @@ static void scX1() {
     }
   } catch (RestartSignal&) { restarted = true; }
   CHECK(restarted, "a gomb újraindított a pulzus közben");
-  CHECK(g_pinState[7] == HIGH, "a relé ekkor még HIGH volt (router áram nélkül)");
+  CHECK(g_pinState[PIN_RELAY] == HIGH, "a relé ekkor még HIGH volt (router áram nélkül)");
   // az újraindulás után a setup() azonnal áramot ad a routernek
   g_pinRead[3] = HIGH;
   coldBoot(true, "TestNet", "pw", "", "");
   setup();
-  CHECK(g_pinState[7] == LOW, "az újraindulás után a relé LOW - a router kap áramot");
+  CHECK(g_pinState[PIN_RELAY] == LOW, "az újraindulás után a relé LOW - a router kap áramot");
 }
 
 static void scX2() {
@@ -1322,7 +1345,7 @@ static void scR1() {
   CHECK(!slept, "nem aludt el");
   CHECK(deviceMode == (DeviceMode)1, "AP beállító módba ment");
   CHECK(rtcRetryRounds == 0, "nem számolt újrapróbálkozási kört");
-  CHECK(logIndex("pin7=HIGH") < 0, "rossz jelszónál NEM indítja újra a routert");
+  CHECK(logIndex(RELAY_HIGH) < 0, "rossz jelszónál NEM indítja újra a routert");
   // A setup() egyetlen probat tesz; a dontes csak a handleFirstStart() utani
   // 3 probat kovetoen szuletik meg. Ez nem veletlen: a core az elso disconnect
   // esemenynel meg WL_DISCONNECTED-et ad (STA.cpp:148), tehat EGYETLEN
@@ -1395,7 +1418,7 @@ static void scR7() {
     g_httpFailMs = failMs;
     g_serialLog.clear(); g_log.clear();
     int guard = 0;
-    try { while (logIndex("pin7=HIGH") < 0 && ++guard < 500000) loop(); }
+    try { while (logIndex(RELAY_HIGH) < 0 && ++guard < 500000) loop(); }
     catch (DeepSleepSignal&) {}
     g_httpFailMs = 15000; g_httpCode = 200;
     const int elsoTeszt = serialIndex("Beginning Test.");
@@ -1537,7 +1560,7 @@ static void scSB1() {
   CHECK(slept, "elaludt");
   CHECK(us == 60ULL * 1000000ULL, "60 másodperces ébresztés");
   CHECK(g_gpioWakeMask == 0, "gomb-ébresztés NINCS armolva (boot loop ellen)");
-  CHECK(g_pinState[7] == LOW, "a relé LOW - a router kap áramot");
+  CHECK(g_pinState[PIN_RELAY] == LOW, "a relé LOW - a router kap áramot");
 }
 
 static void scSB2() {
@@ -1707,7 +1730,7 @@ static void scOV1() {
       const size_t before = g_log.size();
       loop(); g_millis += 10;
       for (size_t i = before; i < g_log.size(); i++)
-        if (g_log[i] == "pin7=HIGH") resets++;
+        if (g_log[i] == RELAY_HIGH) resets++;
       if (resets >= 3) break;
     }
   } catch (DeepSleepSignal&) {}
@@ -1997,7 +2020,7 @@ static void scH8() {
       const size_t before = g_log.size();
       loop();
       for (size_t i = before; i < g_log.size(); i++)
-        if (g_log[i] == "pin7=HIGH") relay = true;
+        if (g_log[i] == RELAY_HIGH) relay = true;
     }
   } catch (DeepSleepSignal&) {}
 
@@ -2017,8 +2040,16 @@ static void scH8() {
     std::set<std::string> uniq(g_httpUrls.begin(), g_httpUrls.end());
     CHECK(uniq.size() == 5, "öt különböző végpont, egyik sem ismétlődik");
   }
-  CHECK(pingSim.targets.empty(),
-        "az internetteszt egyetlen pinget sem küld (a ping csak a gateway-hez való)");
+  // A ping MOSTANTOL letezik a programban - de csak a hosszu varakozasok korai
+  // lezarasahoz (onlineProbe), sosem az internetteszt reszekent. A szerzodes
+  // tehat nem az, hogy "nincs ping", hanem hogy egyetlen ping sem HELYETTESIT
+  // egy HTTP tesztet: az eszkalacio mind az ot vegpontot vegigprobalta.
+  bool csakProbeCel = true;
+  for (auto& t : pingSim.targets) {
+    if (t != "1.1.1.1") csakProbeCel = false;
+  }
+  CHECK(csakProbeCel,
+        "minden ping a proba celpontjara ment, egyik sem az internetteszt resze");
 }
 
 // --- Befagyott router-DNS: HTTP semmi, ICMP tokeletes -----------------------
@@ -2039,13 +2070,19 @@ static void scH9() {
     while (++guard < 400000 && g_millis - t0 < 30u * 60 * 1000 && relays == 0) {
       loop();
       for (size_t i = before; i < g_log.size(); i++)
-        if (g_log[i] == "pin7=HIGH") relays++;
+        if (g_log[i] == RELAY_HIGH) relays++;
       before = g_log.size();
     }
   } catch (DeepSleepSignal&) {}
   CHECK(relays == 1, "a befagyott DNS-t router resettel kezeli");
   CHECK(g_millis - t0 < 5u * 60 * 1000, "5 percen belül, nem órákon át tétlenül");
-  CHECK(pingSim.targets.empty(), "a sikeres ping nem menti meg a hibás állapotot");
+  // A regi teszt azt kotötte ki, hogy egyaltalan NINCS ping. Az onlineProbe()
+  // ota van - es epp ezert lett ez a teszt ERŐSEBB: most azt allitjuk, hogy a
+  // ping tenyleg lefutott ES SIKERULT (pingSim.ok = true), a router reset
+  // megis megtortent. Vagyis a ping semmilyen uton nem tud "atszavazni" a
+  // HTTP tesztek felett - ez a H9 eredeti lenyege.
+  CHECK(!pingSim.targets.empty(), "a proba tenyleg pingelt (es sikerult is)");
+  CHECK(g_httpUrls.size() >= 5, "es mind az ot HTTP teszt lefutott");
 }
 
 
@@ -2169,29 +2206,37 @@ static void scP13() {
 
 // --- A LED-ek ne hazudjanak -------------------------------------------------
 static void scLED1() {
-  // A MUKODES.md LED tablazata szerint a reset pulzus alatt MINDKET LED sotet.
-  // A Wi-Fi LED-nek kulonosen: a router ilyenkor aram nelkul van, tehat
-  // kapcsolat sincs. Kabel nelkul a LED az egyetlen visszajelzes.
+  // A reset pulzus alatt a STATUSZ LED VILLOG (2 Hz), a Wi-Fi LED viszont
+  // vegig sotet: a router ilyenkor aram nelkul van, tehat kapcsolat sincs.
+  //
+  // A korabbi valtozat mindket LED-et sotetre kapcsolta, es ez a teszt azt
+  // rogzitette. 90 masodpercnyi sotet LED viszont ranezesre a HALOTT
+  // eszkoztol sem kulonboztetheto meg - ezert villog most a statusz LED.
+  // FIGYELEM a teszt erejere: a regi "volt-e pin6=LOW" allitas a villogasra
+  // is IGAZ lenne, tehat csendben tovabb ment volna. Ezert nezzuk MINDKET
+  // irany valtasait, es szamoljuk is oket.
   coldBoot(true, "TestNet", "pw", "", "");
   setup();
-  CHECK(g_pinState[5] == HIGH, "csatlakozas utan vilagit a Wi-Fi LED (GPIO5)");
+  CHECK(g_pinState[PIN_WIFILED] == HIGH, "csatlakozas utan vilagit a Wi-Fi LED (GPIO5)");
 
   int guard = 0;
   while (!reset_device() && ++guard < 200000) { feedLoopWDT(); delay(10); }
   CHECK(guard < 200000, "a reset pulzus lefutott");
 
-  // A pulzus KOZBEN (a relay HIGH es LOW kozott) mindket LED sotet volt.
-  const int relayOn = logIndex("pin7=HIGH");
+  const int relayOn = logIndex(RELAY_HIGH);
   CHECK(relayOn >= 0, "a rele bekapcsolt");
-  bool wifiLedOffInPulse = false, statusLedOffInPulse = false;
-  // Csak a pulzus ablakat nezzuk: a rele bekapcsolasatol a kikapcsolasaig.
+  bool wifiLedOnInPulse = false;
+  int statusLow = 0, statusHigh = 0;
   for (size_t i = (size_t)relayOn; i < g_log.size(); i++) {
-    if (g_log[i] == "pin7=LOW" && (int)i > relayOn) break;
-    if (g_log[i] == "pin5=LOW") wifiLedOffInPulse = true;
-    if (g_log[i] == "pin6=LOW") statusLedOffInPulse = true;
+    if (g_log[i] == RELAY_LOW && (int)i > relayOn) break;
+    if (g_log[i] == "pin5=HIGH") wifiLedOnInPulse = true;
+    if (g_log[i] == LED_LOW)  statusLow++;
+    if (g_log[i] == LED_HIGH) statusHigh++;
   }
-  CHECK(statusLedOffInPulse, "a statusz LED sotet a pulzus alatt");
-  CHECK(wifiLedOffInPulse, "a Wi-Fi LED is sotet - nem allitja, hogy van halozat");
+  CHECK(statusLow > 100 && statusHigh > 100,
+        "a statusz LED VILLOG a pulzus alatt (90 mp / 2 Hz -> tobb szaz valtas)");
+  CHECK(!wifiLedOnInPulse, "a Wi-Fi LED egyszer sem gyullad ki - nincs halozat");
+  CHECK(g_pinState[PIN_LED] == HIGH, "a pulzus utan folyamatosra all vissza");
 }
 
 
@@ -2241,16 +2286,22 @@ static void scL6() {
   logEvent((EventCode)9, 3);    // FATAL
   logEvent((EventCode)10, 2);   // WDT RESET
   logEvent((EventCode)11, 1);   // STUCK BUTTON
+  logEvent((EventCode)12, 1);   // GW UNREACH
+  // A 6-os (AP MODE) sort a coldBoot(SSID nelkul) + setup() mar beirta.
+  // A 12-es viszont eddig KIMARADT: a test/README azt allitotta, hogy ez a
+  // teszt MINDEN kodot lefed, a lefedettseg-meres pedig azt mutatta, hogy a
+  // "GW UNREACH" cimke sora sosem fut le. Az allitas es a teszt szetcsuszott.
 
   AsyncWebServerRequest req;
   g_handlers["/log#1"](&req);
   const std::string& b = req._body;
   const char* want[] = { ">BOOT<", ">WIFI OK<", ">WIFI LOST<", ">TEST FAIL<",
-                         ">ROUTER RESET<", ">CONFIG SAVED<", ">SLEEP<",
-                         ">FATAL<", ">WDT RESET<", ">STUCK BUTTON<" };
+                         ">ROUTER RESET<", ">AP MODE<", ">CONFIG SAVED<",
+                         ">SLEEP<", ">FATAL<", ">WDT RESET<", ">STUCK BUTTON<",
+                         ">GW UNREACH<" };
   bool all = true;
   for (const char* w : want) if (b.find(w) == std::string::npos) { all = false; printf("     [info] hianyzik: %s\n", w); }
-  CHECK(all, "minden esemenykod olvashato cimket kap");
+  CHECK(all, "MIND a 12 esemenykod olvashato cimket kap");
   CHECK(b.find(">?<") == std::string::npos, "nincs ismeretlen kod a naplóban");
 }
 
@@ -2268,20 +2319,31 @@ static void scL7() {
 
 // --- A tobbi HTTP vegpont ---------------------------------------------------
 static void scF2() {
-  // Ha a data/ mappa FEL van toltve, a / a fajlt adja vissza, nem a tartalek
-  // urlapot. A tobbi statikus vegpont is eljon.
+  // A portal a LittleFS-rol SEMMIT nem szolgal ki. Ez a legfontosabb
+  // biztonsagi tulajdonsaga: a /pass.txt ugyanabban a gyokerben van, mint
+  // barmi mas, amit valaha kiszolgalnank. A teszt ezert szandekosan olyan
+  // fajlokat tesz fel, amiket a regi valtozat MEG kiadott volna.
   coldBoot(false, "", "", "", "");
   setup();
-  g_fs["/wifimanager.html"] = "<html>igazi</html>";
+  g_fs["/wifimanager.html"] = "<html>REGI FAJL</html>";
   g_fs["/style.css"] = "body{}";
   g_fs["/favicon.png"] = "png";
+
   AsyncWebServerRequest a; g_handlers["/#1"](&a);
   CHECK(a._code == 200, "/ -> 200");
-  CHECK(a._body.find("data/") == std::string::npos, "a fajlt adja, nem a tartalek urlapot");
-  AsyncWebServerRequest b; g_handlers["/style.css#1"](&b);
-  CHECK(b._code == 200, "/style.css -> 200");
-  AsyncWebServerRequest c; g_handlers["/favicon.png#1"](&c);
-  CHECK(c._code == 200, "/favicon.png -> 200");
+  CHECK(a._body.find("REGI FAJL") == std::string::npos,
+        "a / a BEEPITETT urlapot adja, nem a fajlrendszeren talalt HTML-t");
+  CHECK(a._body.find("name=\"ssid\"") != std::string::npos,
+        "es ez tenyleg a beallito urlap");
+
+  // Egyetlen olyan utvonal sincs regisztralva, ami a LittleFS-bol olvasna.
+  int fsUtvonalak = 0;
+  for (auto& kv : g_handlers) {
+    if (kv.first.rfind("/style.css", 0) == 0) fsUtvonalak++;
+    if (kv.first.rfind("/favicon", 0) == 0)   fsUtvonalak++;
+    if (kv.first.rfind("/wifimanager", 0) == 0) fsUtvonalak++;
+  }
+  CHECK(fsUtvonalak == 0, "nincs egyetlen fajlkiszolgalo utvonal sem");
 }
 
 static void scF3() {
@@ -2300,11 +2362,10 @@ static void scF4() {
   // elaludna az eszkoz.
   coldBoot(false, "", "", "", "");
   setup();
-  g_fs["/style.css"] = "body{}";
   const uint32_t first = apDeadline;
   g_millis += 60u * 1000;
-  AsyncWebServerRequest a; g_handlers["/style.css#1"](&a);
-  CHECK(apDeadline > first, "a /style.css is kitolja a hataridot");
+  AsyncWebServerRequest a; g_handlers["/ping#1"](&a);
+  CHECK(apDeadline > first, "a /ping is kitolja a hataridot");
   const uint32_t second = apDeadline;
   g_millis += 60u * 1000;
   AsyncWebServerRequest b; g_handlers["/log#1"](&b);
@@ -2350,10 +2411,10 @@ static void scE6() {
   wifiSim.willConnect = true;               // de azonnal visszajon
   g_log.clear();
   int guard = 0;
-  try { while (++guard < 100000 && logIndex("pin7=HIGH") < 0
+  try { while (++guard < 100000 && logIndex(RELAY_HIGH) < 0
                && !serialHas("Beginning Test.")) loop(); }
   catch (...) {}
-  CHECK(logIndex("pin7=HIGH") < 0, "NEM indit routert, ha visszajott a WiFi");
+  CHECK(logIndex(RELAY_HIGH) < 0, "NEM indit routert, ha visszajott a WiFi");
   CHECK(serialHas("WIFI RECONNECTED!"), "ujracsatlakozott");
   CHECK(rtcRetryRounds == 0, "a sikeres teszt nullazza a 2 napos ablakot");
 }
@@ -2834,9 +2895,9 @@ static void scSE10() {
   // blokkolo ciklus hajtja), tehat a loop() utan mar ujra LOW. A naplobol
   // kell nezni, hogy volt-e HIGH.
   int guard = 0;
-  try { while (++guard < 400000 && logIndex("pin7=HIGH") < 0) loop(); }
+  try { while (++guard < 400000 && logIndex(RELAY_HIGH) < 0) loop(); }
   catch (...) {}
-  CHECK(logIndex("pin7=HIGH") >= 0, "router reset elindult");
+  CHECK(logIndex(RELAY_HIGH) >= 0, "router reset elindult");
   wifiSim.lastPass.clear();
   try { while (++guard < 900000 && !serialHas("WIFI OK in FAILURE_STATE.")) loop(); }
   catch (...) {}
@@ -2861,8 +2922,8 @@ static int gwFutas(bool gwElerheto, bool statikus, uint32_t maxKor) {
       const size_t before = g_log.size();
       loop();
       for (size_t i = before; i < g_log.size(); i++) {
-        if (g_log[i] == "pin7=HIGH" && !magas) { magas = true; resetek++; }
-        if (g_log[i] == "pin7=LOW") magas = false;
+        if (g_log[i] == RELAY_HIGH && !magas) { magas = true; resetek++; }
+        if (g_log[i] == RELAY_LOW) magas = false;
       }
     }
   } catch (...) {}
@@ -2917,23 +2978,24 @@ static void scP16() {
     { "192.168.1.200", "",            500 },   // felig kitoltott paros
     { "192.168.1.200", "192.168.1.1", 200 },   // helyes
   };
-  for (int feltoltott = 0; feltoltott < 2; feltoltott++) {
-    bool mind = true;
-    for (auto& e : esetek) {
-      coldBoot(false, "", "", "", "");
-      if (feltoltott) g_fs["/wifimanager.html"] = "<html>x</html>";
-      setup();
-      AsyncWebServerRequest g; g_handlers["/#1"](&g);
-      const bool tartalek = g._body.find("data/ mappa nincs") != std::string::npos;
-      if (tartalek == (feltoltott != 0)) mind = false;   // rossz urlapot kaptunk
-      if (postConfig("Halozat", "jelszo123", e.ip, e.gw) != e.varhato) {
-        mind = false;
-        printf("     [info] elteres: ip='%s' gw='%s'\n", e.ip, e.gw);
-      }
+  // Urlapbol mar csak EGY van (CONFIG_FORM, a programba forditva), tehat nincs
+  // ket agat szetcsuszni. A validacio viszont ugyanaz a kozos POST kezelo,
+  // ezert a lista tovabbra is ertelmes regresszio.
+  bool mind = true;
+  for (auto& e : esetek) {
+    coldBoot(false, "", "", "", "");
+    // Szandekosan felteszunk egy regi HTML-t is: ha valaki visszavezetne a
+    // fajlkiszolgalast, ez a teszt azonnal mast latna.
+    g_fs["/wifimanager.html"] = "<html>REGI</html>";
+    setup();
+    AsyncWebServerRequest g; g_handlers["/#1"](&g);
+    if (g._body.find("REGI") != std::string::npos) mind = false;
+    if (postConfig("Halozat", "jelszo123", e.ip, e.gw) != e.varhato) {
+      mind = false;
+      printf("     [info] elteres: ip='%s' gw='%s'\n", e.ip, e.gw);
     }
-    CHECK(mind, feltoltott ? "a feltoltott urlapon minden eset egyezik"
-                           : "a tartalek urlapon minden eset egyezik");
   }
+  CHECK(mind, "a beepitett urlapon minden validacios eset egyezik");
 }
 
 
@@ -3022,7 +3084,7 @@ static uint32_t mw_elozo = 0;
 static void mwFigyelo() {
   if (g_millis < mw_elozo) mw_wrapok++;
   mw_elozo = g_millis;
-  const bool m = (g_pinState[7] == HIGH);
+  const bool m = (g_pinState[PIN_RELAY] == HIGH);
   if (m && !mw_magas) { mw_magas = true; mw_start = g_millis; }
   if (!m && mw_magas) { mw_magas = false; mw_pulzus = g_millis - mw_start; }
 }
@@ -3197,12 +3259,12 @@ static void scS5() {
   // Ébredés után a setup() előbb maga hajtja LOW-ra a relét, és csak utána
   // oldja fel az alvás előtti holdot - a láb egy pillanatra sem marad magára.
   coldBoot(true, "TestNet", "pw", "", "", 500, true);   // deep sleep ébredés
-  g_heldPins.insert(7); g_deepSleepHoldEnabled = true;  // az alvás előtti hold
+  g_heldPins.insert(PIN_RELAY); g_deepSleepHoldEnabled = true;  // az alvás előtti hold
   setup();
   CHECK(g_heldPins.empty(), "a hold ébredés után feloldva");
   CHECK(!g_deepSleepHoldEnabled, "a globális deep sleep hold kikapcsolva");
-  { const int drive = logIndex("pin7=LOW");
-    const int release = logIndex("gpio_hold_dis(7)");
+  { const int drive = logIndex(RELAY_LOW);
+    const int release = logIndex("gpio_hold_dis(10)");
     CHECK(drive >= 0 && release >= 0 && drive < release,
           "előbb a meghajtott LOW, aztán a hold feloldása"); }
 }
@@ -3305,6 +3367,305 @@ static void scP20() {
   CHECK(g_fs["/ssid.txt"] == "UjHalozat", "az SSID frissült");
   CHECK(g_fs["/ip.txt"] == "192.168.1.200" && g_fs["/gateway.txt"] == "192.168.1.1",
         "a nem küldött IP/gateway fájlok érintetlenek");
+}
+
+
+// ===========================================================================
+// UJ VISELKEDES: korai kilepes a hosszu varakozasokbol (onlineProbe)
+// ===========================================================================
+
+// Segedletek: hany g_log bejegyzes utal fajlrendszer-irasra a proba alatt.
+static int fsIrasokSzama() {
+  int n = 0;
+  for (auto& l : g_log) {
+    if (l.rfind("fs_write", 0) == 0 || l.rfind("fs_open_w", 0) == 0) n++;
+  }
+  return n;
+}
+
+static void scOP1() {
+  // A halozat 3 perc mulva jon vissza, es az internet is megy: a
+  // firstStartDelay NEM fut vegig, hanem a proba lezarja.
+  coldBoot(true, "MyNetwork", "titok123", "", "");
+  wifiSim.availableFrom = 3u * 60 * 1000;   // a router 3 perc mulva all fel
+  pingSim.ok = true;
+  setup();                                   // az initWiFi() itt meg bukik
+  const uint32_t t0 = g_millis;
+  int guard = 0;
+  try { while (uiFlags.firstStart && ++guard < 400000) loop(); }
+  catch (DeepSleepSignal&) {}
+  const uint32_t dt = g_millis - t0;
+  CHECK(!uiFlags.firstStart, "a first start varakozas lezarult");
+  CHECK(dt < 5u * 60 * 1000, "es NEM a teljes 10 percet varta ki");
+  CHECK(dt >= 3u * 60 * 1000, "de megvarta, amig a halozat tenyleg visszajott");
+  CHECK(serialHas("halozat es internet visszajott"), "a korai kilepes meg is jelenik a naplon");
+  CHECK(!pingSim.targets.empty() && pingSim.targets.back() == "1.1.1.1",
+        "a masodik lepes a fix IP-re menő ping volt");
+}
+
+static void scOP2() {
+  // Ugyanaz, de az INTERNET nem jon vissza (a ping bukik). Ilyenkor a
+  // varakozas szabalyosan vegigfut - ez a felhasznaloi kikotes masik fele.
+  coldBoot(true, "MyNetwork", "titok123", "", "");
+  wifiSim.availableFrom = 3u * 60 * 1000;
+  pingSim.ok = false;                        // halozat igen, internet nem
+  setup();
+  // A firstStart oraja a setup() ELEJEN indul (timing.startMillis), nem a
+  // setup() utan - kozben lefut az initWiFi() 20 masodperces timeoutja is.
+  const uint32_t t0 = timing.startMillis;
+  int guard = 0;
+  try { while (uiFlags.firstStart && ++guard < 400000) loop(); }
+  catch (DeepSleepSignal&) {}
+  CHECK(g_millis - t0 >= 10u * 60 * 1000, "a teljes 10 perc lefutott");
+  CHECK(!serialHas("halozat es internet visszajott"), "nem volt korai kilepes");
+  CHECK(!pingSim.targets.empty(), "a proba azert probalkozott");
+}
+
+static void scOP3() {
+  // Sikeres indulasnal az ELSO proba azonnal fusson: enelkul minden ep
+  // bekapcsolas 60 masodpercet kesne az elso internettesztig. (Regresszio:
+  // az elso valtozat pontosan igy viselkedett.)
+  coldBoot(true, "MyNetwork", "titok123", "", "");
+  pingSim.ok = true;
+  setup();
+  const uint32_t t0 = g_millis;
+  int guard = 0;
+  try { while (uiFlags.firstStart && ++guard < 100000) loop(); }
+  catch (DeepSleepSignal&) {}
+  CHECK(!uiFlags.firstStart, "azonnal lezarult");
+  CHECK(g_millis - t0 < 30u * 1000, "masodpercek alatt, nem egy teljes proba-utem mulva");
+}
+
+static void scOP4() {
+  // FLASH KIMELES: a proba semmit nem ir a fajlrendszerre, es a begin()-ek
+  // szama a 60 mp-es utemhez kotott. A WiFi.persistent(false) a setup()-ban
+  // fut le, tehat a begin() nem ir NVS-be.
+  coldBoot(true, "MyNetwork", "titok123", "", "");
+  wifiSim.availableFrom = 0xFFFFFFFFu;       // a halozat sosem jon vissza
+  pingSim.ok = false;
+  setup();
+  const int beginBefore = wifiSim.beginCount;
+  const size_t fsBefore = g_fs.size();
+  // EZ a flash-kimeles alapja: persistent(false) mellett a WiFi.begin() nem
+  // ir NVS-be. Ha ez a hivas eltunne, a proba percenkent irna a flasht.
+  CHECK(logIndex("WiFi.persistent(false)") >= 0,
+        "a setup() persistent(false)-t hivott - a begin() nem ir NVS-be");
+  g_log.clear();
+  const uint32_t t0 = g_millis;
+  int guard = 0;
+  try { while (g_millis - t0 < 9u * 60 * 1000 && ++guard < 400000) loop(); }
+  catch (DeepSleepSignal&) {}
+  const uint32_t percek = (g_millis - t0) / 60000;
+  CHECK(wifiSim.beginCount - beginBefore <= (int)percek + 2,
+        "percenkent legfeljebb egy WiFi.begin() a probabol");
+  CHECK(g_fs.size() == fsBefore, "a proba egyetlen fajlt sem hozott letre");
+  CHECK(fsIrasokSzama() == 0, "es egyetlen fajlirast sem inditott");
+  CHECK(pingSim.calls == 0,
+        "kapcsolat nelkul NEM pingelunk - a ping csak a masodik lepes");
+}
+
+static void scOP7() {
+  // A halozat VEGIG el (az initWiFi() sikerult), csak az internet nincs meg
+  // induláskor - de MENET KOZBEN visszajon. A varakozas ilyenkor NEM fut
+  // vegig: a 60 mp-enkenti proba elkapja, es nem sokkal az internet
+  // visszaterese utan lezarul.
+  //
+  // Ez a "sikeres csatlakozas utan is lefut a firstStart" allitas masik fele:
+  // a 10 perc CSAK akkor telik le teljesen, ha az internet vegig hianyzik.
+  coldBoot(true, "TestNet", "pw", "", "");
+  pingSim.ok = false;                    // Wi-Fi megvan, internet nincs
+  setup();
+  const uint32_t t0 = timing.startMillis;
+  const uint32_t netVissza = 210u * 1000;   // 3,5 perc mulva lesz net
+  int guard = 0;
+  try {
+    while (uiFlags.firstStart && ++guard < 400000) {
+      if (g_millis - t0 >= netVissza) pingSim.ok = true;
+      loop();
+    }
+  } catch (DeepSleepSignal&) {}
+  const uint32_t dt = g_millis - t0;
+  printf("     [info] a firstStart %u mp alatt zarult le\n", dt / 1000);
+  CHECK(!uiFlags.firstStart, "a varakozas lezarult");
+  CHECK(dt >= netVissza, "nem elobb, mint hogy az internet visszajott");
+  CHECK(dt < netVissza + 90u * 1000,
+        "es az internet visszaterese utan egy proba-utemen belul (nem 10 perc)");
+  CHECK(serialHas("halozat es internet visszajott"), "a korai kilepes agan zarult");
+}
+
+static void scOP6() {
+  // A millis() 49,7 naponta korbefordul. A proba orai ELOJEL NELKULI
+  // kivonassal dolgoznak, ezert ezt at kell vesszeleniuk. Ha valaki
+  // elojelesse tenne oket (vagy "now > last + koz" alakra irna at), a
+  // korbefordulas utan a proba OROKRE leallna: az eszkoz sosem lepne ki
+  // korabban egyetlen varakozasbol sem, es ez a hiba csak 50 nap uzem utan
+  // jelentkezne. Ezert van rola sajat teszt.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  const uint32_t base = 0xFFFFFF00u;   // 256 ms-re a korbefordulas elott
+  uint32_t last = base;
+  uint32_t firedAt = 0;
+  for (uint32_t d = 1000; d <= 180000 && firedAt == 0; d += 1000) {
+    const uint32_t now = base + d;     // ez SZANDEKOSAN atfordul
+    const uint32_t before = last;
+    onlineProbeDue(last, now);
+    if (last != before) firedAt = d;   // az ora frissult -> tenyleg futott proba
+  }
+  CHECK(firedAt > 0, "a proba a korbefordulas utan is lefut, nem all le orokre");
+  CHECK(firedAt >= 55000 && firedAt <= 65000,
+        "es pontosan a ~60 mp-es utem szerint (nem azonnal, nem kesobb)");
+}
+
+static void scOP5() {
+  // A RESET_DELAY korai lezarasa a router reset utan - es kozben NEM bontjuk
+  // le a kapcsolatot, amit epp az imenti proba igazolt.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpCode = -1; pingSim.ok = false;       // nincs internet -> eszkalacio
+  setup();
+  int guard = 0;
+  try { while (++guard < 400000 && logIndex(RELAY_LOW + 0) >= 0
+               && logIndex(RELAY_HIGH) < 0) loop(); } catch (DeepSleepSignal&) {}
+  // a reset pulzus lefutott; mostantol a router es az internet is jo
+  g_httpCode = 200; g_httpBody = "Microsoft Connect Test"; pingSim.ok = true;
+  const uint32_t t0 = g_millis;
+  guard = 0;
+  try { while (++guard < 400000 && !serialHas("RESET_DELAY korai vege")) loop(); }
+  catch (DeepSleepSignal&) {}
+  CHECK(serialHas("RESET_DELAY korai vege"), "a RESET_DELAY korabban veget ert");
+  CHECK(g_millis - t0 < 8u * 60 * 1000, "nem a teljes 10 percet varta ki");
+  CHECK(!serialHas("Reconnect WIFI in FAILURE_STATE"),
+        "a korai agon NINCS disconnect+reconnect - a kapcsolat mar igazolt");
+}
+
+// ===========================================================================
+// UJ VISELKEDES: LED jelzesek
+// ===========================================================================
+
+static void scLEDap() {
+  // AP beallito mod: a Wi-Fi LED villog, a statusz LED VEGIG vilagit.
+  coldBoot(false, "", "", "", "");
+  try { setup(); } catch (DeepSleepSignal&) {}
+  CHECK(deviceMode == (DeviceMode)1, "AP modban vagyunk");
+  int wifiValtas = 0, ledValtas = 0;
+  int lastW = g_pinState[PIN_WIFILED], lastL = g_pinState[PIN_LED];
+  const uint32_t t0 = g_millis;
+  try {
+    while (g_millis - t0 < 5000) {
+      loop();
+      if (g_pinState[PIN_WIFILED] != lastW) { wifiValtas++; lastW = g_pinState[PIN_WIFILED]; }
+      if (g_pinState[PIN_LED] != lastL)     { ledValtas++;  lastL = g_pinState[PIN_LED]; }
+    }
+  } catch (DeepSleepSignal&) {}
+  CHECK(wifiValtas >= 8 && wifiValtas <= 12, "a Wi-Fi LED 1 Hz-cel villog (5 mp alatt ~10 valtas)");
+  CHECK(ledValtas == 0, "a statusz LED nem villog");
+  CHECK(g_pinState[PIN_LED] == HIGH, "hanem vegig vilagit");
+}
+
+static void scLEDpulse() {
+  // A villogas UTEME es a HATARA. A pulzus egy blokkolo belso ciklusban telik,
+  // de itt mi magunk hajtjuk a reset_device()-t, tehat kozvetlenul tudunk
+  // mintavetelezni. (A stub yield()-je NEM hivja a g_onDelay horgot - ezen
+  // bukott el a teszt elso valtozata.)
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  int guard = 0, ledValtas = 0, wifiMagas = 0, lastL = -2;
+  const uint32_t t0 = g_millis;
+  try {
+    while (!reset_device() && ++guard < 200000) {
+      const int l = g_pinState[PIN_LED];
+      if (lastL != -2 && l != lastL) ledValtas++;
+      lastL = l;
+      if (g_pinState[PIN_WIFILED] == HIGH) wifiMagas++;
+      feedLoopWDT();
+      delay(10);
+    }
+  } catch (DeepSleepSignal&) {}
+  const uint32_t pulzus = g_millis - t0;
+  CHECK(pulzus >= 89u*1000 && pulzus <= 91u*1000, "a pulzus 90 masodperc");
+  // 90 mp / 250 ms felperiodus = ~360 valtas. Tag hatarok, hogy a mintaveteli
+  // szemcsezettseg ne tegye torekenne - a lenyeg, hogy 2 Hz, nem 5 vagy 1.
+  const int varhato = (int)(pulzus / 250);
+  CHECK(ledValtas >= varhato - 5 && ledValtas <= varhato + 5,
+        "a statusz LED 2 Hz-cel villog vegig a pulzus alatt");
+  CHECK(wifiMagas == 0, "a Wi-Fi LED egyszer sem gyulladt ki - nincs is halozat");
+  CHECK(g_pinState[PIN_LED] == HIGH, "a pulzus utan a statusz LED folyamatosra all vissza");
+  CHECK(g_pinState[PIN_RELAY] == LOW, "es a router visszakapta az aramot");
+}
+
+// ===========================================================================
+// UJ VISELKEDES: watchdog a setup() elejen, 1-alapu sorszamok, csendes siker
+// ===========================================================================
+
+static void scWDT_EARLY() {
+  // A watchdog mar a LittleFS csatolasa ELOTT elesedik. A soros kimenet
+  // sorrendje ezt bizonyitja.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  const int wdt = serialIndex("Watchdog enabled");
+  const int fs  = serialIndex("Init LittleFS.");
+  CHECK(wdt >= 0, "a watchdog elesedett");
+  CHECK(fs >= 0 && wdt < fs, "MEG a LittleFS csatolasa elott");
+  CHECK(watchdogEnabled, "es tenyleg fel is iratkozott a loop task");
+}
+
+static void scSERidx() {
+  // A teszt sorszam 1-alapu a soros porton, a belso cycleIndex viszont
+  // 0-alapu marad (ahhoz kotodik a vegpontvalaszto es a reset kuszob).
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpCode = -1; pingSim.ok = false;
+  setup();
+  int guard = 0;
+  try { while (++guard < 400000 && !serialHas("Teszt ciklus index = 2")) loop(); }
+  catch (DeepSleepSignal&) {}
+  CHECK(serialHas("Teszt ciklus index = 1"), "az elso teszt sorszama 1, nem 0");
+  CHECK(!serialHas("Teszt ciklus index = 0"), "0-dik teszt SEHOL nem jelenik meg");
+  CHECK(serialHas("Test failed. | Hibák száma = 1 / 5"),
+        "a hibaszamlalo a teszt UTAN, mar novelve jelenik meg");
+  CHECK(serialIndex("Teszt ciklus index = 1") < serialIndex("Test failed."),
+        "a sorszam a teszt ELOTT, a hibaszam a teszt UTAN all");
+}
+
+static void scSERquiet() {
+  // Sikeres teszt: se "Igaz érték!", se a kapott torzs - eleg a
+  // "Successful Test". Eltereskor viszont MINDKETTO kell.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpCode = 200; g_httpBody = "Microsoft Connect Test"; pingSim.ok = true;
+  setup();
+  int guard = 0;
+  try { while (++guard < 100000 && !serialHas("Successful Test")) loop(); }
+  catch (DeepSleepSignal&) {}
+  CHECK(serialHas("Successful Test"), "a siker kiirodik");
+  CHECK(!serialHas("Igaz érték!"), "de az 'Igaz érték!' mar nem");
+  CHECK(!serialHas("Microsoft Connect Test"),
+        "es a kapott torzset sem irjuk ki sikernel");
+
+  // Most a masik ag: 200-as valasz, de ROSSZ torzs.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpCode = 200; g_httpBody = "captive portal login"; pingSim.ok = true;
+  setup();
+  guard = 0;
+  try { while (++guard < 100000 && !serialHas("Hamis érték!")) loop(); }
+  catch (DeepSleepSignal&) {}
+  CHECK(serialHas("Hamis érték!"), "elteresnel megmarad a jelzes");
+  CHECK(serialHas("captive portal login"),
+        "es a KAPOTT torzs is - abbol derul ki, mi ult a keresre");
+}
+
+static void scEVT1() {
+  // A /log oldal TEST FAIL parametere ugyanazt a szamot mutatja, mint a
+  // soros port "Teszt ciklus index" sora: 1-alapon.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpCode = -1; pingSim.ok = false;
+  setup();
+  int guard = 0;
+  try { while (++guard < 400000 && !serialHas("Test failed.")) loop(); }
+  catch (DeepSleepSignal&) {}
+  bool megvan = false;
+  for (uint32_t i = 0; i < rtcEvNext && i < 32; i++) {
+    const EventEntry& e = rtcEvents[i % 32];
+    if (e.code == EV_TEST_FAIL_C) { megvan = (e.param == 1); }
+  }
+  CHECK(megvan, "az elso bukas EV_TEST_FAIL parametere 1, nem 0");
 }
 
 struct Scenario { const char* name; void (*fn)(); };
@@ -3426,7 +3787,7 @@ static const Scenario kScenarios[] = {
   { "P11: mentés közben a wifireset gomb nem töröl és nem indít újra", scP11 },
   { "P12: a mentett érték megegyezik azzal, amit az eszköz használni fog", scP12 },
   { "P13: csupa szóközből álló SSID nem fogadható el", scP13 },
-  { "LED1: a router áramtalanításakor mindkét LED sötét", scLED1 },
+  { "LED1: reset pulzus alatt a státusz LED villog, a Wi-Fi LED sötét", scLED1 },
   { "KA1: van /ping végpont, apró válasszal", scKA1 },
   { "KA2: nyitva tartott lap mellett nem alszik el", scKA2 },
   { "KA3: a lap bezárása után az utolsó pingtől számít 5 percet", scKA3 },
@@ -3492,6 +3853,25 @@ static const Scenario kScenarios[] = {
   { "CH3: darab-kiterjesztés és nagybetűs hexa", scCH3 },
   { "CH4: szabálytalan keretezés -> bukás, nem találgatás", scCH4 },
   { "CH5: chunked captive portal sem olvastat végig 50 kB-ot", scCH5 },
+
+  // --- Korai kilepes a hosszu varakozasokbol ---
+  { "OP1: a firstStartDelay korán véget ér, ha a hálózat ÉS az internet visszajött", scOP1 },
+  { "OP2: ha csak a hálózat jön vissza, a delay szabályosan végigfut", scOP2 },
+  { "OP3: ép induláskor az első próba azonnal fut (nem késik egy ütemet)", scOP3 },
+  { "OP4: flash kímélés – nincs fájlírás, és percenként max egy WiFi.begin()", scOP4 },
+  { "OP5: a RESET_DELAY korán zárul, és nem bontja le az igazolt kapcsolatot", scOP5 },
+  { "OP6: a próba órái túlélik a millis() körbefordulását", scOP6 },
+  { "OP7: élő Wi-Fi mellett is korán zárul, ha az internet menet közben visszajön", scOP7 },
+
+  // --- LED jelzesek ---
+  { "LED2: AP módban a Wi-Fi LED villog, a státusz LED végig világít", scLEDap },
+  { "LED3: a reset pulzus villogása 2 Hz, és pontosan a pulzus alatt tart", scLEDpulse },
+
+  // --- Watchdog, soros kimenet, esemenynaplo ---
+  { "WDT7: a watchdog már a LittleFS csatolása ELŐTT élesedik", scWDT_EARLY },
+  { "SER4: a teszt sorszáma 1-alapú, a hibaszám a teszt után áll", scSERidx },
+  { "SER5: sikernél csak 'Successful Test', eltérésnél a kapott törzs is", scSERquiet },
+  { "EVT1: a /log TEST FAIL paramétere is 1-alapú", scEVT1 },
 };
 
 

@@ -136,7 +136,8 @@ Az eszköz három állapotban működik:
 │  várakoz)│  │  → újrateszt)│
 └──────────┘  └──────────────┘
                      │
-              3+ hiba ÉS cycleIndex > 3
+             mind az 5 teszt bukott
+               (cycleIndex > 3)
                      │
                      ▼
               ┌──────────────┐
@@ -215,8 +216,18 @@ ping mindig sikerült és nullázta a számlálókat. Nem véletlen, hogy egyetl
 nagy implementáció sem ICMP-vel validál: a NetworkManager (libcurl HTTP), a
 Firefox (`detectportal`), a Windows NCSI (DNS + HTTP) mind HTTP-t használ.
 
-A ping megmaradt, de **csak a saját gateway ellenőrzésére** (`gatewayUnreachable()`),
-ahol pont az a kérdés, hogy a 3. rétegben elérünk-e egyáltalán valamit.
+A ping két helyen maradt meg, és **egyik sem szavazhat** az internettesztben:
+
+1. **A saját gateway ellenőrzése** (`gatewayUnreachable()`), ahol pont az a
+   kérdés, hogy a 3. rétegben elérünk-e egyáltalán valamit.
+2. **A hosszú várakozások korai lezárása** (`onlineProbe()`, lásd a
+   „Ha nem sikerül csatlakozni a Wi-Fihez" szakaszt). Itt a ping legrosszabb
+   esetben annyit ér el, hogy a várakozás korábban ér véget – utána **azonnal
+   a rendes HTTP tesztsorozat következik**, ami a befagyott DNS-t így is
+   elbukja. A fenti hibát tehát nem hozza vissza: a `H9` teszt épp azt méri,
+   hogy sikeres ping mellett is lefut a router újraindítás.
+
+Az internetteszt maga továbbra is **kizárólag HTTP** – ezt a `H8` teszt őrzi.
 
 #### A két ellenőrzési mód
 
@@ -264,14 +275,31 @@ választ, és ez a hiba némán, a redundancia elvesztésével jelentkezne. A
 
 #### Router reset folyamat
 
-1. Ha **3+ sikertelen teszt** és **cycleIndex > 3**:
+1. Ha **mind az 5 teszt elbukott** (`cycleIndex > 3`, azaz az 5. végpont is):
    - Relé **bekapcsol** → router áramtalanítva
    - **90 másodperc** várakozás (RESET_PULSE)
    - Relé **kikapcsol** → router visszakap áramot
    - **legfeljebb 10 perc** várakozás (RESET_DELAY) – idő a router bootolásához;
      60 mp-enként megnézzük, hogy visszajött-e a hálózat és az internet, és ha
      igen, itt azonnal továbblépünk
-   - Wi-Fi újracsatlakozás
+   - Wi-Fi újracsatlakozás (a korai kilépés ágán ez is elmarad – a kapcsolatot
+     épp az imént igazoltuk)
+
+   > **Egyetlen feltétel dönt: `cycleIndex > 3`.** Nincs külön „N hiba" küszöb.
+   > Mivel a két számláló együtt lép (`failedCount == cycleIndex + 1`), ez
+   > pontosan **5 egymás utáni bukást** jelent – de a feltétel szándékosan a
+   > *végpont-lefedettséget* mondja ki, nem a darabszámot: mind az öt
+   > üzemeltetőt végig kell próbálni, hogy egyetlen szolgáltató kiesése soha ne
+   > látszódjon internetkimaradásnak.
+   >
+   > **Bármelyik sikeres teszt nullázza a folyamatot** (`cycleIndex`,
+   > `failedCount` és a `resetEvents` is), tehát a sorozatnak megszakítás
+   > nélkülinek kell lennie.
+   >
+   > Egy kivétel van: ha a **Wi-Fi maga nem jön vissza**, a firmware azonnal
+   > `cycleIndex = 4`-re ugrik, és nem játssza végig az öt tesztet – nincs
+   > hálózat, amin bármelyik végpont elérhető lenne.
+
 2. Ha **4 router újraindítás** sem hozza vissza az internetet → deep sleep 1 órára,
    majd magától ébred és újrapróbálja. (A `maxfailureEvents = 5` a *reset esemény*
    számláló határa; a számláló még a reset előtt nő, ezért 4 tényleges újraindítás történik.)
@@ -675,12 +703,30 @@ A 10 perces várakozás a lényeg: áramszünet után az ESP másodpercek alatt
 elindul, a router viszont percekig bootol.
 
 **De nem várunk feleslegesen.** A várakozás alatt 60 mp-enként lefut egy
-kétlépcsős próba: (1) van-e Wi-Fi kapcsolat, (2) ha van, kimegy-e csomag az
-internetre (ping a `1.1.1.1`-re). Ha **mindkettő** sikerül, a várakozás azonnal
-véget ér, és jöhet a rendes tesztsorozat. Ha bármelyik elbukik, a várakozás
-szabályosan végigfut. Ugyanez a próba fut a router reset utáni `RESET_DELAY`
-alatt is – ott ráadásul az újracsatlakozási kört is megspórolja, hiszen a
-kapcsolatot épp az imént mértük.
+kétlépcsős próba, és a **sorrend a lényeg**:
+
+1. **Wi-Fi – csatlakozási kísérlet, nem teszt.** Ha nincs kapcsolat, a firmware
+   csak *kezdeményez* egyet (aszinkron `WiFi.begin()`, nem vár rá), és kilép.
+   A kudarcnak **nincs következménye**: nem nő számláló, nem változik állapot,
+   a várakozás megy tovább. Ehhez semmi köze a „3 próba, aztán router reset"
+   eszkalációnak – az csak a `firstStartDelay` *lejárta után* kezdődik.
+2. **Internet – csak ha az 1. lépés szerint van kapcsolat.** Ilyenkor megy ki
+   egy ping a `1.1.1.1`-re. Hálózat nélkül **el sem indul**: pingelni
+   értelmetlen (és pazarlás) lenne, ha a csomag ki sem tudna menni.
+
+A várakozás akkor ér véget korábban, ha **mindkét lépés** sikerül; ekkor jöhet
+a rendes tesztsorozat.
+
+**A próba ismétlődik, tehát nem kell induláskor meglennie mindennek.** Ha egy
+adott próba elbukik, a várakozás egyszerűen megy tovább a következő ütemig – és
+ha a kapcsolat a 10 perc *bármely* pontján helyreáll, a kilépés az azt követő
+ütemben megtörténik. A teljes időt tehát csak akkor várjuk ki, ha végig nincs
+meg a hálózat vagy az internet. (Mérve: `OP7` – a 3,5 percnél visszatérő
+internetnél a várakozás 4 perc alatt lezárult, nem 10 alatt.)
+
+Ugyanez a próba fut a router reset utáni `RESET_DELAY` alatt is – ott ráadásul
+az újracsatlakozási kört is megspórolja, hiszen a kapcsolatot épp az imént
+mértük.
 
 > **Miért ping, amikor az internettesztek szándékosan HTTP-t használnak?**
 > Mert itt más a tét. A ciklikus tesztnél egy hamis pozitív végzetes: befagyott

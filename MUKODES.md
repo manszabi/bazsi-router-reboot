@@ -21,21 +21,25 @@ Az eszköz mindig pontosan egy üzemmódban van.
 
 | Lépés | Időtartam | Következő |
 |---|---|---|
-| Kimenetek alapállapotba (relé `LOW`, státusz LED be) | azonnal | |
+| Kimenetek alapállapotba (relé `LOW`, státusz LED be, Wi-Fi LED ki) | azonnal | |
 | Soros port indítása | max. **3 mp** + 0,5 mp | |
+| **Watchdog bekapcsolása** | azonnal | Innentől a `setup()` maradéka is felügyelt – lásd 8. pont |
 | Beragadt gomb ellenőrzés (**mindkettő**: `D0` és `D1`) | azonnal | Ha bármelyik nyomva: LED-ek **felváltva** villognak 3 mp-ig, majd **60 mp** deep sleep |
 | Watchdog reset számláló ellenőrzés | azonnal | 3. rendellenes reset → `MODE_FATAL` |
-| LittleFS csatolás | azonnal | Hiba → `MODE_FATAL` |
+| LittleFS csatolás (első indításkor **formázás**: 4–7 mp) | azonnal | Hiba → `MODE_FATAL` |
 | Konfiguráció beolvasása | azonnal | Olvasási hiba → `MODE_FATAL` |
 | Wi-Fi csatlakozás | max. **20 mp** | siker → `MODE_MONITOR` |
-| Watchdog bekapcsolása | azonnal | |
+
+> A `MODE_FATAL` **nem állítja meg** a `setup()`-ot: az `enterFatal()` csak
+> beállítja a módot és kiírja az okot, a `setup()` pedig végigfut (a Wi-Fi
+> indítását már kihagyva), a jelzést utána a `loop()` végzi.
 
 ### Ha a csatlakozás nem sikerül
 
 | Van mentett SSID? | Viselkedés |
 |---|---|
 | **Nincs** | Azonnal `MODE_CONFIG` |
-| **Van** | **legfeljebb 10 perc** várakozás (`firstStartDelay`), majd **3 próba** (köztük 30 mp). A várakozás korábban véget ér, ha 60 mp-enkénti próbánál a hálózat **és** az internet is megvan |
+| **Van** | **legfeljebb 10 perc** várakozás (`firstStartDelay`), majd **3 próba** (köztük 30 mp). A várakozás korábban véget ér, ha a 60 mp-enkénti próbánál a hálózat **és** az internet is megvan – lásd lent |
 
 A 3 próba után a **hiba oka** dönt, nem az eltelt idő:
 
@@ -109,44 +113,24 @@ Teszttel kimérve (`PO1`–`PO3`):
 | ennél tovább | Óránként új kör, mindegyikben egy router újraindítással |
 | **~46 óránál tovább** | Feladja: AP mód, majd 5 perc után alvás |
 
+**A két hosszú várakozás 60 mp-enkénti próbája** (`onlineProbe()`) két lépésből
+áll, ebben a sorrendben:
+
+1. **Wi-Fi – kísérlet, nem teszt.** Kapcsolat híján csak *kezdeményez* egyet
+   (aszinkron `WiFi.begin()`, nem vár rá), és kilép. A kudarcnak **nincs
+   következménye**: nem nő számláló, nem változik állapot. A „3 próba, aztán
+   router reset" eszkaláció ettől független, az a várakozás *lejárta után* jön.
+2. **Internet – csak meglévő kapcsolat mellett.** Ping a `1.1.1.1`-re. Hálózat
+   nélkül el sem indul, mert értelmetlen lenne.
+
+A várakozás akkor zárul korábban, ha **mindkét lépés** sikerül. A próba
+**ismétlődik**, tehát elég, ha a kapcsolat a várakozás *bármely* pontján
+helyreáll – a kilépés az azt követő ütemben megtörténik. A teljes időt csak
+akkor várjuk ki, ha végig nincs meg (mérve: `OP7`).
+
 Egy kör két próbálkozási ablakot ad (a router reset előtt és után), így az első
 kör önmagában ~25 percet fed le. Ami ebből kimarad, azt a következő körök
 kapják el. A tényleges határ **46,0 óra** (mérve: `R8`).
-
-## 12. Diagnosztikai napló
-
-Az eszköz az utolsó **32 eseményt** RTC memóriában tárolja, és a beállító
-portál `/log` oldalán kiírja. Soros kábel nélkül is megtudható, mi történt.
-
-| Túléli? | |
-|---|:---:|
-| Deep sleep | igen |
-| Watchdog / panic reset | igen |
-| Reset gomb | igen |
-| **Áramtalanítás** | **nem** |
-
-`RTC_NOINIT_ATTR`-ben van, ezért éli túl a resetet is – pont azokat a hibákat,
-amiket ki akarunk vizsgálni. Mérete 264 bájt a C3 ~8 KB-os RTC memóriájából.
-
-Minden bejegyzés uptime bélyeget, egy eseménykódot és egy paramétert tartalmaz:
-
-| Esemény | A paraméter jelentése |
-|---|---|
-| `BOOT` | az indulás oka (`esp_reset_reason()`) |
-| `WIFI OK` | hányadik újrapróbálkozási körben sikerült |
-| `WIFI LOST` | `WiFi.status()` a kiesés pillanatában |
-| `TEST FAIL` | a teszt sorszáma **1-alapon**, 1–5 (csak a hibasorozat **első** tagja) |
-| `ROUTER RESET` | hányadik reset esemény (1–4) |
-| `AP MODE` | 1 = nincs mentett SSID, 2 = hitelesítési hiba, 3 = letelt a 2 nap, 4 = a gateway sem érhető el |
-| `GW UNREACH` | 1 = a router reset előtt, 2 = a reset után is |
-| `CONFIG SAVED` | 0 |
-| `SLEEP` | 1 = újrapróbálkozás, 2 = tartós internetkiesés, 3 = AP időtúllépés, 4 = végzetes hiba |
-| `FATAL` | 1 = LittleFS csatolás, 2 = konfiguráció olvasás, 3 = watchdog, 4 = a wifireset törlése nem sikerült |
-| `WDT RESET` | hányadik rendellenes újraindulás |
-| `STUCK BUTTON` | 0 = reset gomb, 1 = wifireset gomb (csak az **első** kör – az ismétlődő 60 mp-es alvás-ébredés körök nem íródnak be újra) |
-
-A `/log` oldal az aktuális állapotot is mutatja: reset ok, watchdog számláló,
-újrapróbálkozási körök, uptime.
 
 ---
 
@@ -189,7 +173,10 @@ küldenie.
 
 **Ping nincs az internettesztek között**, mert az ICMP nem bizonyít
 névfeloldást: befagyott router-DNS mellett a ping megy, az internet mégsem
-elérhető. A ping csak a saját gateway ellenőrzésére maradt meg (8. pont).
+elérhető. Ping két másik helyen van: a saját gateway ellenőrzésénél (4. pont)
+és a hosszú várakozások korai lezárásánál (`onlineProbe()`, 2. és 4. pont).
+Egyik sem szavazhat az internettesztben – a korai kilépés után is a teljes
+HTTP sorozat dönt.
 
 Sikeres teszt → minden számláló nullázódik, a ciklus újra az 1. végponttal
 indul. A soros portra ilyenkor csak a `Successful Test` kerül ki: a
@@ -279,7 +266,7 @@ internet nem, tehát érdemes később újrapróbálni.
 
 | Lépés | Időtartam |
 |---|---|
-| Wi-Fi LED **villog 1 Hz**, státusz LED végig **be** | azonnal |
+| Wi-Fi LED **ki** (a kapcsolat tényleg nincs meg), státusz LED marad **be** | azonnal |
 | **3 újracsatlakozási próba**, köztük 30 mp | max. ~2 perc |
 | Sikertelen → azonnal **router újraindítás** (4. pont szerint) | |
 
@@ -292,6 +279,7 @@ Nem várunk további teszt ciklusokat: ha nincs Wi-Fi, a tesztnek nincs értelme
 | Esemény | Időtartam |
 |---|---|
 | Portál elérhető: `192.168.4.1` | |
+| Jelzés: **Wi-Fi LED villog 1 Hz**, státusz LED végig **be** | azonnal |
 | A beállító űrlap forrása | a programba fordítva (`CONFIG_FORM`), nincs feltöltendő `data/` mappa – a portál a LittleFS-ről semmit nem szolgál ki |
 | Tétlenség után deep sleep | **5 perc** (`AP_TIMEOUT_MS`) az utolsó kéréstől |
 | A nyitva lévő lap keep-alive-ja | **60 mp**-enként `GET /ping` (1 bájt válasz) |
@@ -489,3 +477,40 @@ Minden alvás előtt a **relé `LOW`**, tehát a router kap áramot.
 A négy villogó jelzés szándékosan elkülönül: az **AP mód** és a **router reset**
 csak az egyik LED-et villogtatja (a másik állapota is más), a két hibajelzés
 pedig mindkettőt, gyorsabban – az egyik együtt, a másik ellenfázisban.
+
+---
+
+## 12. Diagnosztikai napló
+
+Az eszköz az utolsó **32 eseményt** RTC memóriában tárolja, és a beállító
+portál `/log` oldalán kiírja. Soros kábel nélkül is megtudható, mi történt.
+
+| Túléli? | |
+|---|:---:|
+| Deep sleep | igen |
+| Watchdog / panic reset | igen |
+| Reset gomb | igen |
+| **Áramtalanítás** | **nem** |
+
+`RTC_NOINIT_ATTR`-ben van, ezért éli túl a resetet is – pont azokat a hibákat,
+amiket ki akarunk vizsgálni. Mérete 264 bájt a C3 ~8 KB-os RTC memóriájából.
+
+Minden bejegyzés uptime bélyeget, egy eseménykódot és egy paramétert tartalmaz:
+
+| Esemény | A paraméter jelentése |
+|---|---|
+| `BOOT` | az indulás oka (`esp_reset_reason()`) |
+| `WIFI OK` | hányadik újrapróbálkozási körben sikerült |
+| `WIFI LOST` | `WiFi.status()` a kiesés pillanatában |
+| `TEST FAIL` | a teszt sorszáma **1-alapon**, 1–5 (csak a hibasorozat **első** tagja) |
+| `ROUTER RESET` | hányadik reset esemény (1–4) |
+| `AP MODE` | 1 = nincs mentett SSID, 2 = hitelesítési hiba, 3 = letelt a 2 nap, 4 = a gateway sem érhető el |
+| `GW UNREACH` | 1 = a router reset előtt, 2 = a reset után is |
+| `CONFIG SAVED` | 0 |
+| `SLEEP` | 1 = újrapróbálkozás, 2 = tartós internetkiesés, 3 = AP időtúllépés, 4 = végzetes hiba |
+| `FATAL` | 1 = LittleFS csatolás, 2 = konfiguráció olvasás, 3 = watchdog, 4 = a wifireset törlése nem sikerült |
+| `WDT RESET` | hányadik rendellenes újraindulás |
+| `STUCK BUTTON` | 0 = reset gomb, 1 = wifireset gomb (csak az **első** kör – az ismétlődő 60 mp-es alvás-ébredés körök nem íródnak be újra) |
+
+A `/log` oldal az aktuális állapotot is mutatja: reset ok, watchdog számláló,
+újrapróbálkozási körök, uptime.
