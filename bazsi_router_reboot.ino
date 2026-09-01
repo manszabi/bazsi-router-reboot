@@ -223,6 +223,39 @@ constexpr uint64_t STUCK_BUTTON_SLEEP_US = 60ULL * 1000000ULL;    // 60 másodpe
 // tehát a 3 mp csak annyit késleltet, ami után úgyis a 60 mp-es alvás jön.
 constexpr uint32_t STUCK_BUTTON_CONFIRM_MS = 3000;
 
+// --- Heap felugyelet -------------------------------------------------------
+//
+// MIERT KELL? A sketch maga semmit nem allokal dinamikusan, az
+// ESPAsyncWebServer / AsyncTCP / a Wi-Fi driver viszont igen. Egy lassu
+// szivargas vagy elaprozodas honapokig eszrevetlen marad, aztan egy nap az
+// eszkoz "csak ugy" nem mukodik - allokacios hiba eseten a legtobb konyvtar
+// csendben elbukik, nem panikol. Ezert merunk, kiirunk, es vegso esetben
+// magunktol ujraindulunk, MIELOTT barmi elromlana.
+constexpr uint32_t HEAP_CHECK_INTERVAL_MS = 10 * 1000;        // mintaveteli koz
+constexpr uint32_t HEAP_LOG_INTERVAL_MS   = 30 * 60 * 1000;   // rendszeres sor
+
+// A KET KUSZOB. A C3-on Wi-Fi + webszerver mellett a tipikus szabad heap
+// 120-200 KB. A Wi-Fi driver es az AsyncTCP egyszerre tobb KB-os tomboket is
+// ker, ezert nem a nulla a veszelyes hatar, hanem az a szint, ahol egy
+// szokasos foglalas mar elbukhat.
+constexpr uint32_t HEAP_WARN_BYTES  = 25000;   // figyelmeztetes (naplo + soros)
+constexpr uint32_t HEAP_CRIT_BYTES  = 12000;   // ujrainditas
+
+// ELAPROZODAS. Lehet 30 KB szabad heap ugy, hogy a legnagyobb OSSZEFUGGO tomb
+// csak 4 KB - ilyenkor a szabad heap onmagaban megnyugtato, kozben a
+// foglalasok mar buknak. Ezert a legnagyobb tombot kulon is nezzuk.
+constexpr uint32_t HEAP_CRIT_BLOCK_BYTES = 6000;
+
+// A kritikus szintnek KI KELL TARTANIA. Egy pillanatnyi melypont (egy epp
+// futo HTTP keres, egy nagyobb valasz osszeallitasa) nem szivargas. Harom
+// egymas utani minta = 30 masodperc.
+constexpr uint8_t HEAP_CRIT_SAMPLES = 3;
+
+// Es a heap miatti ujrainditasnak is van felso hatara: ha az ujraindulas sem
+// segit (tartos elaprozodas, valodi szivargas mar indulaskor), a boot loop
+// rosszabb, mint a megallas. Ugyanaz a politika, mint a watchdognal.
+constexpr uint32_t MAX_HEAP_RESTARTS = 3;
+
 // A hosszú várakozások (firstStartDelay, RESET_DELAY) korai lezárása.
 //
 // Mindkét várakozás arra való, hogy a router bootolására időt hagyjunk - de ha
@@ -359,6 +392,17 @@ volatile uint32_t btnWifiResetDownAt = 0;
 uint32_t resetDelayProbeLast = 0;   // FAILURE_STATE, RESET_DELAY
 uint32_t firstStartProbeLast = 0;   // handleFirstStart(), firstStartDelay
 
+// A heap felugyelet orai es jelzoi. SZANDEKOSAN fajl-szintu globalisok, nem
+// fuggveny-szintu static-ok: a sketch tobbi per-boot allapota (resetDelayProbeLast,
+// firstStartProbeLast, testState, timing) is igy all, es a teszt-harness
+// hidegindulasa (coldBoot) igy tudja mindet egy helyen visszaallitani. Egy
+// rejtett static ugyanezt a szerepet toltene be a valos eszkozon, de a
+// forgatokonyvek kozott atszivarogna.
+uint32_t heapCheckLast = 0;    // az utolso meres ideje
+uint32_t heapLogLast = 0;      // az utolso rendszeres allapotsor ideje
+uint8_t  heapCritStreak = 0;   // hany egymas utani kritikus meres volt
+bool     heapWarnActive = false;  // szol-e eppen a figyelmeztetes
+
 // Fut-e már a watchdog. Az initWatchdog() a setup() elején fut, de EL IS
 // BUKHAT (kikapcsolt TWDT, sikertelen feliratkozás) - és ilyenkor szándékosan
 // le is iratkozunk. Feliratkozás nélkül a feedLoopWDT() ESP_ERR_NOT_FOUND-ot
@@ -396,10 +440,13 @@ enum EventCode : uint8_t {
   EV_CONFIG_SAVED = 7,  // param: 0
   EV_SLEEP = 8,         // param: ok (1=retry 2=internet 3=AP timeout 4=fatal)
   EV_FATAL = 9,         // param: ok (1=FS mount 2=konfig olvasás 3=watchdog
-                        //           4=wifireset törlés sikertelen)
+                        //           4=wifireset törlés sikertelen
+                        //           5=tartósan kevés a szabad heap)
   EV_WDT_RESET = 10,    // param: hányadik watchdog reset
   EV_STUCK_BUTTON = 11, // param: 0 = reset gomb, 1 = wifireset gomb
-  EV_GW_UNREACHABLE = 12  // param: 1 = reset elott, 2 = a reset utan is
+  EV_GW_UNREACHABLE = 12, // param: 1 = reset elott, 2 = a reset utan is
+  EV_LOW_HEAP = 13,     // param: a szabad heap KiB-ban, a kuszob atlepesekor
+  EV_HEAP_RESTART = 14  // param: a szabad heap KiB-ban az ujrainditas elott
 };
 
 // Pontosan 8 bájt. A kitöltő mező explicit, hogy a RTC memóriában tárolt
@@ -416,6 +463,30 @@ constexpr uint32_t EVLOG_MAGIC = 0x42415A4CUL;  // "BAZL"
 RTC_NOINIT_ATTR uint32_t rtcEvMagic;
 RTC_NOINIT_ATTR uint32_t rtcEvNext;   // következő írási pozíció (monoton nő)
 RTC_NOINIT_ATTR EventEntry rtcEvents[EVLOG_SIZE];
+
+// --- A heap miatti ujraindulas atvitele ------------------------------------
+//
+// MIT KELL ATVINNI? Egy ESP.restart() a RAM-ot torli, tehat minden sima
+// globalis elveszik: testState, timing, uiFlags. A tobbsegukert nem kar - a
+// timing ujraszamolodik, a firstStart varakozas ujra lefut (es a proba
+// perceken belul le is zarja), a cycleIndex/failedCount pedig csak azt
+// mondja meg, hol tart az OT teszt kozott.
+//
+// EGY kivetel van, es annal az elvesztes VISELKEDESI hibat okozna: a
+// testState.resetEvents. Ez szamolja, hanyszor indítottuk mar ujra a routert
+// ebben a sorozatban, es ez viszi el az eszkozt az otodiknel az 1 oras
+// alvasba (internetFailSleep). Ha egy heap-ujraindulas ezt nullazna, a
+// szamlalo mindig elolrol kezdene, es az eszkoz VEGTELENUL ujraindithatna a
+// routert ahelyett, hogy elalszik. Ezert ezt az egyet atvisszuk.
+//
+// A 0xFF a "nincs atvitel" jelolese: a setup() egyszer felhasznalja, majd
+// vissza is allitja, hogy egy KESOBBI, mas okbol tortent ujraindulas (gomb,
+// watchdog) ne allitson vissza elavult erteket.
+constexpr uint32_t HEAP_MAGIC = 0x42415A48UL;   // "BAZH"
+constexpr uint8_t  CARRY_NONE = 0xFF;
+RTC_NOINIT_ATTR uint32_t rtcHeapMagic;
+RTC_NOINIT_ATTR uint32_t rtcHeapRestarts;      // egymast koveto heap-ujrainditasok
+RTC_NOINIT_ATTR uint8_t  rtcCarryResetEvents;  // atvitt resetEvents (CARRY_NONE = nincs)
 
 volatile bool restartPending = false;
 volatile uint32_t restartAt = 0;
@@ -461,6 +532,9 @@ void holdRelayForSleep();
 bool stuckCycleAlreadyLogged(uint16_t which);
 bool lastEventWas(uint8_t code);
 int pressedButtonNow();
+void checkHeap(uint32_t now);
+void initHeapState();
+void applyHeapCarry();
 bool initWiFi();
 bool reconnectWifi();
 bool writeConfigValue(fs::FS& fs, const char* path, const char* message);
@@ -529,6 +603,8 @@ const char* eventName(uint8_t code) {
     case EV_WDT_RESET: return "WDT RESET";
     case EV_STUCK_BUTTON: return "STUCK BUTTON";
     case EV_GW_UNREACHABLE: return "GW UNREACH";
+    case EV_LOW_HEAP: return "LOW HEAP";
+    case EV_HEAP_RESTART: return "HEAP RESTART";
     default: return "?";
   }
 }
@@ -814,6 +890,138 @@ void enterFatal(const char* reason) {
 
 // Watchdog/panic miatti újraindulások figyelése. Ha a program ismételten
 // megakad, az újraindítgatás önmagában nem megoldás - inkább jelezzünk.
+// A heap allapot RTC blokkjanak felelesztese. Ugyanaz a minta, mint a
+// watchdog szamlalonal: bekapcsolas utan a NOINIT terulet tartalma szemet.
+void initHeapState() {
+  if (rtcHeapMagic != HEAP_MAGIC) {
+    rtcHeapMagic = HEAP_MAGIC;
+    rtcHeapRestarts = 0;
+    rtcCarryResetEvents = CARRY_NONE;
+  }
+}
+
+// Az atvitt allapot FELHASZNALASA - pontosan egyszer. A visszaallitas utan a
+// jelolot toroljuk, kulonben egy kesobbi, mas okbol tortent ujraindulas
+// (gombnyomas, watchdog) egy regi resetEvents erteket tamasztana fel.
+void applyHeapCarry() {
+  if (rtcCarryResetEvents == CARRY_NONE) {
+    return;
+  }
+  testState.resetEvents = rtcCarryResetEvents;
+  rtcCarryResetEvents = CARRY_NONE;
+  printUptime();
+  Serial.print("Heap miatti ujraindulas utan folytatjuk: router reset szamlalo = ");
+  Serial.print(testState.resetEvents);
+  Serial.print(" / ");
+  Serial.println(maxfailureEvents);
+}
+
+// A heap allapotanak nyomon kovetese: mereskovetes, ritkitott soros kiiras, es
+// vegso esetben onkentes ujraindulas.
+//
+// A KIIRAS RITKITASA. A meres 10 mp-enkent fut, a rendszeres allapotsor
+// viszont csak felorankent - ez 0,03 sor/perc, vagyis a 30 sor/perces
+// koltsegvetesbol semmit nem visz el. A figyelmeztetes ezen felul jon, de
+// csak a kuszob ATLEPESEKOR (nem minden korben) - ugyanaz a "csak a sorozat
+// elso tagja" szabaly, mint a TEST FAIL / WIFI LOST eseteben.
+void checkHeap(uint32_t now) {
+  if (now - heapCheckLast < HEAP_CHECK_INTERVAL_MS) {
+    return;
+  }
+  heapCheckLast = now;
+
+  const uint32_t szabad = ESP.getFreeHeap();
+  const uint32_t tomb   = ESP.getMaxAllocHeap();
+
+  // Rendszeres allapotsor. A HARMADIK ertek (a valaha volt legkisebb) a
+  // legfontosabb: egy lassu szivargas ebbol latszik meg akkor is, ha a
+  // pillanatnyi ertek epp rendben van.
+  if (now - heapLogLast >= HEAP_LOG_INTERVAL_MS) {
+    heapLogLast = now;
+    printUptime();
+    Serial.printf("Heap: szabad %u B, legnagyobb tomb %u B, valaha volt legkisebb %u B\n",
+                  (unsigned)szabad, (unsigned)tomb, (unsigned)ESP.getMinFreeHeap());
+  }
+
+  // Figyelmeztetes - csak az ATLEPESKOR. A heapWarnActive jelzo tartja szamon,
+  // hogy a figyelmeztetes mar szol-e; visszaallni is csak akkor lehet, ha a
+  // heap ERDEMBEN (10%-kal) a kuszob fole ment, hogy a kuszob korul
+  // ingadozva ne kapcsolgasson oda-vissza.
+  if (!heapWarnActive && szabad < HEAP_WARN_BYTES) {
+    heapWarnActive = true;
+    logEvent(EV_LOW_HEAP, (uint16_t)(szabad / 1024));
+    printUptime();
+    Serial.printf("FIGYELEM: alacsony a szabad heap (%u B), a kuszob %u B.\n",
+                  (unsigned)szabad, (unsigned)HEAP_WARN_BYTES);
+  } else if (heapWarnActive && szabad > HEAP_WARN_BYTES + HEAP_WARN_BYTES / 10) {
+    heapWarnActive = false;
+    printUptime();
+    Serial.printf("A szabad heap visszaallt (%u B).\n", (unsigned)szabad);
+  }
+
+  // Kritikus szint. KI KELL TARTANIA: egy pillanatnyi melypont (epp futo HTTP
+  // keres, osszeallitas alatt levo valasz) nem szivargas.
+  const bool kritikus = (szabad < HEAP_CRIT_BYTES) || (tomb < HEAP_CRIT_BLOCK_BYTES);
+  if (!kritikus) {
+    heapCritStreak = 0;
+    return;
+  }
+  // A szamlalo TELITODIK, nem no tovabb. Ez akkor szamit, ha az ujraindulas
+  // epp tiltott (AP mod, fajliras, rele impulzus): ilyenkor a kritikus
+  // allapot sokaig allhat, es egy korlatlanul novo uint8_t 255 utan
+  // korbefordulna nullara - vagyis epp a legrosszabb pillanatban ejtene el a
+  // mar kiszolgalt varakozast.
+  if (heapCritStreak < HEAP_CRIT_SAMPLES) {
+    heapCritStreak++;
+    return;
+  }
+
+  // MIKOR NEM SZABAD UJRAINDULNI. Mind a negy kizaras arrol szol, hogy az
+  // ujraindulas ne rontson tobbet, mint amennyit javit:
+  //
+  //  - AP beallito modban a felhasznalo epp a portalon dolgozik; az
+  //    ujraindulas eldobna a beirt adatokat. Nem is maradunk igy orokre: a
+  //    portal 5 perc tetlenseg utan ugyis elalszik, abbol pedig friss
+  //    bootolas jon.
+  //  - MODE_FATAL-ban a program mar nem fut allapotgepet, es 5 perc mulva
+  //    elalszik - ott is jon a friss bootolas.
+  //  - Fajliras kozben soha (ezt a zar biztositja lejjebb is).
+  //  - A rele impulzusa alatt sem: a router epp aram nelkul van, es az
+  //    ujraindulas felbevagna a 90 mp-es pulzust.
+  if (deviceMode != MODE_MONITOR || savingConfig || restartPending
+      || testState.resetStep != 0) {
+    return;
+  }
+
+  // Ha az ujraindulas sem segit, a boot loop rosszabb, mint a megallas.
+  if (rtcHeapRestarts >= MAX_HEAP_RESTARTS) {
+    logEvent(EV_FATAL, 5);
+    enterFatal("Tartosan keves a szabad heap - az ujrainditas sem segitett.");
+    return;
+  }
+
+  // Az ATVITEL beallitasa, MIELOTT ujraindulnank. Lasd a rtcCarryResetEvents
+  // leirasat: ez az egyetlen sima globalis, aminek az elvesztese viselkedesi
+  // hibat okozna.
+  rtcCarryResetEvents = testState.resetEvents;
+  rtcHeapRestarts++;
+  logEvent(EV_HEAP_RESTART, (uint16_t)(szabad / 1024));
+  printUptime();
+  Serial.printf("KRITIKUS: a szabad heap %u B (legnagyobb tomb %u B) %u meresen at.\n",
+                (unsigned)szabad, (unsigned)tomb, (unsigned)HEAP_CRIT_SAMPLES);
+  Serial.print("Onkentes ujraindulas, sorszam: ");
+  Serial.print(rtcHeapRestarts);
+  Serial.print(" / ");
+  Serial.println(MAX_HEAP_RESTARTS);
+
+  // A zarat itt is ATOMIKUSAN szerezzuk meg, ugyanazert, mint minden mas
+  // leallasnal: a kiirasok es az ESP.restart() kozott meg elindulhatna egy
+  // mentes, amit az ujraindulas felbevagna. (Lasd lockConfigBeforeShutdown().)
+  lockConfigBeforeShutdown();
+  Serial.flush();
+  ESP.restart();
+}
+
 void checkWatchdogResets() {
   const esp_reset_reason_t reason = esp_reset_reason();
 
@@ -2308,9 +2516,12 @@ void startConfigPortal() {
                "<li>SLEEP: 1 = ujraprobalkozas, 2 = tartos internetkieses, "
                "3 = AP idotullepes, 4 = vegzetes hiba</li>"
                "<li>FATAL: 1 = LittleFS, 2 = konfig olvasas, "
-               "3 = watchdog, 4 = wifireset torles</li>"
+               "3 = watchdog, 4 = wifireset torles, 5 = tartosan keves heap</li>"
                "<li>WDT RESET: hanyadik rendellenes ujraindulas</li>"
                "<li>STUCK BUTTON: 0 = reset gomb, 1 = wifireset gomb</li>"
+               "<li>LOW HEAP: a szabad heap KB-ban a kuszob atlepesekor</li>"
+               "<li>HEAP RESTART: a szabad heap KB-ban az onkentes "
+               "ujraindulas elott</li>"
                "</ul>"));
     r->print(F("<p><i>Az uptime minden indulaskor nullarol indul, ezert a "
                "BOOT sorok jelzik az ujraindulasokat. A naplo az "
@@ -2599,6 +2810,10 @@ void setup() {
   // körbefordulása itt szándékos és helyes: a különbség akkor is pontosan egy
   // intervallum, ha a millis() még kicsi.
   firstStartProbeLast = timing.startMillis - ONLINE_PROBE_INTERVAL_MS;
+  // Ugyanez a heap allapotsorara: az ELSO kiiras legyen azonnal esedekes, hogy
+  // a bootolas utani heap-szint rogton lathato legyen. (Az "== 0 tehat meg
+  // sosem irtunk" sentinel helyett ugyanaz a minta, mint a probak oraival.)
+  heapLogLast = timing.startMillis - HEAP_LOG_INTERVAL_MS;
 
   pinMode(wifiresetPin, INPUT_PULLUP);
   pinMode(resetPin, INPUT_PULLUP);
@@ -2697,6 +2912,8 @@ void setup() {
   armButtonLatches();
 
   checkWatchdogResets();
+  initHeapState();
+  applyHeapCarry();
 
   Serial.println("Init LittleFS.");
   fsReady = initLittleFS();
@@ -2825,6 +3042,19 @@ void loop() {
     printUptime();
     Serial.println("1 ora hibatlan mukodes - a watchdog szamlalo nullazva.");
   }
+  // Ugyanez a heap miatti ujrainditasok szamlalojara: egy ora hibatlan
+  // mukodes utan a korabbi sorozat mar nem szamit. Kulon feltetel, hogy a
+  // sorai kulon-kulon jelenjenek meg a soros porton.
+  if (rtcHeapRestarts != 0 && currentMillis - timing.startMillis >= WDT_COUNTER_CLEAR_MS) {
+    rtcHeapRestarts = 0;
+    printUptime();
+    Serial.println("1 ora hibatlan mukodes - a heap ujrainditas szamlalo nullazva.");
+  }
+
+  // A heap felugyelete MINDEN uzemmodban mer es kiir (a diagnosztika ott is
+  // kell, ahol epp baj van), az ujrainditas viszont csak monitor modban
+  // tortenhet - lasd a checkHeap() kizarasait.
+  checkHeap(currentMillis);
 
   if (deviceMode == MODE_FATAL) {
     // Mindkét LED együtt, gyorsan villog. A program szándékosan nem fut

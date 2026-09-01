@@ -452,7 +452,7 @@ történik, és soha nem tér vissza. Kívülről nézve a viselkedés azonos.
 Az utolsó sor apróságnak tűnik, de ez volt a program **egyetlen abszolút
 `millis()` összehasonlítása** – a másik 23 időzítés mind különbség-alakú. Két
 hallgatólagos feltevést hordozott: hogy a `millis()` minden induláskor nulláról
-kezd (ez igaz, lásd a 14. fejezet uptime-megjegyzését), és hogy nem fordul körbe
+kezd (ez igaz, lásd a 15. fejezet uptime-megjegyzését), és hogy nem fordul körbe
 (ez 49,7 napig igaz). A különbség-alak mindkettőtől függetlenné teszi, és a
 `timing.startMillis` maga mondja ki, mihez mérünk.
 
@@ -656,7 +656,99 @@ pedig mindkettőt, gyorsabban – az egyik együtt, a másik ellenfázisban.
 
 ---
 
-## 12. Két task, egy memória
+## 12. Heap felügyelet
+
+A sketch maga **semmit nem allokál dinamikusan** – az ESPAsyncWebServer, az
+AsyncTCP és a Wi-Fi driver viszont igen. Egy lassú szivárgás vagy elaprózódás
+hónapokig észrevétlen marad, aztán egy nap az eszköz „csak úgy" nem működik: egy
+allokációs hiba esetén a legtöbb könyvtár **csendben elbukik**, nem panikol,
+tehát a watchdog sem fogja meg. Ezért mérünk, kiírunk, és végső esetben magunktól
+újraindulunk – **mielőtt** bármi elromlana.
+
+| Paraméter | Érték |
+|---|---|
+| Mintavétel | **10 mp**-enként (`HEAP_CHECK_INTERVAL_MS`) |
+| Rendszeres állapotsor | **30 perc**enként – 0,03 sor/perc, a 30 sor/perces költségvetésből semmit nem visz el |
+| Figyelmeztetés | a szabad heap **25 000 B** alatt (`HEAP_WARN_BYTES`) |
+| Önkéntes újraindulás | a szabad heap **12 000 B** alatt, **vagy** a legnagyobb összefüggő tömb **6 000 B** alatt |
+| …de csak ha kitart | **3 egymást követő** mérésen át (30 mp) |
+| Legfeljebb | **3** heap-újraindulás, utána `MODE_FATAL` |
+
+A soros porton így néz ki:
+
+```
+Uptime: 0d 0h 0m 10s
+Heap: szabad 178432 B, legnagyobb tomb 110000 B, valaha volt legkisebb 178432 B
+```
+
+A harmadik érték a legfontosabb: **a valaha volt legkisebb** szabad heap. Egy
+lassú szivárgás ebből látszik meg akkor is, ha a pillanatnyi érték épp rendben
+van.
+
+> A figyelmeztetés csak a küszöb **átlépésekor** szól, nem minden mérésnél –
+> ugyanaz a „csak a sorozat első tagja" szabály, mint a `TEST FAIL` /
+> `WIFI LOST` esetében. Visszaállni is csak akkor tud, ha a heap érdemben (10%)
+> a küszöb fölé ment, hogy a küszöb körül ingadozva ne kapcsolgasson.
+> (Mérve: `HP2`.)
+
+### Miért két küszöb?
+
+Lehet 30 KB szabad heap úgy, hogy a legnagyobb **összefüggő** tömb csak 4 KB –
+ilyenkor a szabad heap önmagában megnyugtató, közben a foglalások már buknak.
+Ezért a legnagyobb tömböt (`ESP.getMaxAllocHeap()`) külön is nézzük.
+
+### Mikor NEM indul újra
+
+Négy kizárás van, és mindegyik arról szól, hogy az újraindulás ne rontson
+többet, mint amennyit javít (mérve: `HP5`):
+
+| Helyzet | Miért | Van-e kiút? |
+|---|---|---|
+| **AP beállító mód** | a felhasználó épp a portálon dolgozik, az újraindulás eldobná a beírt adatokat | igen: a portál 5 perc tétlenség után elalszik, abból friss bootolás jön |
+| **`MODE_FATAL`** | a program már nem futtat állapotgépet | igen: 5 perc után deep sleep |
+| **Fájlírás közben** | félbevágott mentés | a következő mérés újra próbálja |
+| **A relé impulzusa alatt** | a router épp áram nélkül van, az újraindulás félbevágná a 90 mp-es pulzust | a pulzus végén újra próbálja |
+
+### Mit visz át az újraindulás
+
+Egy `ESP.restart()` a RAM-ot törli, tehát minden sima globális elveszik. A
+többségükért nem kár: a `timing` újraszámolódik, a `firstStart` várakozás újra
+lefut (és a próba perceken belül le is zárja), a `cycleIndex`/`failedCount`
+pedig csak azt mondja meg, hol tart az öt teszt között.
+
+**Egy kivétel van**, és annál az elvesztés viselkedési hibát okozna:
+
+> A `testState.resetEvents` számolja, hányszor indítottuk már újra a routert
+> ebben a sorozatban, és ez viszi az eszközt az ötödiknél az **1 órás alvásba**
+> (`internetFailSleep`). Ha egy heap-újraindulás ezt nullázná, a számláló mindig
+> elölről kezdene – vagyis az eszköz **végtelenül újraindíthatná a routert**
+> ahelyett, hogy elalszik.
+
+Ezért ez az egy érték átmegy az RTC memórián (`rtcCarryResetEvents`), és a
+`setup()` **pontosan egyszer** használja fel: utána visszaállítja a „nincs
+átvitel" jelölésre, hogy egy későbbi, más okból történt újraindulás (gomb,
+watchdog) ne támasszon fel elavult értéket. (Mérve: `HP4`.)
+
+Ami eleve túléli: a diagnosztikai napló, a watchdog-számláló, az
+újrapróbálkozási körök (mind RTC memóriában), és a LittleFS-en tárolt
+konfiguráció.
+
+> ⚠️ **A mintavétel a `loop()` iterációi között történik**, tehát a hosszú
+> blokkoló várakozások alatt (`RESET_DELAY`, a 90 mp-es relé pulzus, egy futó
+> HTTP kérés) nincs mérés. Ott nem is allokál semmi érdemben, de a `/log` oldal
+> uptime-bélyegein ez látszani fog: a heap sorok között ilyenkor nagyobb a rés.
+
+### Új eseménykódok
+
+| Esemény | A paraméter jelentése |
+|---|---|
+| `LOW HEAP` | a szabad heap **KB**-ban a küszöb átlépésekor |
+| `HEAP RESTART` | a szabad heap **KB**-ban az önkéntes újraindulás előtt |
+| `FATAL` **5** | tartósan kevés a heap – az újraindítás sem segített |
+
+---
+
+## 13. Két task, egy memória
 
 A programban két task fut: a `loop` task és az AsyncTCP webszerver
 **`async_tcp`** taskja (ez utóbbi csak AP beállító módban). Néhány globálishoz
@@ -702,7 +794,7 @@ van), `CC3` (két mentés között a négy puffer mindig együtt vált át).
 
 ---
 
-## 13. A soros port
+## 14. A soros port
 
 | | |
 |---|---|
@@ -730,7 +822,7 @@ sort sem ír** (`SER3`).
 Ezt három szabály tartja fenn:
 
 - **Az ismétlődő események csak egyszer.** A `TEST FAIL`, a `WIFI LOST` és a
-  `STUCK BUTTON` sorozatokból csak az első kerül ki (lásd a 14. fejezetet).
+  `STUCK BUTTON` sorozatokból csak az első kerül ki (lásd a 15. fejezetet).
 - **A villogó ciklusok némák.** A LED-kezelés nem ír semmit.
 - **Sikeres teszt = egy sor.** A `testInternetHTTP()` sikernél nem írja ki sem
   a kapott törzset, sem külön visszaigazolást – csak eltérésnél, ahol a kapott
@@ -738,7 +830,7 @@ Ezt három szabály tartja fenn:
 
 ---
 
-## 14. Diagnosztikai napló
+## 15. Diagnosztikai napló
 
 Az eszköz az utolsó **32 eseményt** RTC memóriában tárolja, és a beállító
 portál `/log` oldalán kiírja. Soros kábel nélkül is megtudható, mi történt.
@@ -774,9 +866,11 @@ Minden bejegyzés uptime bélyeget, egy eseménykódot és egy paramétert tarta
 | `GW UNREACH` | 1 = a router reset előtt, 2 = a reset után is |
 | `CONFIG SAVED` | 0 |
 | `SLEEP` | 1 = újrapróbálkozás, 2 = tartós internetkiesés, 3 = AP időtúllépés, 4 = végzetes hiba |
-| `FATAL` | 1 = LittleFS csatolás, 2 = konfiguráció olvasás, 3 = watchdog, 4 = a wifireset törlése nem sikerült |
+| `FATAL` | 1 = LittleFS csatolás, 2 = konfiguráció olvasás, 3 = watchdog, 4 = a wifireset törlése nem sikerült, 5 = tartósan kevés a heap |
 | `WDT RESET` | hányadik rendellenes újraindulás |
 | `STUCK BUTTON` | 0 = reset gomb, 1 = wifireset gomb (csak az **első** kör – az ismétlődő 60 mp-es alvás-ébredés körök nem íródnak be újra) |
+| `LOW HEAP` | a szabad heap **KB**-ban a küszöb átlépésekor (csak az átlépés, lásd a 12. fejezetet) |
+| `HEAP RESTART` | a szabad heap **KB**-ban az önkéntes újraindulás előtt |
 
 A `/log` oldal az aktuális állapotot is mutatja: **az indulás oka szövegesen**
 (a nyers enum-szám zárójelben marad, hibajelentéshez), watchdog számláló,
@@ -843,6 +937,7 @@ veszítenénk el – azt, ami a diagnózishoz kell. Három helyen van ilyen szű
 | `TEST FAIL` | csak `failedCount == 1`-nél |
 | `STUCK BUTTON` | `stuckCycleAlreadyLogged` jelző |
 | `WIFI LOST` | `lastEventWas(EV_WIFI_LOST)` – ha az előző bejegyzés is ez volt, kimarad |
+| `LOW HEAP` | `heapWarnActive` jelző – csak a küszöb átlépésekor |
 
 A `WIFI LOST` szűrése volt a legutolsó hiányzó darab. **Az arányokról
 őszintén:** védelem nélkül, valósághű pislákolási ütemek mellett (500 / 1000 /

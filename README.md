@@ -553,6 +553,37 @@ végzetes hiba villogó ciklusa pedig **egyetlen sort sem ír**. Ezt az
 ismétlődő események szűrése tartja fenn (`TEST FAIL`, `WIFI LOST`,
 `STUCK BUTTON` sorozatokból csak az első).
 
+## 🧠 Heap felügyelet
+
+A sketch maga semmit nem allokál dinamikusan, de az ESPAsyncWebServer, az
+AsyncTCP és a Wi-Fi driver igen. Egy lassú szivárgás hónapokig észrevétlen
+marad, aztán az eszköz „csak úgy" nem működik – **allokációs hibánál a legtöbb
+könyvtár csendben elbukik, nem panikol, tehát a watchdog sem fogja meg.**
+
+| | |
+|---|---|
+| Mintavétel | 10 mp-enként |
+| Soros állapotsor | 30 percenként (szabad heap, legnagyobb összefüggő tömb, **valaha volt legkisebb**) |
+| Figyelmeztetés | 25 000 B alatt – csak a küszöb **átlépésekor**, nem minden mérésnél |
+| Önkéntes újraindulás | 12 000 B alatt, vagy ha a legnagyobb tömb 6 000 B alá esik – de csak **3 egymást követő** mérés után |
+| Felső korlát | 3 heap-újraindulás, utána `MODE_FATAL` (a boot loop rosszabb, mint a megállás) |
+
+```
+Uptime: 0d 0h 0m 10s
+Heap: szabad 178432 B, legnagyobb tomb 110000 B, valaha volt legkisebb 178432 B
+```
+
+**Nem indul újra**, ha AP beállító módban vagy (elveszne a beírt konfiguráció),
+végzetes hiba módban, fájlírás közben, vagy a relé impulzusa alatt. Mindegyik
+helyzetnek megvan a maga kiútja: a portál 5 perc után elalszik, a többi eset
+pedig a következő mérésnél újra sorra kerül.
+
+**Amit az újraindulás átvisz:** a `testState.resetEvents` – ez számolja, hányszor
+indítottuk már újra a routert, és ez viszi az eszközt az ötödiknél az 1 órás
+alvásba. Enélkül a számláló elölről kezdene, és az eszköz **végtelenül
+újraindíthatná a routert** ahelyett, hogy elalszik. Az RTC memórián megy át, és
+a `setup()` pontosan egyszer használja fel. Részletek: [MUKODES.md](MUKODES.md)
+
 ## ✅ Tesztelt konfiguráció
 
 | | |

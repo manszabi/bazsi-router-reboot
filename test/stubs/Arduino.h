@@ -317,10 +317,23 @@ inline size_t Print::println(const IPAddress& a) { buf_ += a.str(); flushLine();
 // hogy a "masik lapkan nem mukodik" viselkedes ellenorizheto legyen.
 extern uint64_t g_efuseMac;
 
+// A heap merhetove tetele. A valodi ertekeket a forgatokonyv allitja; a
+// g_heapDrainPerCall-lal modellezheto egy LASSU SZIVARGAS is (minden lekerdezes
+// ennyivel kevesebbet ad vissza), ami nelkul a kuszob atlepese nem lenne
+// jatszhato.
+extern uint32_t g_freeHeap;
+extern uint32_t g_minFreeHeap;
+extern uint32_t g_maxAllocHeap;
+extern uint32_t g_heapDrainPerCall;
+extern int      g_heapQueries;
+
 class EspClass {
 public:
   void restart() { simLog("ESP.restart"); throw RestartSignal{}; }
   const char* getChipModel() { return "ESP32-C3"; }
   uint64_t getEfuseMac() { return g_efuseMac; }
+  uint32_t getFreeHeap();
+  uint32_t getMinFreeHeap() { return g_minFreeHeap; }
+  uint32_t getMaxAllocHeap();
 };
 extern EspClass ESP;

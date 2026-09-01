@@ -78,6 +78,11 @@ bool lastEventWas(uint8_t code);
 bool stuckCycleAlreadyLogged(uint16_t which);
 void lockConfigBeforeShutdown();
 bool beginConfigWrite();
+void checkHeap(uint32_t now);
+extern uint32_t heapCheckLast;
+extern uint32_t heapLogLast;
+extern uint8_t  heapCritStreak;
+extern bool     heapWarnActive;
 constexpr uint8_t EV_TEST_FAIL_C = 4;
 constexpr uint8_t EV_FATAL_C = 9;
 void resetbutton();
@@ -148,6 +153,16 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
                      const char* ip, const char* gw, uint32_t latency = 500,
                      bool deepSleepWake = false) {
   g_millis = 1; g_log.clear(); g_serialLog.clear(); g_pinState.clear(); g_pinRead.clear();
+  // A heap modellje is hidegindul: egy valodi bekapcsolas tiszta heappel
+  // indul. Enelkul egy korabbi forgatokonyv alacsony heapje atszivarogna a
+  // kovetkezobe, es ott VARATLAN onkentes ujraindulast okozna.
+  g_freeHeap = 180000; g_minFreeHeap = 180000; g_maxAllocHeap = 110000;
+  g_heapDrainPerCall = 0; g_heapQueries = 0;
+  // A sketch heap-orai is: ezek SZANDEKOSAN fajl-szintu globalisok (nem
+  // fuggveny-szintu static-ok), epp azert, hogy egy hidegindulas itt is
+  // visszaallithassa oket - kulonben egy korabbi forgatokonyv figyelmeztetes-
+  // allapota atszivarogna a kovetkezobe.
+  heapCheckLast = 0; heapLogLast = 0; heapCritStreak = 0; heapWarnActive = false;
   // A soros eletciklus merese is hidegindul (lasd SER6/SER7).
   g_serialOn = false; g_serialBaud = 0; g_serialFirstWriteMs = 0;
   g_serialWritesAfterEnd = 0; g_serialFlushedAll = true;
@@ -1716,14 +1731,40 @@ static void scSER2() {
   CHECK(lpm <= 30, "internet kiesésnél is max ~30 sor/perc");
 }
 
+// SER3 segedje: hany olyan sort irt a loop, ami NEM a ritkitott heap-allapot?
+static size_t nemHeapSorok(size_t from) {
+  size_t n = 0;
+  for (size_t i = from; i < g_serialLog.size(); i++) {
+    const std::string& l = g_serialLog[i];
+    if (l.find("Heap: szabad") != std::string::npos) continue;
+    if (l.find("Uptime:") != std::string::npos) continue;   // a heap sor fejlece
+    n++;
+  }
+  return n;
+}
+
 static void scSER3() {
-  // AP mod es hibajelzo mod: a villogo ciklus ne irjon semmit
+  // AP mod es hibajelzo mod: a villogo ciklus ne irjon semmit.
+  //
+  // A KOVETELMENY PONTOSITVA. Korabban ez "egyetlen sort sem" volt. A heap
+  // felugyelet bevezetesevel ez mar nem igaz - es SZANDEKOSAN nem: a heap
+  // allapotsora minden uzemmodban kimegy, mert epp ott kell a diagnosztika,
+  // ahol baj van (az AP modban fut a webszerver, ami a legtobbet allokal).
+  //
+  // Amit viszont TOVABBRA IS garantalunk, es ami a teszt valodi lenyege volt:
+  // a villogo ciklus SEMMIT nem ir KORONKENT. Az egyetlen kivetel a
+  // ritkitott, felorankenti heap-sor - a merese alabb kulon szerepel.
   coldBoot(false, "", "", "", "");
   setup();
   const size_t before = g_serialLog.size();
   const uint32_t t0 = g_millis;
   try { while (g_millis - t0 < 4u*60*1000) loop(); } catch (DeepSleepSignal&) {}
-  CHECK(g_serialLog.size() == before, "AP módban a loop() egy sort sem ír");
+  CHECK(nemHeapSorok(before) == 0,
+        "AP módban a loop() a heap-soron kívül egy sort sem ír");
+  { const uint32_t lpm = (uint32_t)((g_serialLog.size() - before) * 60000
+                                    / (g_millis - t0 ? g_millis - t0 : 1));
+    printf("     [info] AP mod: %u sor/perc\n", lpm);
+    CHECK(lpm <= 1, "és a teljes kimenet is legfeljebb 1 sor/perc"); }
 
   coldBoot(true, "TestNet", "pw", "", "");
   g_fsMountOk = false;
@@ -1731,7 +1772,8 @@ static void scSER3() {
   const size_t before2 = g_serialLog.size();
   const uint32_t t1 = g_millis;
   try { while (g_millis - t1 < 4u*60*1000) loop(); } catch (DeepSleepSignal&) {}
-  CHECK(g_serialLog.size() == before2, "hibajelző módban sem ír a villogó ciklus");
+  CHECK(nemHeapSorok(before2) == 0,
+        "hibajelző módban sem ír a villogó ciklus a heap-soron kívül");
 }
 
 static void scOV1() {
@@ -3876,6 +3918,341 @@ static void scLOG3() {
   CHECK(b.find("</table>") != std::string::npos, "a tabla rendesen lezarul");
 }
 
+// --- Heap felugyelet -------------------------------------------------------
+
+// A sketch heap-allapotanak elerese a tesztekbol.
+extern uint32_t rtcHeapMagic;
+extern uint32_t rtcHeapRestarts;
+extern uint8_t  rtcCarryResetEvents;
+
+// Monitor uzembe vitel: lefuttatja a firstStartot egeszseges halozattal.
+static void monitorUzembe() {
+  g_httpBody = "Microsoft Connect Test";
+  int guard = 0;
+  while (uiFlags.firstStart && ++guard < 2000000) loop();
+}
+
+static void scHP1() {
+  // ALAPMERES: MIT ES MILYEN GYAKRAN IR KI?
+  //
+  // A heap merese 10 mp-enkent fut, a rendszeres allapotsor viszont csak
+  // felorankent. A kerdes az, hogy ez tenylegesen belefer-e a mar meglevo
+  // 30 sor/perces koltsegvetesbe - vagyis hogy a felugyelet nem rontja el
+  // azt, amit a SER1-SER3 ovott.
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcHeapMagic = 0;
+  setup();
+  monitorUzembe();
+  const size_t before = g_serialLog.size();
+  const uint32_t t0 = g_millis;
+  int guard = 0;
+  try { while (g_millis - t0 < 3u * 3600 * 1000 && ++guard < 3000000) loop(); }
+  catch (DeepSleepSignal&) {} catch (RestartSignal&) {}
+
+  int heapSorok = 0;
+  for (size_t i = before; i < g_serialLog.size(); i++)
+    if (g_serialLog[i].find("Heap: szabad") != std::string::npos) heapSorok++;
+  const uint32_t orak = (g_millis - t0) / 3600000;
+  printf("     [info] %u ora alatt %d heap-allapotsor (%.1f oranként)\n",
+         orak, heapSorok, heapSorok ? orak / (double)heapSorok : 0.0);
+  CHECK(heapSorok >= 2, "rendszeresen ki is irja az allapotot");
+  CHECK(heapSorok <= (int)(orak * 2 + 2), "de felorankent legfeljebb egyszer");
+  CHECK(!serialHas("FIGYELEM: alacsony"), "egeszseges heapnel nem figyelmeztet");
+}
+
+static void scHP2() {
+  // A FIGYELMEZTETES CSAK AZ ATLEPESKOR SZOL - nem minden meresnel. Ugyanaz
+  // a "csak a sorozat elso tagja" szabaly, mint a TEST FAIL / WIFI LOST
+  // eseteben; enelkul 10 mp-enkent egy sor menne ki, ami 6 sor/perc.
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcHeapMagic = 0;
+  g_freeHeap = 20000; g_minFreeHeap = 20000; g_maxAllocHeap = 18000;
+  setup();
+  monitorUzembe();
+  const size_t before = g_serialLog.size();
+  const uint32_t t0 = g_millis;
+  int guard = 0;
+  try { while (g_millis - t0 < 10u * 60 * 1000 && ++guard < 2000000) loop(); }
+  catch (DeepSleepSignal&) {} catch (RestartSignal&) {}
+
+  int figy = 0;
+  for (size_t i = before; i < g_serialLog.size(); i++)
+    if (g_serialLog[i].find("FIGYELEM: alacsony") != std::string::npos) figy++;
+  printf("     [info] 10 perc alatt %d figyelmeztetes (meres 10 mp-enkent)\n", figy);
+  CHECK(figy <= 1, "a figyelmeztetes 10 perc alatt is legfeljebb egyszer szol");
+  CHECK(serialHas("FIGYELEM: alacsony"), "de egyszer igen");
+
+  // Es a naplo is csak egyszer kapja meg.
+  int naplo = 0;
+  for (uint32_t i = 0; i < rtcEvNext && i < 32; i++)
+    if (rtcEvents[i].code == 13) naplo++;
+  CHECK(naplo == 1, "a naploba is pontosan egy LOW HEAP kerult");
+}
+
+static void scHP3() {
+  // A KRITIKUS SZINTNEK KI KELL TARTANIA. Egy pillanatnyi melypont nem
+  // szivargas: egy epp futo HTTP keres vagy egy osszeallitas alatt levo
+  // valasz atmenetileg is levihet a kuszob ala. Ha egyetlen meres eleg lenne,
+  // az eszkoz normal mukodes kozben indulna ujra.
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcHeapMagic = 0;
+  setup();
+  monitorUzembe();
+
+  // EGYETLEN kritikus minta, utana visszaall.
+  g_freeHeap = 5000; g_maxAllocHeap = 4000;
+  bool restarted = false;
+  int guard = 0;
+  try {
+    for (int i = 0; i < 3 && !restarted; i++) {
+      const uint32_t t = g_millis;
+      while (g_millis - t < 11u * 1000 && ++guard < 200000) loop();
+      if (i == 0) { g_freeHeap = 180000; g_maxAllocHeap = 110000; }  // visszaallt
+    }
+  } catch (RestartSignal&) { restarted = true; }
+  CHECK(!restarted, "egyetlen melypont NEM indit ujra");
+
+  // Most viszont TARTOSAN kritikus.
+  g_freeHeap = 5000; g_maxAllocHeap = 4000;
+  guard = 0;
+  const uint32_t t0 = g_millis;
+  try { while (!restarted && ++guard < 200000) loop(); }
+  catch (RestartSignal&) { restarted = true; }
+  const uint32_t eltelt = g_millis - t0;
+  printf("     [info] tartos kritikus szint utan %u mp-cel indult ujra\n",
+         eltelt / 1000);
+  CHECK(restarted, "tartosan kritikus szintnel viszont ujraindul");
+  CHECK(eltelt >= 20000, "de csak tobb egymast koveto meres utan (nem azonnal)");
+  CHECK(serialHas("Onkentes ujraindulas"), "es meg is mondja, miert");
+}
+
+static void scHP4() {
+  // AZ ATVITEL - EZ A LENYEG. Egy ESP.restart() a RAM-ot torli, tehat a
+  // testState.resetEvents elveszne. Az pedig azt szamolja, hanyszor
+  // inditottuk mar ujra a routert ebben a sorozatban, es az otodiknel viszi
+  // az eszkozt az 1 oras alvasba. Ha egy heap-ujraindulas nullazna, a
+  // szamlalo mindig elolrol kezdene - vagyis az eszkoz VEGTELENUL
+  // ujrainditana a routert ahelyett, hogy elalszik.
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcHeapMagic = 0;
+  setup();
+  monitorUzembe();
+  testState.resetEvents = 3;              // mar harom router reset volt
+
+  // FONTOS a checkHeap() KOZVETLEN hivasa a loop() helyett: a loop()-ban a
+  // sikeres internet teszt nullazza a resetEvents-et (ez a helyes viselkedes,
+  // lasd TESTING_STATE), es akkor nem azt mernenk, amit akarunk. Igy viszont
+  // pontosan az atviteli mechanizmus all a meres kozeppontjaban.
+  g_freeHeap = 5000; g_maxAllocHeap = 4000;
+  bool restarted = false;
+  int guard = 0;
+  try {
+    while (!restarted && ++guard < 200000) { checkHeap(g_millis); g_millis += 1000; }
+  } catch (RestartSignal&) { restarted = true; }
+  CHECK(restarted, "a heap miatt ujraindult");
+  CHECK(rtcCarryResetEvents == 3, "az atvitel rogzitette a router reset szamlalot");
+  CHECK(rtcHeapRestarts == 1, "es szamon tartja, hanyadik heap-ujraindulas volt");
+
+  // Most a valodi ujraindulas: a RAM torlodik, az RTC nem.
+  const uint32_t heapMagic = rtcHeapMagic;
+  const uint32_t heapRestarts = rtcHeapRestarts;
+  const uint8_t carry = rtcCarryResetEvents;
+  coldBoot(true, "TestNet", "pw", "", "", 500, true);   // ebredes = RAM torolve
+  rtcHeapMagic = heapMagic; rtcHeapRestarts = heapRestarts;
+  rtcCarryResetEvents = carry;
+  g_freeHeap = 180000; g_minFreeHeap = 180000; g_maxAllocHeap = 110000;
+  setup();
+  CHECK(testState.resetEvents == 3,
+        "az ujraindulas utan a router reset szamlalo FOLYTATODIK, nem nullazodik");
+  CHECK(rtcCarryResetEvents == 0xFF,
+        "az atvitelt pontosan EGYSZER hasznaljuk fel");
+  CHECK(serialHas("folytatjuk: router reset szamlalo"), "es ezt ki is irja");
+
+  // A masodik felhasznalas mar nem tortenhet meg: egy KESOBBI, mas okbol
+  // tortent ujraindulas ne tamasszon fel elavult erteket.
+  coldBoot(true, "TestNet", "pw", "", "", 500, true);
+  rtcHeapMagic = heapMagic; rtcCarryResetEvents = 0xFF;
+  setup();
+  CHECK(testState.resetEvents == 0,
+        "gombos/watchdog ujraindulas utan viszont tiszta lappal indul");
+}
+
+static void scHP5() {
+  // MIKOR NEM SZABAD UJRAINDULNI. Negy kizaras van, es mindegyik arrol szol,
+  // hogy az ujraindulas ne rontson tobbet, mint amennyit javit.
+  //
+  // (a) AP BEALLITO MODBAN a felhasznalo epp a portalon dolgozik - az
+  //     ujraindulas eldobna a beirt adatokat. Nem is maradunk igy orokre:
+  //     a portal 5 perc tetlenseg utan ugyis elalszik.
+  {
+    coldBoot(false, "", "", "", "");
+    rtcHeapMagic = 0;
+    setup();
+    CHECK(deviceMode == (DeviceMode)1, "AP modban vagyunk");
+    g_freeHeap = 5000; g_maxAllocHeap = 4000;
+    bool restarted = false, slept = false;
+    int guard = 0;
+    try {
+      const uint32_t t = g_millis;
+      while (g_millis - t < 3u * 60 * 1000 && ++guard < 500000) loop();
+    } catch (RestartSignal&) { restarted = true; } catch (DeepSleepSignal&) { slept = true; }
+    CHECK(!restarted, "AP modban NEM indit ujra (elveszne a beirt konfig)");
+    CHECK(!slept, "es meg nem is alszik el - fut a portal");
+  }
+
+  // (b) A RELE IMPULZUSA ALATT sem: a router epp aram nelkul van, es az
+  //     ujraindulas felbevagna a 90 mp-es pulzust.
+  {
+    coldBoot(true, "TestNet", "pw", "", "");
+    rtcHeapMagic = 0;
+    setup();
+    monitorUzembe();
+    testState.resetStep = 1;                 // pulzus folyamatban
+    timing.resetPulseStart = g_millis;
+    digitalWrite(10, HIGH);
+    g_freeHeap = 5000; g_maxAllocHeap = 4000;
+    bool restarted = false;
+    int guard = 0;
+    try {
+      const uint32_t t = g_millis;
+      while (g_millis - t < 60u * 1000 && ++guard < 200000) {
+        checkHeap(g_millis); g_millis += 1000;
+      }
+    } catch (RestartSignal&) { restarted = true; }
+    CHECK(!restarted, "a rele impulzusa alatt NEM indit ujra");
+  }
+
+  // (c) FAJLIRAS kozben sem.
+  {
+    coldBoot(true, "TestNet", "pw", "", "");
+    rtcHeapMagic = 0;
+    setup();
+    monitorUzembe();
+    savingConfig = true;
+    g_freeHeap = 5000; g_maxAllocHeap = 4000;
+    bool restarted = false;
+    int guard = 0;
+    try {
+      const uint32_t t = g_millis;
+      while (g_millis - t < 60u * 1000 && ++guard < 200000) {
+        checkHeap(g_millis); g_millis += 1000;
+      }
+    } catch (RestartSignal&) { restarted = true; }
+    CHECK(!restarted, "fajliras kozben sem indit ujra");
+    savingConfig = false;
+  }
+}
+
+static void scHP6() {
+  // HA AZ UJRAINDULAS SEM SEGIT. Egy tartos elaprozodas vagy egy mar
+  // indulaskor jelen levo szivargas eseten a heap-ujraindulas boot loopot
+  // adna. Harom sikertelen kor utan inkabb megallunk es jelzunk - ugyanaz a
+  // politika, mint a watchdognal.
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcHeapMagic = 0;
+  setup();
+  monitorUzembe();
+  rtcHeapRestarts = 3;    // mar volt harom
+  g_freeHeap = 5000; g_maxAllocHeap = 4000;
+  bool restarted = false;
+  int guard = 0;
+  try {
+    const uint32_t t = g_millis;
+    while (g_millis - t < 60u * 1000 && ++guard < 200000) loop();
+  } catch (RestartSignal&) { restarted = true; }
+  CHECK(!restarted, "a negyedik korben mar NEM indul ujra");
+  CHECK(deviceMode == (DeviceMode)2, "hanem vegzetes hibat jelez");
+  bool found = false;
+  for (uint32_t i = 0; i < rtcEvNext && i < 32; i++)
+    if (rtcEvents[i].code == 9 && rtcEvents[i].param == 5) found = true;
+  CHECK(found, "a naploban FATAL(5) - tartosan keves a heap");
+}
+
+static void scHP7() {
+  // A SZAMLALO NULLAZASA. Egy ora hibatlan mukodes utan a korabbi sorozat
+  // mar nem szamit - kulonben egy fel evvel korabbi, egyszeri heap-esemeny
+  // vinne az eszkozt a harmas kuszobre.
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcHeapMagic = 0;
+  setup();
+  monitorUzembe();
+  rtcHeapRestarts = 2;
+  g_millis = timing.startMillis + 59u * 60 * 1000;
+  loop();
+  CHECK(rtcHeapRestarts == 2, "egy oran belul meg nem nullaz");
+  g_millis = timing.startMillis + 61u * 60 * 1000;
+  loop();
+  CHECK(rtcHeapRestarts == 0, "egy ora hibatlan mukodes utan viszont igen");
+  CHECK(serialHas("heap ujrainditas szamlalo nullazva"), "es kiirja");
+}
+
+static void scHP8() {
+  // A NAPLOOLDAL. A ket uj esemenykod nevvel jelenik meg, es a
+  // jelmagyarazat is megfejtheto - kulonben a /log egy szammal lenne
+  // szegenyebb, de ertelmezhetetlenebb.
+  coldBoot(false, "", "", "", "");
+  rtcHeapMagic = 0;
+  setup();
+  logEvent((EventCode)13, 24);
+  logEvent((EventCode)14, 11);
+  AsyncWebServerRequest req; g_handlers["/log#1"](&req);
+  const std::string& b = req._body;
+  CHECK(b.find(">LOW HEAP<") != std::string::npos, "a LOW HEAP nevvel jelenik meg");
+  CHECK(b.find(">HEAP RESTART<") != std::string::npos, "es a HEAP RESTART is");
+  CHECK(b.find("LOW HEAP: a szabad heap KB-ban") != std::string::npos,
+        "a jelmagyarazat megfejti a parametert");
+  CHECK(b.find("5 = tartosan keves heap") != std::string::npos,
+        "es a FATAL uj oka is szerepel benne");
+}
+
+static void scHP9() {
+  // VEGPONTTOL VEGPONTIG: EGY VALODI, LASSU SZIVARGAS.
+  //
+  // Ez az az eset, amiert az egesz felugyelet keszult. A sketch maga semmit
+  // nem allokal dinamikusan, az ESPAsyncWebServer / AsyncTCP / Wi-Fi driver
+  // viszont igen - egy lassu szivargas honapokig eszrevetlen marad, aztan egy
+  // nap az eszkoz "csak ugy" nem mukodik: allokacios hibanal a legtobb
+  // konyvtar CSENDBEN elbukik, nem panikol, tehat a watchdog sem fogja meg.
+  //
+  // A modell: minden heap-lekerdezes 400 bajttal kevesebbet ad vissza. A
+  // meres azt kovett vegig, hogy a felugyelet a HELYES SORRENDBEN reagal:
+  // eloszor figyelmeztet, aztan - es csak tartos kritikus szint utan -
+  // ujraindul, a router reset szamlalot pedig atviszi.
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcHeapMagic = 0;
+  setup();
+  monitorUzembe();
+  testState.resetEvents = 2;             // legyen mit atvinni
+
+  g_heapDrainPerCall = 400;              // lassu szivargas
+  bool restarted = false;
+  int guard = 0;
+  const uint32_t t0 = g_millis;
+  try {
+    while (!restarted && ++guard < 300000) { checkHeap(g_millis); g_millis += 1000; }
+  } catch (RestartSignal&) { restarted = true; }
+
+  printf("     [info] a szivargas kezdetetol az onkentes ujraindulasig: %u perc\n",
+         (g_millis - t0) / 60000);
+  CHECK(restarted, "a szivargas vegul onkentes ujraindulashoz vezetett");
+
+  // A HELYES SORREND: eloszor figyelmeztetes, csak azutan ujraindulas.
+  const int figy = serialIndex("FIGYELEM: alacsony");
+  const int ujra = serialIndex("Onkentes ujraindulas");
+  CHECK(figy >= 0, "elobb figyelmeztetett");
+  CHECK(ujra > figy, "es csak azutan indult ujra");
+
+  // A naploban is ott a nyoma - epp azert, hogy soros kabel nelkul is
+  // kideruljon, mi tortent.
+  bool low = false, hres = false;
+  for (uint32_t i = 0; i < rtcEvNext && i < 32; i++) {
+    if (rtcEvents[i].code == 13) low = true;
+    if (rtcEvents[i].code == 14) hres = true;
+  }
+  CHECK(low && hres, "a naploban LOW HEAP es HEAP RESTART is szerepel");
+  CHECK(rtcCarryResetEvents == 2, "es a router reset szamlalo atvitele is megvan");
+}
+
 // --- Ido-alapfeltevesek es a ket task kozotti megosztott allapot ------------
 
 static void scWDT14() {
@@ -5539,6 +5916,15 @@ static const Scenario kScenarios[] = {
   { "LOG6: a naplo szamlaloja korbefordulhat - az index attol ep marad", scLOG6 },
   { "SH1: leallas elott a zarat MEG IS SZEREZZUK, nem csak megvarjuk", scSH1 },
   { "WDT14: a watchdog szamlalo a MOSTANI indulashoz kepest mer", scWDT14 },
+  { "HP1: a heap allapotsora ritkitva megy ki, nem koronkent", scHP1 },
+  { "HP2: a figyelmeztetes csak az atlepeskor szol", scHP2 },
+  { "HP3: egyetlen melypont nem indit ujra, a tartos igen", scHP3 },
+  { "HP4: a router reset szamlalo TULELI a heap-ujraindulast", scHP4 },
+  { "HP5: AP modban, rele-impulzus es fajliras kozben nem indul ujra", scHP5 },
+  { "HP6: harom sikertelen kor utan vegzetes hiba, nem boot loop", scHP6 },
+  { "HP7: egy ora hibatlan mukodes nullazza a heap szamlalot", scHP7 },
+  { "HP8: a ket uj esemenykod a /log oldalon is ertelmezheto", scHP8 },
+  { "HP9: valodi lassu szivargas vegponttol vegpontig", scHP9 },
   { "WDT15: ...es a millis() korbefordulasan at is", scWDT15 },
   { "CC1: a portal futasa alatt a loop nem olvassa a konfig puffereket", scCC1 },
   { "CC2: a vegzetes hiba again sem olvassa oket", scCC2 },

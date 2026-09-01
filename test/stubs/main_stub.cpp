@@ -37,6 +37,22 @@ uint64_t g_gpioWakeMask = 0;
 int g_gpioWakeMode = -1;
 bool g_serialEcho = false;
 uint64_t g_efuseMac = 0x0000A1B2C3D4E5F6ULL;   // 6 bajtos MAC
+uint32_t g_freeHeap = 180000;      // tipikus szabad heap STA modban
+uint32_t g_minFreeHeap = 180000;
+uint32_t g_maxAllocHeap = 110000;  // a legnagyobb osszefuggo tomb
+uint32_t g_heapDrainPerCall = 0;   // szivargas-modell
+int      g_heapQueries = 0;
+uint32_t EspClass::getFreeHeap() {
+  g_heapQueries++;
+  if (g_heapDrainPerCall) {
+    g_freeHeap = (g_freeHeap > g_heapDrainPerCall) ? g_freeHeap - g_heapDrainPerCall : 0;
+    if (g_freeHeap < g_minFreeHeap) g_minFreeHeap = g_freeHeap;
+    // A legnagyobb tomb egyutt fogy a szabad heappel (elaprozodas nelkul is).
+    if (g_maxAllocHeap > g_freeHeap) g_maxAllocHeap = g_freeHeap;
+  }
+  return g_freeHeap;
+}
+uint32_t EspClass::getMaxAllocHeap() { return g_maxAllocHeap; }
 int g_httpCode = 200;
 std::string g_httpBody = "Microsoft NCSI";
 int g_httpSize = -2;

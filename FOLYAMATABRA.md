@@ -9,7 +9,7 @@ legyen.
 
 Jelölés: lekerekített doboz = belépési/kilépési pont, rombusz = döntés,
 téglalap = művelet. Az `EV_*` címkék a diagnosztikai napló eseménykódjai
-(lásd `MUKODES.md` 14. fejezet).
+(lásd `MUKODES.md` 15. fejezet).
 
 ---
 
@@ -112,7 +112,9 @@ flowchart TD
 flowchart TD
     L([loop ciklus, 10 ms-onként]) --> RP{"restartPending és<br>letelt a 2 s türelmi idő?"}
     RP -->|igen| WFW["lockConfigBeforeShutdown()<br>(fájlírás megvárása max 5 s,<br>ÉS a zár megszerzése)"] --> RS([ESP.restart])
-    RP -->|nem| MODE{deviceMode}
+    RP -->|nem| WDC0["1 óra hibátlan futás után:<br>watchdog + heap számláló nullázása"]
+    WDC0 --> HEAP["checkHeap() – 10 s-onként mér<br>30 percenként állapotsor<br>25 kB alatt figyelmeztet<br>12 kB alatt (3 mérésen át) ÖNKÉNTES ÚJRAINDULÁS<br>a resetEvents átvitelével"]
+    HEAP --> MODE{deviceMode}
     MODE -->|MODE_FATAL| FB["Mindkét LED együtt villog (5 Hz)<br>gombok élnek"] --> F5{"5 perc letelt?"}
     F5 -->|igen| FSL["fatalSleep() – EV_SLEEP(4)<br>alvás timer NÉLKÜL"]
     F5 -->|nem| L
@@ -121,8 +123,7 @@ flowchart TD
     APT -->|nem| L
     MODE -->|MODE_MONITOR| FST{firstStart?}
     FST -->|igen| HFS["handleFirstStart() (3. ábra)"] --> L
-    FST -->|nem| WDC["1 óra hibátlan futás után:<br>watchdog számláló nullázása"]
-    WDC --> SM{currentState}
+    FST -->|nem| SM{currentState}
 
     SM -->|TESTING_STATE| WL{"WiFi.status()<br>== WL_CONNECTED?"}
     WL -->|nem| RC{"EV_WIFI_LOST<br>reconnectWifi()"}
@@ -283,4 +284,4 @@ számláló és a diagnosztikai napló él túl.
 
 *Az ábrák a `bazsi_router_reboot.ino` aktuális állapotát dokumentálják.
 Módosításkor a kóddal együtt frissítendők – a viselkedést a `test/` alatti
-250 forgatókönyves (883 ellenőrzéses) tesztkészlet rögzíti.*
+259 forgatókönyves (921 ellenőrzéses) tesztkészlet rögzíti.*
