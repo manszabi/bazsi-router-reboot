@@ -14,6 +14,12 @@ std::vector<std::string> g_serialLog;
 std::map<int,int> g_pinState;
 std::map<int,int> g_pinRead;
 bool g_serialOn = false;
+unsigned long g_serialBaud = 0;
+uint32_t g_serialFirstWriteMs = 0;
+int      g_serialWritesAfterEnd = 0;
+bool     g_serialFlushedAll = true;
+void HardwareSerial::end() { g_serialOn = false; simLog("Serial.end"); }
+void HardwareSerial::flush() { g_serialFlushedAll = true; simLog("Serial.flush"); }
 std::map<std::string,std::string> g_fs;
 bool g_fsMountOk = true;
 uint32_t g_fsMountMs = 0;
@@ -132,6 +138,14 @@ size_t Print::printf(const char* f, ...) {
 }
 
 void Print::flushLine() {
+  // A soros eletciklus meresehez: mikor ment ki az elso sor, irtunk-e a
+  // lezaras utan, es all-e meg flush nelkuli iras a sor vegen. (Csak a
+  // Serial-on keresztuli irasokra ertelmes; az IPAddress::print sajat
+  // pufferbe megy, de az is ide fut be - ez a meresen nem valtoztat, mert
+  // mindketto a soros kimenetet jelenti.)
+  if (g_serialFirstWriteMs == 0) g_serialFirstWriteMs = g_millis;
+  if (!g_serialOn) g_serialWritesAfterEnd++;
+  g_serialFlushedAll = false;
   // ::printf, NEM a tagfuggveny! Enelkul a Print::printf hivna sajat magat
   // (vegtelen rekurzio). Amig a tag no-op volt, ez a sor csendben nem is
   // csinalt semmit - vagyis a g_serialEcho valojaban sosem mukodott.

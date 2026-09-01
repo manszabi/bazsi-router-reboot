@@ -238,11 +238,19 @@ protected:
   std::string buf_;
 };
 
+// A soros port ELETCIKLUSA merheto: mikor indult, mikor ment ki az elso sor
+// (a CDC beallasa utan kell), lezarult-e rendezetten (flush, majd end), es
+// irtunk-e barmit a lezaras UTAN (az elveszne).
+extern unsigned long g_serialBaud;
+extern uint32_t g_serialFirstWriteMs;   // az elso kiirt sor ideje
+extern int      g_serialWritesAfterEnd; // end() utani irasok szama
+extern bool     g_serialFlushedAll;     // az utolso iras ota volt-e flush
+
 class HardwareSerial : public Print {
 public:
-  void begin(unsigned long) { g_serialOn = true; }
-  void end() { g_serialOn = false; }
-  void flush() {}
+  void begin(unsigned long b) { g_serialOn = true; g_serialBaud = b; }
+  void end();
+  void flush();
   operator bool() const { return true; }
 };
 extern HardwareSerial Serial;

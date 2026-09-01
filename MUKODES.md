@@ -134,6 +134,36 @@ kapják el. A tényleges határ **46,0 óra** (mérve: `R8`).
 
 ---
 
+### Áramszünet
+
+Áramszünetkor az **ESP és a router együtt áll le**, és visszatéréskor együtt is
+indul – csakhogy az ESP másodpercek alatt bootol, a router percek alatt. Ha az
+ESP a saját mércéje szerint azonnal tesztelne, „nincs internet"-et látna, és
+percekkel az áramszünet után elsőként azt tenné, amit épp nem szabad: elvenné a
+routertől az áramot, pont bootolás közben.
+
+Két dolog véd ez ellen:
+
+1. a **10 perces türelmi idő** (`firstStartDelay`) **minden** hidegindulásnál,
+2. és a **60 másodpercenkénti próba**, ami a türelmi időt lezárja, amint a
+   router ténylegesen felállt – tehát a 10 perc nem elvesztegetett idő.
+
+| helyzet | mért eredmény |
+|---|---|
+| a router 3 perc alatt feláll | az ESP 3 perc 21 mp-kor kezd tesztelni, a reléhez **hozzá sem nyúl** (`PWR1`) |
+| a router egyáltalán nem áll fel | az első router-újraindítás **12 perckor** (`PWR2`) |
+
+Ami az áramszünettel **elvész**: a diagnosztikai napló és minden RTC-számláló
+(a watchdog-számláló tiszta lappal indul). Ez szándékos – az áramtalanítás
+emberi beavatkozás, tehát tiszta lap. Ami **megmarad**: a LittleFS-en tárolt
+Wi-Fi konfiguráció.
+
+> A relé a bekapcsolás és a program indulása közti ablakban is `LOW` marad, mert
+> a **22 kΩ lehúzó ellenállás** tartja – szoftver ilyenkor még nem fut. Enélkül
+> egy áramszünet után a router nem is kapna áramot vissza.
+
+---
+
 ## 3. Normál működés – az internet figyelése
 
 Állapotgép három állapottal.
@@ -295,6 +325,27 @@ internet nem, tehát érdemes később újrapróbálni.
 
 Nem várunk további teszt ciklusokat: ha nincs Wi-Fi, a tesztnek nincs értelme.
 
+### Ha te magad áramtalanítod a routert
+
+**Az eszköz ezt nem tudja megkülönböztetni attól, hogy a router lefagyott** – a
+hálózat mindkét esetben ugyanúgy eltűnik. Ezért ugyanaz történik, mint egy
+valódi hibánál: kivárja a 3 újracsatlakozási próbát, és ha addig sem jön vissza
+a hálózat, ő is elveszi a router áramát.
+
+| | mért érték |
+|---|---|
+| **Türelmi idő** a hálózat eltűnésétől az ESP saját router-resetjéig | **2,0 perc** (`PWR3`) |
+| Ha a router ezen belül visszajön | az ESP **hozzá sem nyúl** a reléhez, csendben visszacsatlakozik (`PWR4`) |
+
+Gyakorlatban: **ha kézzel dugod vissza a routert 2 percen belül, nem történik
+semmi.** Ha tovább tart neki felállni, az ESP is ad neki egy 90 másodperces
+áramtalanítást, majd 10 percig vár – kellemetlen, de magától rendbe jön, és a
+routernek sem árt.
+
+> Ha ez a 2 perc kevésnek bizonyul a te routerednél, a `wifi_maxRetries` (3) és
+> a `wifiInterval` (30 mp) növelésével hosszabbítható. Az ára, hogy egy valódi
+> router-fagyást is ennyivel később kezel le.
+
 ---
 
 ## 6. AP beállító mód
@@ -426,6 +477,29 @@ hibaüzeneteket öntene a soros portra (mérve 100 sor/perc), védelmet nem adna
 
 A gombokat 10 ms-onként mintavételezzük, és csak a végig lenyomva maradt
 állapotot fogadjuk el – egyetlen zajtüske tehát nem indít újra.
+
+### Pattogás (kontaktus-visszaugrás)
+
+Egy mechanikus nyomógomb sem a lenyomáskor, sem a **felengedéskor** nem ad
+tiszta élt: a kontaktus néhány tized- vagy ezredmásodpercig ide-oda ugrál, és
+ez alatt több megszakítás is keletkezik. A kezelés három ponton pattogástűrő:
+
+| | hogyan |
+|---|---|
+| **Pollozott ág** | minden `HIGH` olvasás nullázza a lenyomás-időt, tehát a debounce elölről indul – csak a *ténylegesen* végig lenyomott 50 ms számít |
+| **Megszakításos retesz** | a lefutó él újraírja a lenyomás idejét, a felfutó pedig **nullázza is** – így a felengedési pattogás után nem marad „félig lenyomott" állapot (`BNC1`) |
+| **Beragadt-gomb ellenőrzés** | a döntést **egyetlen** beolvasás hozza, nem kettő – különben a két olvasás közé eshetne egy felengedési pattanás, és a már elengedett gombot beragadtnak minősítené (`BNC4`) |
+
+Miért fontos, hogy a felfutó él **nullázza** a lenyomás idejét? Ha nem tenné, a
+felengedési pattogás után egy elavult „lenyomva vagyok"-időbélyeg maradna hátra.
+Egy jóval későbbi, magában ártalmatlan felfutó él azt látná, hogy a gomb
+„régóta" nyomva van, és **azonnal reteszelne** – vagyis az eszköz magától
+újraindulna. Ezt a `BNC1` kifejezetten méri.
+
+Amit a rendszer **szándékosan nem** fogad el: egy folyamatosan recsegő, kopott
+gomb (10 ms-onként váltakozó kontaktus) **nem** indít újra és nem is reteszel
+(`BNC3`). Egy elhasznált gomb miatt az eszköz ne induljon újra magától – inkább
+ne reagáljon, mint hogy spontán újrainduljon.
 
 > ⚠️ A Wi-Fi reset gomb lába (`D0` = **GPIO2**) az ESP32-C3 egyik *strapping*
 > lába: a chip csak akkor bootol, ha a reset pillanatában GPIO2 = 1.
@@ -570,7 +644,43 @@ pedig mindkettőt, gyorsabban – az egyik együtt, a másik ellenfázisban.
 
 ---
 
-## 12. Diagnosztikai napló
+## 12. A soros port
+
+| | |
+|---|---|
+| Sebesség | **115200** baud |
+| Indulás | `Serial.begin()`, majd max. **3 mp** várakozás a gazdára + **0,5 mp** CDC-beállás – csak ezután megy ki az első sor, hogy egy frissen csatlakoztatott monitoron ne vesszenek el az induló üzenetek |
+| Lezárás alvás előtt | `Serial.flush()`, majd `Serial.end()` – **a legvégén**, minden más leállítási lépés után |
+| Lezárás újraindítás előtt | `Serial.flush()` közvetlenül az `ESP.restart()` előtt |
+
+**A lezárás után egyetlen sort sem írunk** – az elveszne a deep sleepben.
+Mérve: `SER6` (a normál alvási út) és `SER7` (a beragadt gomb ága).
+
+> A beragadt-gomb ág volt az egyetlen kivétel: ott a `flush()` a 3 mp-es
+> villogás **előtt** állt, a relé lábát rögzítő `holdRelayForSleep()` viszont a
+> villogás **után** fut – és az ki tud írni egy figyelmeztetést, ha a rögzítés
+> nem sikerül. Épp az a sor veszett volna el, amiért az ember a soros portot
+> nézi. Most ott is a legvégén zárunk le.
+
+### Mennyit ír?
+
+A soros kimenet **nem áraszthatja el** a konzolt – se normál működésben, se
+tartós hibában. A mért felső korlát mindkettőben **30 sor/perc** (`SER1`,
+`SER2`), és az AP beállító mód meg a végzetes hiba villogó ciklusa **egyetlen
+sort sem ír** (`SER3`).
+
+Ezt három szabály tartja fenn:
+
+- **Az ismétlődő események csak egyszer.** A `TEST FAIL`, a `WIFI LOST` és a
+  `STUCK BUTTON` sorozatokból csak az első kerül ki (lásd a 13. fejezetet).
+- **A villogó ciklusok némák.** A LED-kezelés nem ír semmit.
+- **Sikeres teszt = egy sor.** A `testInternetHTTP()` sikernél nem írja ki sem
+  a kapott törzset, sem külön visszaigazolást – csak eltérésnél, ahol a kapott
+  törzs a diagnózishoz kell.
+
+---
+
+## 13. Diagnosztikai napló
 
 Az eszköz az utolsó **32 eseményt** RTC memóriában tárolja, és a beállító
 portál `/log` oldalán kiírja. Soros kábel nélkül is megtudható, mi történt.

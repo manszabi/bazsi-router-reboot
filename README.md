@@ -345,6 +345,17 @@ választ, és ez a hiba némán, a redundancia elvesztésével jelentkezne. A
 > fájlírás közben a nyomás megmarad, de nem hat (`LAT4`), és egy beragadt gomb
 > nem reteszel, mert felfutó éle sosem lesz (`LAT5`).
 
+> **Pattogás (kontaktus-visszaugrás).** Egy mechanikus gomb sem a lenyomáskor,
+> sem a **felengedéskor** nem ad tiszta élt. A pollozott ág elölről indítja a
+> debounce-t minden `HIGH` olvasásra; a megszakításos retesz a felfutó élen
+> **nullázza is** a lenyomás idejét, így a felengedési pattogás után nem marad
+> hátra „félig lenyomott" állapot. Ez utóbbi azért lényeges, mert egy elavult
+> időbélyeggel egy jóval későbbi, magában ártalmatlan felfutó él azt látná,
+> hogy a gomb „régóta" nyomva van, és spontán újraindítást okozna (mérve:
+> `BNC1`). Egy folyamatosan recsegő, **kopott** gomb szándékosan **nem** indít
+> újra és nem is reteszel (`BNC3`) – inkább ne reagáljon, mint hogy magától
+> újrainduljon.
+
 > ⚠️ Induláskor **mindkét** gombot ellenőrizzük. Ha bármelyik nyomva van, előbb
 > **3 másodpercet várunk az elengedésére** – a reset gomb LOW szintre ébreszt,
 > tehát a felhasználó szükségképpen még nyomva tartja, amikor az eszköz bootolni
@@ -524,6 +535,23 @@ Successful Test
 
 SUCCESS_DELAY delay start.
 ```
+
+### Indulás és lezárás
+
+- **Indulás:** `Serial.begin(115200)`, majd max. **3 mp** várakozás a gazdára és
+  **0,5 mp** CDC-beállás – csak ezután megy ki az első sor, hogy egy frissen
+  csatlakoztatott monitoron ne vesszenek el az induló üzenetek.
+- **Alvás előtt:** `flush()`, majd `end()` – **a legvégén**, minden más
+  leállítási lépés után. A lezárás után egyetlen sort sem írunk.
+- **Újraindítás előtt:** `flush()` közvetlenül az `ESP.restart()` előtt.
+
+### Mennyit ír?
+
+A kimenet nem áraszthatja el a konzolt: a mért felső korlát **30 sor/perc**
+normál működésben és tartós internetkiesésben egyaránt, az AP beállító mód és a
+végzetes hiba villogó ciklusa pedig **egyetlen sort sem ír**. Ezt az
+ismétlődő események szűrése tartja fenn (`TEST FAIL`, `WIFI LOST`,
+`STUCK BUTTON` sorozatokból csak az első).
 
 ## ✅ Tesztelt konfiguráció
 
@@ -790,6 +818,30 @@ kapcsolatvesztés → 3 próba (30 mp szünetekkel)
                  → 3 próba (30 mp szünetekkel)
                  → sikertelen → AP beállító portál
 ```
+
+> **Ha te magad áramtalanítod a routert:** az eszköz ezt **nem tudja
+> megkülönböztetni** attól, hogy a router lefagyott – a hálózat mindkét esetben
+> ugyanúgy eltűnik. A türelmi idő a hálózat eltűnésétől az ESP saját
+> router-resetjéig **2,0 perc** (mérve: `PWR3`). Ha ezen belül visszadugod, az
+> ESP **hozzá sem nyúl** a reléhez, csendben visszacsatlakozik (`PWR4`). Ha
+> tovább tart, ő is ad neki egy 90 másodperces áramtalanítást – kellemetlen,
+> de magától rendbe jön.
+
+### Áramszünet
+
+Áramszünetkor az ESP és a router **együtt** áll le, és együtt is indul – csak
+az ESP másodpercek alatt, a router percek alatt. A **10 perces türelmi idő**
+(`firstStartDelay`) minden hidegindulásnál megvédi a routert attól, hogy az ESP
+épp bootolás közben vegye el az áramát; a **60 mp-enkénti próba** pedig lezárja
+ezt a várakozást, amint a router ténylegesen felállt.
+
+| helyzet | mért eredmény |
+|---|---|
+| a router 3 perc alatt feláll | az ESP **3:21**-kor kezd tesztelni, a reléhez **hozzá sem nyúl** (`PWR1`) |
+| a router egyáltalán nem áll fel | az első router-újraindítás **12 perckor** (`PWR2`) |
+
+Az áramszünet **törli** a diagnosztikai naplót és az RTC-számlálókat (tiszta
+lap), de a Wi-Fi konfiguráció a LittleFS-en **megmarad**.
 
 ### Az AP beállító mód
 

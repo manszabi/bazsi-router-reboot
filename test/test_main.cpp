@@ -148,6 +148,9 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
                      const char* ip, const char* gw, uint32_t latency = 500,
                      bool deepSleepWake = false) {
   g_millis = 1; g_log.clear(); g_serialLog.clear(); g_pinState.clear(); g_pinRead.clear();
+  // A soros eletciklus merese is hidegindul (lasd SER6/SER7).
+  g_serialOn = false; g_serialBaud = 0; g_serialFirstWriteMs = 0;
+  g_serialWritesAfterEnd = 0; g_serialFlushedAll = true;
   g_fs.clear(); g_fsMountOk = true; g_fsMountMs = 0; g_wakeupUs = 0;
   g_fsWritable = true; g_fsCapacity = 0; g_fsRemoveOk = true; g_fsReadable = true;
   g_resetReason = deepSleepWake ? ESP_RST_DEEPSLEEP : ESP_RST_POWERON;
@@ -3873,6 +3876,327 @@ static void scLOG3() {
   CHECK(b.find("</table>") != std::string::npos, "a tabla rendesen lezarul");
 }
 
+// --- Gombpattogas es a soros port eletciklusa -------------------------------
+
+// VALODI gombnyomas modellezese, PATTOGASSAL. Egy mechanikus nyomogomb sem a
+// lenyomaskor, sem a FELENGEDESKOR nem ad tiszta elt: a kontaktus nehany
+// tized-egy ezredmasodpercig ide-oda ugral, es ez alatt tobb megszakitas is
+// keletkezik. A gombNyomas() ehhez kepest idealizalt (egy le- es egy felfuto
+// el) - ez a segedfuggveny a valosagot modellezi.
+static void gombNyomasPattogva(int pin, uint32_t tartasMs, int pattanas = 4) {
+  for (int i = 0; i < pattanas; i++) {        // lenyomasi pattogas
+    g_pinRead[pin] = LOW;  simIsr(pin);  g_millis += 1;
+    g_pinRead[pin] = HIGH; simIsr(pin);  g_millis += 1;
+  }
+  g_pinRead[pin] = LOW; simIsr(pin);          // vegre stabil LOW
+  g_millis += tartasMs;
+  for (int i = 0; i < pattanas; i++) {        // felengedesi pattogas
+    g_pinRead[pin] = HIGH; simIsr(pin);  g_millis += 1;
+    g_pinRead[pin] = LOW;  simIsr(pin);  g_millis += 1;
+  }
+  g_pinRead[pin] = HIGH; simIsr(pin);         // vegre stabil HIGH
+}
+
+static void scBNC1() {
+  // PATTOGO GOMBNYOMAS A RETESZEN. A kerdes ketirányu:
+  //   - egy valodi (pattogo) nyomas EGYSZER reteszeljen, ne tobbszor,
+  //   - es a felengedesi pattogas ne hagyjon hatra "felig lenyomott"
+  //     allapotot, amibol kesobb egy magaban artalmatlan el reteszelne.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  CHECK(g_isr.count(PIN_RESETBTN) == 1, "a reset gomb megszakitasa el");
+
+  btnResetLatched = false; btnResetDownAt = 0;
+  gombNyomasPattogva(PIN_RESETBTN, 300);
+  CHECK(btnResetLatched, "a pattogo, 300 ms-os nyomast is elfogadja");
+  CHECK(btnResetDownAt == 0,
+        "es a felengedesi pattogas utan NEM marad folyamatban levo lenyomas");
+
+  // A hatrahagyott allapot a lenyeg: ha a downAt nem nullazodna, egy KESOBBI
+  // magaban all felfuto el (pl. egy zavarimpulzus vege) azt latna, hogy a
+  // gomb "regota" nyomva van, es azonnal reteszelne - vagyis az eszkoz
+  // magatol ujraindulna. Ezt itt kimondottan ellenorizzuk.
+  btnResetLatched = false;
+  g_millis += 10u * 1000;                     // teljen el 10 masodperc
+  g_pinRead[PIN_RESETBTN] = HIGH; simIsr(PIN_RESETBTN);   // maganyos felfuto el
+  CHECK(!btnResetLatched,
+        "kesobbi maganyos felfuto el NEM reteszel (nincs elavult lenyomas-ido)");
+}
+
+static void scBNC2() {
+  // ROVID, PATTOGO TUSKE. A pattogas nem kerulheti meg a debounce-t: a 4+4
+  // pattanas onmagaban 16 ms-nyi elvaltast jelent, de a TENYLEGES tartas 5 ms.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  btnResetLatched = false; btnResetDownAt = 0;
+  gombNyomasPattogva(PIN_RESETBTN, 5);
+  CHECK(!btnResetLatched, "a pattogo 5 ms-os tuske sem reteszel");
+  bool restarted = false;
+  try { resetbutton(); } catch (RestartSignal&) { restarted = true; }
+  CHECK(!restarted, "es nem is indit ujra");
+
+  // ...a hatarertek viszont a TENYLEGES tartasra vonatkozik, nem a pattogas
+  // altal megnyujtott teljes idore.
+  btnResetLatched = false; btnResetDownAt = 0;
+  gombNyomasPattogva(PIN_RESETBTN, 50);
+  CHECK(btnResetLatched, "50 ms tenyleges tartas viszont igen");
+}
+
+static void scBNC3() {
+  // FOLYAMATOSAN RECSEGO (kopott) GOMB. A kontaktus sosem stabilizalodik 50
+  // ms-ra: 10 ms-onkent valt. Ilyenkor a HELYES viselkedes az, hogy NEM
+  // indit ujra - egy kopott gomb miatt az eszkoz ne induljon ujra magatol.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  btnResetLatched = false; btnResetDownAt = 0;
+  timing.resetBtnDownSince = 0;
+  bool restarted = false;
+  try {
+    for (int i = 0; i < 100; i++) {           // 100 x 20 ms = 2 masodperc recsegés
+      g_pinRead[PIN_RESETBTN] = LOW;  simIsr(PIN_RESETBTN); g_millis += 10;
+      resetbutton();
+      g_pinRead[PIN_RESETBTN] = HIGH; simIsr(PIN_RESETBTN); g_millis += 10;
+      resetbutton();
+    }
+  } catch (RestartSignal&) { restarted = true; }
+  CHECK(!restarted, "a 10 ms-os recseges 2 masodpercig sem indit ujra");
+  CHECK(!btnResetLatched, "es nem is reteszel");
+}
+
+static void scBNC4() {
+  // A BERAGADT-GOMB ELLENORZES PATTOGASTURESE. Ez a sajat, elozo korben irt
+  // kodom hibaja volt: a ciklus feltetelében olvastam a labat, majd a
+  // minositeshez MEGEGYSZER. A ket olvasas koze beeshetett egy elengedeskori
+  // pattanas, es a mar elengedett gombot beragadtnak minositettem volna -
+  // vagyis a felhasznalo ebreszto gombnyomasa 60 masodperces alvast valtott
+  // volna ki. Most egyetlen olvasas dont.
+  //
+  // A modell: a gombot 800 ms utan elengedik, de a felengedes pattog.
+  static uint32_t elengedAt;      // a horog ezt latja
+  struct H {
+    static void hook() {
+      if (g_millis < elengedAt) return;
+      // Felengedesi pattogas: a paratlan 10 ms-os korokben visszaugrik LOW-ra.
+      const uint32_t ota = g_millis - elengedAt;
+      g_pinRead[PIN_RESETBTN] = (ota < 40 && ((ota / 10) % 2 == 1)) ? LOW : HIGH;
+    }
+  };
+  coldBoot(true, "TestNet", "pw", "", "", 500, true);
+  g_pinRead[PIN_RESETBTN] = LOW;
+  elengedAt = g_millis + 800;
+  g_onDelay = H::hook;
+  bool slept = false;
+  try { setup(); } catch (DeepSleepSignal&) { slept = true; }
+  catch (RestartSignal&) {}
+  g_onDelay = nullptr;
+  CHECK(!slept, "a pattogva elengedett ebreszto gombnyomas NEM beragadas");
+  CHECK(serialHas("Elengedtek"), "es fel is ismeri, hogy elengedtek");
+}
+
+static void scSER6() {
+  // A SOROS PORT ELETCIKLUSA. Harom kerdes:
+  //   1. helyesen indul-e (sebesseg, es a korai sorok nem vesznek el),
+  //   2. alvas elott lezarul-e RENDEZETTEN (flush, majd end),
+  //   3. es nem irunk-e barmit a lezaras UTAN.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  CHECK(g_serialBaud == 115200, "115200 baud");
+  CHECK(g_serialOn, "a setup() vegen nyitva van");
+  // A CDC beallasara szant 500 ms MIELOTT barmit irnank: enelkul az elso
+  // sorok egy frissen csatlakoztatott monitoron elvesznenek.
+  CHECK(g_serialFirstWriteMs >= 500,
+        "az elso kiirt sor csak a CDC beallasa utan megy ki");
+
+  // 2-3. Alvas: flush, majd end - es utana egyetlen sor sem.
+  int guard = 0;
+  try {
+    for (int c = 0; c < 10; c++) {
+      int g2 = 0;
+      while (!reset_device() && ++g2 < 200000) { yield(); }
+      if (++guard > 20) break;
+    }
+  } catch (DeepSleepSignal&) {}
+  CHECK(!g_serialOn, "alvas elott a Serial.end() lefutott");
+  CHECK(logIndex("Serial.flush") < logIndex("Serial.end"),
+        "es a flush MEGELOZTE az end-et");
+  CHECK(logIndex("Serial.end") < logIndex("DEEP_SLEEP"),
+        "a lezaras az elalvas ELOTT tortent");
+  CHECK(g_serialWritesAfterEnd == 0,
+        "a lezaras utan egyetlen sort sem irtunk (nem veszne el semmi)");
+}
+
+static void scSER7() {
+  // UGYANEZ A BERAGADT GOMB AGAN. Ez az EGYETLEN alvas, ami nem az
+  // enterDeepSleep()-en keresztul megy, tehat a lezarast kulon kell
+  // biztositani. TALALT HIBA volt: a flush a villogas ELOTT allt, a
+  // holdRelayForSleep() viszont a villogas UTAN fut - es az KI TUD IRNI egy
+  // figyelmeztetest, ha a rele labjanak rogzitese nem sikerul. Epp az a sor
+  // veszett volna el, amiert az ember a soros portot nezi.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_gpioHoldFails = true;            // a hold hibat ad -> figyelmeztetest ir
+  g_pinRead[PIN_RESETBTN] = LOW;     // vegig nyomva -> beragadas
+  bool slept = false;
+  try { setup(); } catch (DeepSleepSignal&) { slept = true; }
+  CHECK(slept, "beragadt gomb -> alvas");
+  CHECK(serialHas("rogzitese"), "a hold hibajarol kiirt figyelmeztetes");
+  CHECK(g_serialWritesAfterEnd == 0, "a lezaras utan nem irunk");
+  const int fig = serialIndex("rogzitese");
+  CHECK(fig >= 0 && logIndex("Serial.flush") >= 0, "volt flush");
+  CHECK(g_serialFlushedAll,
+        "az UTOLSO kiirt sor is atment a flush-on (nem veszett el)");
+}
+
+// --- Aramszunet es kezi router-aramtalanitas -------------------------------
+
+// A "router nincs a halozaton" allapot egy helyen: se Wi-Fi, se ping, se HTTP.
+static void routerOffline(bool offline) {
+  wifiSim.willConnect = !offline;
+  pingSim.ok         = !offline;
+  g_httpBeginOk      = !offline;
+}
+
+// MERES A delay() HORGABOL. A sketch hosszu szakaszai (reconnectWifi,
+// reset_device, RESET_DELAY) EGYETLEN loop() hivason belul futnak le, tehat a
+// forgatokonyv cikluslepesei kozott mintavetelezve a rele impulzusa
+// LATHATATLAN, es a "router visszajott" esemenyt sem lehetne a megfelelo
+// szimulalt pillanatban bekapcsolni. Ezert mindketto a delay() horgabol megy:
+// az minden 10 ms-os lepesnel lefut, akkor is, ha a vezerles epp egy blokkolo
+// fuggvenyben van. (Ugyanez a technika, mint a LED4-nel.)
+static uint32_t pwrBackAt = 0;          // ekkor jon vissza a router (0 = sosem)
+static uint32_t pwrFirstRelayHigh = 0;  // az elso rele-impulzus ideje
+static void pwrHook() {
+  if (pwrBackAt && g_millis >= pwrBackAt) routerOffline(false);
+  if (!pwrFirstRelayHigh && g_pinState[PIN_RELAY] == HIGH) pwrFirstRelayHigh = g_millis;
+}
+static void pwrArm(uint32_t backAt) {
+  pwrBackAt = backAt; pwrFirstRelayHigh = 0; g_onDelay = pwrHook;
+}
+
+static void scPWR1() {
+  // ARAMSZUNET. A halozati feszultseg elmegy, tehat az ESP ES a router
+  // EGYUTT all le. Visszateresekor mindketto egyszerre kap aramot - csakhogy
+  // az ESP masodpercek alatt bootol, a router percek alatt. Ha az ESP a sajat
+  // merceje szerint azonnal tesztelne, "nincs internet"-et latna, es percekkel
+  // az aramszunet utan ELSOKENT azt tenne, amit epp nem kell: elvenne a
+  // routertol az aramot, epp bootolas kozben.
+  //
+  // Ket dolog ved ez ellen: a firstStartDelay (10 perc) turelmi ido MINDEN
+  // hidegindulaskor, es a 60 mp-enkenti proba, ami a turelmi idot lezarja,
+  // amint a router tenylegesen felallt - tehat a 10 perc nem "elvesztegetett".
+  //
+  // A meres: a router 3 perc mulva all fel (tipikus otthoni keszulek).
+  coldBoot(true, "TestNet", "pw", "", "");
+  routerOffline(true);
+  const uint32_t routerBootMs = 180u * 1000;
+
+  // A hidegindulas jellemzoi: a naplo es minden RTC szamlalo tiszta lappal
+  // indul, mert az aramtalanitas az RTC memoriat is torli.
+  rtcEvMagic = 0; rtcEvNext = 0; rtcWdtMagic = 0; rtcWdtResets = 3;
+  g_resetReason = ESP_RST_POWERON;
+
+  setup();
+  CHECK(rtcWdtResets == 0, "aramszunet: a watchdog szamlalo tiszta lappal indul");
+
+  const uint32_t t0 = timing.startMillis;
+  pwrArm(t0 + routerBootMs);
+  int guard = 0;
+  try { while (uiFlags.firstStart && ++guard < 2000000) loop(); }
+  catch (DeepSleepSignal&) {}
+  g_onDelay = nullptr;
+  const uint32_t dt = g_millis - t0;
+
+  printf("     [info] a router %u mp-kor allt fel; az ESP %u mp-kor kezdett tesztelni\n",
+         routerBootMs / 1000, dt / 1000);
+  CHECK(pwrFirstRelayHigh == 0,
+        "az ESP EGYSZER SEM vette el a router aramat a bootolasa alatt");
+  CHECK(dt >= routerBootMs, "megvarta, amig a router tenylegesen felallt");
+  CHECK(dt < routerBootMs + 90u * 1000,
+        "de nem varta ki feleslegesen a teljes 10 percet sem");
+  CHECK(g_pinState[PIN_RELAY] == LOW, "a rele vegig LOW - a router kapja az aramot");
+}
+
+static void scPWR2() {
+  // ARAMSZUNET, HOSSZU ROUTER-BOOTTAL. Ha a router a 10 perces turelmi ido
+  // alatt sem all fel, az ESP-nek MEG KELL tennie, amire valo: ujraindit.
+  // Ez a hataresetet rogziti - hol van a "meg varok" es a "mar beavatkozom"
+  // kozotti valasztovonal.
+  coldBoot(true, "TestNet", "pw", "", "");
+  routerOffline(true);
+  setup();
+  const uint32_t t0 = timing.startMillis;
+  pwrArm(0);                       // a router SOSEM jon vissza
+  int guard = 0;
+  try { while (pwrFirstRelayHigh == 0 && ++guard < 2000000) loop(); }
+  catch (DeepSleepSignal&) {}
+  g_onDelay = nullptr;
+  CHECK(pwrFirstRelayHigh != 0, "vegtelenul nem var - egyszer beavatkozik");
+  const uint32_t elso = pwrFirstRelayHigh - t0;
+  printf("     [info] a router elso ujrainditasa a bootolas utan %.1f perckor\n",
+         elso / 60000.0);
+  CHECK(elso >= 10u * 60 * 1000,
+        "a 10 perces turelmi ido ELOTT biztosan nem nyul a routerhez");
+  CHECK(elso < 20u * 60 * 1000, "de kb. negyed oran belul beavatkozik");
+}
+
+static void scPWR3() {
+  // KEZI ROUTER-ARAMTALANITAS UZEM KOZBEN. Az ESP fut es csatlakozva van,
+  // a felhasznalo kihuzza a router dugojat.
+  //
+  // FONTOS: az eszkoz NEM TUDJA megkulonboztetni azt, hogy a felhasznalo
+  // huzta ki a routert, attol, hogy a router lefagyott - a halozat mindket
+  // esetben ugyanugy eltunik. Ezert a helyes viselkedes az, hogy varakozik
+  // egy darabig, es csak azutan avatkozik be. A kerdes az, MENNYIT var: ez
+  // az az ido, ami alatt a felhasznalo vissza tudja dugni a routert anelkul,
+  // hogy az ESP is belenyulna.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpBody = "Microsoft Connect Test";   // egeszseges internet-teszt
+  setup();
+  int guard = 0;
+  while (uiFlags.firstStart && ++guard < 2000000) loop();
+  CHECK(!uiFlags.firstStart, "monitor uzemben vagyunk");
+
+  const uint32_t kihuzta = g_millis;
+  routerOffline(true);             // a felhasznalo kihuzza a routert
+  pwrArm(0);                       // es nem is dugja vissza
+  guard = 0;
+  try { while (pwrFirstRelayHigh == 0 && ++guard < 2000000) loop(); }
+  catch (DeepSleepSignal&) {}
+  g_onDelay = nullptr;
+  CHECK(pwrFirstRelayHigh != 0, "vegul az ESP is ujrainditja a routert");
+  const uint32_t turelem = pwrFirstRelayHigh - kihuzta;
+  printf("     [info] turelmi ido a kezi aramtalanitastol az ESP sajat "
+         "router-resetjeig: %.1f perc\n", turelem / 60000.0);
+  CHECK(turelem >= 2u * 60 * 1000,
+        "de legalabb ket percig var - ennyi alatt a router vissza is dughato");
+  CHECK(serialHas("WiFi disconnected before test!"),
+        "es a soros porton meg is mondja, hogy elveszett a halozat");
+}
+
+static void scPWR4() {
+  // ...ES HA A FELHASZNALO IDOBEN VISSZADUGJA. Ugyanaz a helyzet, csak a
+  // router 90 masodperc mulva ujra elerheto. Az ESP-nek ilyenkor SEMMIT nem
+  // szabad tennie a relevel: csendben visszacsatlakozik es folytatja.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpBody = "Microsoft Connect Test";   // egeszseges internet-teszt
+  setup();
+  int guard = 0;
+  while (uiFlags.firstStart && ++guard < 2000000) loop();
+
+  const uint32_t kihuzta = g_millis;
+  routerOffline(true);
+  pwrArm(kihuzta + 90u * 1000);    // 90 mp mulva visszadugja
+  guard = 0;
+  try {
+    while (++guard < 2000000 && g_millis - kihuzta < 8u * 60 * 1000) loop();
+  } catch (DeepSleepSignal&) {}
+  g_onDelay = nullptr;
+  printf("     [info] elso rele-impulzus a kezi ki/be dugas utan: %s\n",
+         pwrFirstRelayHigh ? "VOLT" : "nem volt");
+  CHECK(pwrFirstRelayHigh == 0,
+        "idoben visszadugott routernel az ESP NEM nyul a relehez");
+  CHECK(serialHas("WIFI RECONNECTED!"), "hanem szepen visszacsatlakozik");
+}
+
 static void scSH1() {
   // TALALT HIBA. Az alvas es az ujraindulas elott megvartuk a folyamatban levo
   // fajlirast - de a varakozas ugy tert vissza, hogy a zar SZABAD maradt.
@@ -5047,6 +5371,10 @@ static const Scenario kScenarios[] = {
   { "LOG3: a körpuffer körbefordulása után is pontosan 32 sor", scLOG3 },
   { "LOG6: a naplo szamlaloja korbefordulhat - az index attol ep marad", scLOG6 },
   { "SH1: leallas elott a zarat MEG IS SZEREZZUK, nem csak megvarjuk", scSH1 },
+  { "PWR1: aramszunet - a router bootolasa alatt nem nyul a relehez", scPWR1 },
+  { "PWR2: aramszunet hosszu router-boottal - hol a turelem hatara", scPWR2 },
+  { "PWR3: kezi aramtalanitas uzem kozben - mennyi a turelmi ido", scPWR3 },
+  { "PWR4: idoben visszadugott router - az ESP nem nyul a relehez", scPWR4 },
   { "SH2: az alvasi utak elofeltetelei - idozito es gombebresztes", scSH2 },
   { "SH3: a felebreszto gombnyomast nem nezzuk beragadt gombnak", scSH3 },
   { "AP1: üres címmező törlésként értelmeződik (a DHCP-re váltás útja)", scAP1 },
@@ -5083,6 +5411,12 @@ static const Scenario kScenarios[] = {
   { "WDT7: a watchdog már a LittleFS csatolása ELŐTT élesedik", scWDT_EARLY },
   { "SER4: a teszt sorszáma 1-alapú, a hibaszám a teszt után áll", scSERidx },
   { "SER5: sikernél csak 'Successful Test', eltérésnél a kapott törzs is", scSERquiet },
+  { "SER6: a soros port helyesen indul es rendezetten zar le alvas elott", scSER6 },
+  { "SER7: a beragadt gomb agan sem veszik el az utolso sor", scSER7 },
+  { "BNC1: pattogo gombnyomas - egyszer reteszel, nem hagy allapotot", scBNC1 },
+  { "BNC2: pattogo tuske nem kerulheti meg a debounce-t", scBNC2 },
+  { "BNC3: folyamatosan recsego (kopott) gomb nem indit ujra", scBNC3 },
+  { "BNC4: a beragadt-gomb ellenorzes pattogasturo", scBNC4 },
   { "EVT1: a /log TEST FAIL paramétere is 1-alapú", scEVT1 },
 };
 

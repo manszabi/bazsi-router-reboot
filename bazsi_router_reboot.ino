@@ -1290,6 +1290,13 @@ void handleStuckButton(const char* message, uint16_t which, bool logIt) {
 
   // A relé itt is LOW (a setup() elején kapcsoltuk), és alvás alatt is az marad.
   holdRelayForSleep();
+  // A LEZÁRÁS A LEGVÉGÉN, ahogy az enterDeepSleep()-ben is. A fenti
+  // Serial.flush() a villogás ELŐTT állt, a holdRelayForSleep() viszont a
+  // villogás UTÁN fut - és az KI TUD ÍRNI egy figyelmeztetést, ha a relé
+  // lábának rögzítése nem sikerült. Flush nélkül épp az a sor veszne el a
+  // deep sleepben, amiért az ember a soros portot nézi. (Mérve: SER7.)
+  Serial.flush();
+  Serial.end();
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
   esp_sleep_enable_timer_wakeup(STUCK_BUTTON_SLEEP_US);
   esp_deep_sleep_start();
@@ -2608,13 +2615,24 @@ void setup() {
   int stuckButton = pressedButtonNow();
   if (stuckButton >= 0) {
     Serial.println("Gomb lenyomva indulaskor - megvarjuk, elengedik-e.");
+    // PATTOGAS. A dontest EGYETLEN beolvasas hozza, nem kettő: ha a ciklus
+    // feltételében olvasnánk, majd utána MÉGEGYSZER a minősítéshez, a két
+    // olvasás közé beeshetne egy elengedéskori pattanás (a mechanikus gomb a
+    // felengedéskor is ad néhány rövid visszaugrást), és a már elengedett
+    // gombot beragadtnak minősítenénk. Így viszont a pattanás legfeljebb egy
+    // további 10 ms-os kört jelent.
+    bool elengedtek = false;
     const uint32_t vart = millis();
-    while (millis() - vart < STUCK_BUTTON_CONFIRM_MS && pressedButtonNow() >= 0) {
+    while (millis() - vart < STUCK_BUTTON_CONFIRM_MS) {
+      if (pressedButtonNow() < 0) {
+        elengedtek = true;
+        break;
+      }
       feedWatchdog();
       delay(BUTTON_POLL_MS);
     }
-    stuckButton = pressedButtonNow();
-    if (stuckButton < 0) {
+    if (elengedtek) {
+      stuckButton = -1;
       Serial.println("Elengedtek - ez ebreszto gombnyomas volt, indulunk tovabb.");
     }
   }

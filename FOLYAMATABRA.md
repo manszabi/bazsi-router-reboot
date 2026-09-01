@@ -9,7 +9,7 @@ legyen.
 
 Jelölés: lekerekített doboz = belépési/kilépési pont, rombusz = döntés,
 téglalap = művelet. Az `EV_*` címkék a diagnosztikai napló eseménykódjai
-(lásd `MUKODES.md` 12. fejezet).
+(lásd `MUKODES.md` 13. fejezet).
 
 ---
 
@@ -283,4 +283,4 @@ számláló és a diagnosztikai napló él túl.
 
 *Az ábrák a `bazsi_router_reboot.ino` aktuális állapotát dokumentálják.
 Módosításkor a kóddal együtt frissítendők – a viselkedést a `test/` alatti
-235 forgatókönyves (828 ellenőrzéses) tesztkészlet rögzíti.*
+245 forgatókönyves (865 ellenőrzéses) tesztkészlet rögzíti.*
