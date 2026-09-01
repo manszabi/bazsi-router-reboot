@@ -1081,7 +1081,10 @@ jöhet egy áramszünet, ami az RTC naplót elvinné.
 | Ha mindkettő üres | egyszerűen nincs napló a lapon |
 
 **Valós idő:** amint van kapcsolat – **bármelyik úton** jött is létre –, elindul
-az óraszinkron (`hu.pool.ntp.org`, magyar időzóna a nyári időszámítással). Amíg nincs szinkron,
+az óraszinkron (`hu.pool.ntp.org`, magyar időzóna a nyári időszámítással). **Ha
+az NTP nem sikerül, az nem okoz gondot:** az órára csak a bejegyzések kiírása és
+a frissesség-döntés tie-breakje épül, és mindkettő működik nélküle (`-` az Idő
+oszlopban, illetve darabszám-alapú döntés). Hamis 1970-es dátum sem jelenik meg. Amíg nincs szinkron,
 a lap `-`-t ír az Idő oszlopba – a napló ettől még működik. A valós idő a deep
 sleepet **túléli**, ezért használható a bejegyzések rendezésére bootolásokon át.
 

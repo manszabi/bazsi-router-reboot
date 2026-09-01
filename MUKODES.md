@@ -1039,6 +1039,32 @@ ami a mentett napló értelmezéséhez kell.
 | Újracsatlakozás után | újraindul (a `disconnect(true)` a netifet is lebontja), de a soros porton **csak egyszer** jelenti be |
 | Amíg nincs szinkron | az `epoch` mező 0 marad, a lap `-`-t ír az Idő oszlopba – a napló ettől még működik |
 
+### Ha az NTP kommunikáció nem sikerül
+
+**Nem okoz gondot** – és ez nem feltevés, hanem szerkezeti tulajdonság: az órára
+mindössze **két** dolog épül, és mindkettő működik nélküle is.
+
+| Mire kell | Óra nélkül |
+|---|---|
+| A bejegyzések **kiírása** | `-` áll az Idő oszlopban; az uptime oszlop ilyenkor is elmond mindent |
+| A frissesség-döntés **tie-breakje** | csak akkor használjuk, ha **mindkét** oldalnak van érvényes időbélyege; egyébként a darabszám-alapú szabályra esünk vissza |
+
+Egyetlen ág sem **vár** az órára, és egyik sem hiúsul meg nélküle. A
+`nowEpoch()` alsó korlátja (2025-01-01) gondoskodik arról is, hogy szinkron
+nélkül **ne jelenjen meg hamis 1970-es dátum** – a mező marad 0, a lap pedig `-`
+-t ír. A „mentve: …" címke ugyanígy egyszerűen elmarad, nem találunk ki egy
+időpontot.
+
+A `configTzTime()` maga sem blokkol: csak elindítja az SNTP klienst poll
+módban, a válasz a háttérben (a tcpip taskban) érkezik – ha a szerver
+elérhetetlen vagy a névfeloldás bukik, az a mi `loop()`-unkat nem érinti.
+
+> A mérés: az `NV11` végigjátssza a teljes eszkalációt (tesztek bukása → router
+> reset → mentés → alvás), majd egy áramszünet utáni `/log` oldalt is –
+> **végig óraszinkron nélkül**. Mellékesen az **egész tesztkészlet** így fut: a
+> `coldBoot()` `g_epochNow = 0`-t állít, tehát mind a 278 forgatókönyv a
+> „nincs óraszinkron" állapotot játssza.
+
 > A valós idő a **deep sleepet túléli**. Az `esp_timer` (és így a `millis()`)
 > ébredéskor nulláról indul, a `gettimeofday()` alapú rendszeróra viszont az RTC
 > órából jön – egy 1 órás alvás után is jó időt mutat. Épp ezért használható a

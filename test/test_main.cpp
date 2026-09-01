@@ -4151,6 +4151,64 @@ static void scNV10() {
   }
 }
 
+static void scNV11() {
+  // HA AZ NTP KOMMUNIKACIO NEM SIKERUL, OKOZ-E GONDOT?
+  //
+  // Nem - es ez nem feltevés, hanem szerkezeti tulajdonsag: az ora csak KET
+  // dologra kell, es mindketto tud nelkule mukodni.
+  //   1. A naplo bejegyzeseinek KIIRASA: szinkron nelkul "-" all az Ido
+  //      oszlopban, es a uptime oszlop ilyenkor is elmond mindent.
+  //   2. A frissesseg-dontes TIE-BREAKJE: csak akkor hasznaljuk, ha MINDKET
+  //      oldalnak van ervenyes idobelyege; egyebkent a darabszam-alapu
+  //      szabalyra esunk vissza.
+  // Egyetlen ag sem VAR az orara, es egyik sem hiusul meg nelkule.
+  //
+  // (Mellekesen: az EGESZ tesztkeszlet igy fut - a coldBoot() g_epochNow = 0-t
+  // allit -, tehat a 277 forgatokonyv mindegyike a "nincs oraszinkron"
+  // allapotot jatssza. Ez a forgatokonyv azt teszi KIMONDOTTA, amit a tobbi
+  // csak mellekesen bizonyit.)
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_epochNow = 0;                       // az NTP SOSEM valaszol
+  g_httpBody = "Rossz"; pingSim.ok = false;   // es az internet sem megy
+  setup();
+
+  // Vegigjatsszuk a teljes eszkalaciot: tesztek bukasa -> router reset (itt
+  // naplomentes) -> ... -> alvas (itt is naplomentes).
+  bool slept = false;
+  int guard = 0;
+  try { while (!slept && ++guard < 900000) loop(); }
+  catch (DeepSleepSignal&) { slept = true; }
+  CHECK(slept, "az egesz eszkalacio lefutott oraszinkron nelkul is");
+  CHECK(g_fs.count("/evlog.bin") == 1, "a naplo mentese is sikerult");
+  CHECK(!serialHas("1970"), "sehol nem jelenik meg hamis 1970-es datum");
+
+  // A lap: aramszunet utani helyzet, tehat a FAJLBOL kell dolgoznia - epp az
+  // a dontes, aminek a tie-breakje az orat hasznalna.
+  // A mentett fajlt MEG a coldBoot() ELOTT kell kimenteni: az kitorli a
+  // fajlrendszert. (Az elso valtozat utana olvasta ki - uresen.)
+  const std::string mentett = g_fs["/evlog.bin"];
+  CHECK(!mentett.empty(), "a mentett naplo tartalma megvan");
+  coldBoot(false, "", "", "", "");       // AP mod, hogy legyen /log kezelo
+  g_epochNow = 0;
+  setup();
+  g_fs["/evlog.bin"] = mentett;          // a korabbi mentes megmarad
+  rtcEvMagic = 0; rtcEvNext = 0;         // ...az RTC naplot viszont "torolte" az aramszunet
+
+  AsyncWebServerRequest req; g_handlers["/log#1"](&req);
+  const std::string& b = req._body;
+  CHECK(req._code == 200, "a /log oldal ora nelkul is kiszolgalodik");
+  CHECK(b.find("fajlrendszerre mentett naplo") != std::string::npos,
+        "a frissesseg-dontes a darabszam-alapu szabalyra esett vissza");
+  CHECK(b.find("<td>-</td>") != std::string::npos,
+        "az Ido oszlopban '-' all, nem hamis datum");
+  CHECK(b.find("1970") == std::string::npos, "sehol nincs 1970-es datum");
+  CHECK(b.find("<table") != std::string::npos, "es a tabla ott van");
+
+  // Es a "mentve:" cimke sem hazudik: ora nelkul egyszeruen elmarad.
+  CHECK(b.find("(mentve:") == std::string::npos,
+        "a 'mentve' idopont ora nelkul elmarad, nem talalunk ki egyet");
+}
+
 static void scNV2() {
   // AZ IRAS SIKERESSEGET FIGYELJUK. Nem eleg, hogy az iras nem panaszkodott:
   // vissza is olvassuk a fejlecet. Ugyanaz az elv, mint a writeConfigValue()
@@ -6651,6 +6709,7 @@ static const Scenario kScenarios[] = {
   { "NV8: feluton buko betoltes nem hagy kevert puffert", scNV8 },
   { "NV9: mind a NEGY alvas menti a naplot, nem csak az idozitett ketto", scNV9 },
   { "NV10: az oraszinkron MINDEN kapcsolati uton elindul", scNV10 },
+  { "NV11: sikertelen NTP kommunikacio nem okoz gondot", scNV11 },
   { "LOG7: a /log oldal a legrosszabb esetben is befer a pufferbe", scLOG7 },
   { "LOG8: firmware frissites utan a regi elrendezesu naplo ervenytelen", scLOG8 },
   { "LOG9: a wifireset a naplofajlt szandekosan NEM torli", scLOG9 },
