@@ -680,6 +680,9 @@ const char* resetReasonName(esp_reset_reason_t r) {
 
 const char* eventName(uint8_t code) {
   switch (code) {
+    // A default ag vedelmi celu: az L6 minden letezo kodot ellenoriz, tehat a
+    // "?" a host tesztekben sosem all elo. Egy JOVOBELI kod viszont igy nem
+    // tud olvashatatlan lapot csinalni, csak egy kerdojelet.
     case EV_BOOT: return "BOOT";
     case EV_WIFI_OK: return "WIFI OK";
     case EV_WIFI_LOST: return "WIFI LOST";
@@ -1317,7 +1320,21 @@ void checkHeap(uint32_t now) {
   // ingadozva ne kapcsolgasson oda-vissza.
   if (!heapWarnActive && szabad < HEAP_WARN_BYTES) {
     heapWarnActive = true;
-    logEvent(EV_LOW_HEAP, (uint16_t)(szabad / 1024));
+    // A NAPLOBA csak akkor, ha nem ez volt mar az elozo bejegyzes is.
+    //
+    // MIERT KELL EZ? A heapWarnActive jelzo a SOROS sort ritkitja (10%-os
+    // hiszterezissel), de a naplo bejegyzes ugyanezen a jelzon lovagolt -
+    // tehat MINDEN atlepes uj bejegyzest irt. Egy kuszob korul ingadozo
+    // heapnel (amit a szokasos AsyncTCP puffer-forgalom eloallithat) ez
+    // kisopri a 32 elemu korpuffert: merve 30 perc alatt 32 bejegyzes, mind
+    // egymas utan - vagyis epp azokat az esemenyeket veszitenenk el, amiket
+    // ki akarunk vizsgalni.
+    //
+    // Pontosan ugyanaz a hibaosztaly, mint a WIFI LOST-nal, es ugyanaz a
+    // megoldas is. (Merve: HP10.)
+    if (!lastEventWas((uint8_t)EV_LOW_HEAP)) {
+      logEvent(EV_LOW_HEAP, (uint16_t)(szabad / 1024));
+    }
     printUptime();
     Serial.printf("FIGYELEM: alacsony a szabad heap (%u B), a kuszob %u B.\n",
                   (unsigned)szabad, (unsigned)HEAP_WARN_BYTES);
@@ -1344,7 +1361,7 @@ void checkHeap(uint32_t now) {
     return;
   }
 
-  // MIKOR NEM SZABAD UJRAINDULNI. Mind a negy kizaras arrol szol, hogy az
+  // MIKOR NEM SZABAD UJRAINDULNI. Mind az OT kizaras arrol szol, hogy az
   // ujraindulas ne rontson tobbet, mint amennyit javit:
   //
   //  - AP beallito modban a felhasznalo epp a portalon dolgozik; az
@@ -2379,7 +2396,13 @@ void resetbutton() {
   if (btnResetLatched) {
     timing.resetBtnDownSince = 0;
     restartFromButton("Reset button pressed (latched).");
-    return;  // idaig csak akkor jutunk, ha a zar foglalt volt
+    // Idaig csak akkor jutunk, ha a zar foglalt volt. A HOST TESZTEKBEN ez a
+    // sor feher marad, es ez helyes: a fenti savingConfig kapu ugyanazt a
+    // jelzot nezi mikromasodpercekkel korabban, tehat ide csak a KET TASK
+    // KOZOTTI valodi verseny vezethet (a gate utan, a beginConfigWrite() elott
+    // indul egy mentes). Epp ez ellen van az atomikus zarszerzes. A LAT4 a
+    // realis utat - a gate agat - meri.
+    return;
   }
 
   if (digitalRead(resetPin) != LOW) {
@@ -2403,6 +2426,8 @@ void resetbutton() {
 // A zárat itt is atomikusan szerezzük meg (lásd restartFromButton()).
 void doWifiReset() {
   if (!beginConfigWrite()) {
+    // Lasd a resetbutton() reteszelt againak megjegyzeset: ide is csak a ket
+    // task kozotti valodi verseny vezet, ezert a host tesztekben feher marad.
     return;  // épp mentés folyik; a következő kör újra próbálja
   }
   Serial.println("WIFIRESET button is pulling down!");
@@ -2450,7 +2475,7 @@ void wifiresetbutton() {
   if (btnWifiResetLatched) {
     timing.wifiResetBtnDownSince = 0;
     doWifiReset();
-    return;
+    return;  // csak foglalt zarnal - lasd a resetbutton() megfelelo agat
   }
   if (digitalRead(wifiresetPin) != LOW) {
     timing.wifiResetBtnDownSince = 0;
@@ -3136,6 +3161,12 @@ void startConfigPortal() {
           if (encodeSecret(passNew, encNew, sizeof(encNew))) {
             passSet = true;
           } else {
+            // Szerkezetileg elerhetetlen ag: a passNew legfeljebb PASS_MAX_LEN
+            // (63) karakter, a kodolt alak pedig "v1:" + 2 hexa karakter
+            // bajtonkent = 3 + 126 = 129, a puffer viszont pontosan ekkora
+            // (SECRET_ENC_MAX). Vedelmi halo arra az esetre, ha valaki a ket
+            // konstans kozul csak az egyiket modositana - ezert a
+            // lefedettsegben feher marad.
             Serial.println("- a jelszo kodolasa nem fert a pufferbe");
             saveOk = false;
             if (failReason == nullptr) failReason = "Belso hiba a jelszo mentesekor.";
@@ -3800,6 +3831,10 @@ void loop() {
               Serial.println("A router reset utan sem jott vissza a WiFi.");
               digitalWrite(wifiledPin, LOW);
               wifiGiveUp();
+              // A break a host tesztekben feher marad, de nem azert, mert az
+              // ag nem fut le (a WF11 meri): a wifiGiveUp() vagy elalszik,
+              // vagy AP modba visz, es a harness az elalvast kivetellel
+              // modellezi - a vezerles ide mar nem ter vissza.
               break;
             }
 

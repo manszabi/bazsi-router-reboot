@@ -547,9 +547,11 @@ SUCCESS_DELAY delay start.
 
 ### Mennyit ír?
 
-A kimenet nem áraszthatja el a konzolt: a mért felső korlát **30 sor/perc**
-normál működésben és tartós internetkiesésben egyaránt, az AP beállító mód és a
-végzetes hiba villogó ciklusa pedig **egyetlen sort sem ír**. Ezt az
+A kimenet nem áraszthatja el a konzolt: a költségvetés **30 sor/perc**, és ez a
+legellenségesebb helyzetekben is tartja magát – pislákoló Wi-Fi (9–12), a küszöb
+körül ingadozó heap (15), mindig bukó naplómentés tartós kiesés alatt (10) –,
+míg normál működésben 9. Az AP beállító mód és a végzetes hiba villogó ciklusa a
+ritkított heap-soron kívül **egyetlen sort sem ír**. Ezt az
 ismétlődő események szűrése tartja fenn (`TEST FAIL`, `WIFI LOST`,
 `STUCK BUTTON` sorozatokból csak az első).
 
@@ -1081,7 +1083,10 @@ jöhet egy áramszünet, ami az RTC naplót elvinné.
 | Ha mindkettő üres | egyszerűen nincs napló a lapon |
 
 **Valós idő:** amint van kapcsolat – **bármelyik úton** jött is létre –, elindul
-az óraszinkron (`hu.pool.ntp.org`, magyar időzóna a nyári időszámítással). Amíg nincs szinkron,
+az óraszinkron (`hu.pool.ntp.org`, magyar időzóna a nyári időszámítással). **Ha
+az NTP nem sikerül, az nem okoz gondot:** az órára csak a bejegyzések kiírása és
+a frissesség-döntés tie-breakje épül, és mindkettő működik nélküle (`-` az Idő
+oszlopban, illetve darabszám-alapú döntés). Hamis 1970-es dátum sem jelenik meg. Amíg nincs szinkron,
 a lap `-`-t ír az Idő oszlopba – a napló ettől még működik. A valós idő a deep
 sleepet **túléli**, ezért használható a bejegyzések rendezésére bootolásokon át.
 

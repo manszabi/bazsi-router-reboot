@@ -16,6 +16,7 @@ extern bool   g_fsReadable;   // false = a létező fájl sem nyitható olvasás
 extern bool   g_fsSilentWriteFail;
 // A méret szerint kért olvasás kevesebb bájtot ad vissza (sérült fájlrendszer).
 extern bool   g_fsShortRead;
+extern int    g_fsShortReadSkip;
 extern size_t g_fsUsed();
 
 class File : public Stream {
@@ -31,7 +32,16 @@ public:
   size_t read(uint8_t* b, size_t n) {
     if (pos_ >= data_.size()) return 0;      // tullepett olvasasi pozicio
     size_t c = n < data_.size() - pos_ ? n : data_.size() - pos_;
-    if (g_fsShortRead && c > 0) c--;      // sérült FS: rövidebb olvasás
+    // Serult FS: rovidebb olvasas. A g_fsShortReadSkip azt mondja meg, hany
+    // olvasast engedjunk MEG at epen, mielott a rovidites elkezdodik. Ez a
+    // naplo betoltesehez kell: ott a fejlec es a bejegyzesek KULON olvasasok,
+    // es kulon kell tudni elrontani a masodikat - kulonben a fejlec bukik el
+    // eloszor, es a bejegyzes-betoltes aga sosem fut le. (Ezen mult az NV8
+    // ures atmenete.)
+    if (g_fsShortRead) {
+      if (g_fsShortReadSkip > 0) g_fsShortReadSkip--;
+      else if (c > 0) c--;
+    }
     memcpy(b, data_.data() + pos_, c); pos_ += c; return c;
   }
   // Szimulált írás: a kapacitás túllépésekor rövidebb visszatérési érték,
