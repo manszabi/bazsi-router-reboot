@@ -14,8 +14,15 @@ std::vector<std::string> g_serialLog;
 std::map<int,int> g_pinState;
 std::map<int,int> g_pinRead;
 bool g_serialOn = false;
+unsigned long g_serialBaud = 0;
+uint32_t g_serialFirstWriteMs = 0;
+int      g_serialWritesAfterEnd = 0;
+bool     g_serialFlushedAll = true;
+void HardwareSerial::end() { g_serialOn = false; simLog("Serial.end"); }
+void HardwareSerial::flush() { g_serialFlushedAll = true; simLog("Serial.flush"); }
 std::map<std::string,std::string> g_fs;
 bool g_fsMountOk = true;
+uint32_t g_fsMountMs = 0;
 bool   g_fsWritable = true;
 size_t g_fsCapacity = 0;
 bool   g_fsRemoveOk = true;
@@ -30,6 +37,22 @@ uint64_t g_gpioWakeMask = 0;
 int g_gpioWakeMode = -1;
 bool g_serialEcho = false;
 uint64_t g_efuseMac = 0x0000A1B2C3D4E5F6ULL;   // 6 bajtos MAC
+uint32_t g_freeHeap = 180000;      // tipikus szabad heap STA modban
+uint32_t g_minFreeHeap = 180000;
+uint32_t g_maxAllocHeap = 110000;  // a legnagyobb osszefuggo tomb
+uint32_t g_heapDrainPerCall = 0;   // szivargas-modell
+int      g_heapQueries = 0;
+uint32_t EspClass::getFreeHeap() {
+  g_heapQueries++;
+  if (g_heapDrainPerCall) {
+    g_freeHeap = (g_freeHeap > g_heapDrainPerCall) ? g_freeHeap - g_heapDrainPerCall : 0;
+    if (g_freeHeap < g_minFreeHeap) g_minFreeHeap = g_freeHeap;
+    // A legnagyobb tomb egyutt fogy a szabad heappel (elaprozodas nelkul is).
+    if (g_maxAllocHeap > g_freeHeap) g_maxAllocHeap = g_freeHeap;
+  }
+  return g_freeHeap;
+}
+uint32_t EspClass::getMaxAllocHeap() { return g_maxAllocHeap; }
 int g_httpCode = 200;
 std::string g_httpBody = "Microsoft NCSI";
 int g_httpSize = -2;
@@ -131,6 +154,14 @@ size_t Print::printf(const char* f, ...) {
 }
 
 void Print::flushLine() {
+  // A soros eletciklus meresehez: mikor ment ki az elso sor, irtunk-e a
+  // lezaras utan, es all-e meg flush nelkuli iras a sor vegen. (Csak a
+  // Serial-on keresztuli irasokra ertelmes; az IPAddress::print sajat
+  // pufferbe megy, de az is ide fut be - ez a meresen nem valtoztat, mert
+  // mindketto a soros kimenetet jelenti.)
+  if (g_serialFirstWriteMs == 0) g_serialFirstWriteMs = g_millis;
+  if (!g_serialOn) g_serialWritesAfterEnd++;
+  g_serialFlushedAll = false;
   // ::printf, NEM a tagfuggveny! Enelkul a Print::printf hivna sajat magat
   // (vegtelen rekurzio). Amig a tag no-op volt, ez a sor csendben nem is
   // csinalt semmit - vagyis a g_serialEcho valojaban sosem mukodott.
@@ -145,7 +176,30 @@ void digitalWrite(uint8_t p, uint8_t v) {
   if (g_pinState[p] != v) simLog("pin" + std::to_string(p) + "=" + (v ? "HIGH" : "LOW"));
   g_pinState[p] = v;
 }
-int digitalRead(uint8_t p) { auto it = g_pinRead.find(p); return it == g_pinRead.end() ? HIGH : it->second; }
+// A GOMBOK mintavetelezesi koze. Ugyanaz az elv, mint a g_wdtMaxFeedGap-nel:
+// enelkul nem lehetne kimutatni, hogy egy blokkolo konyvtarhivas (http.GET,
+// Ping.ping) alatt a gomb masodpercekig eszrevetlen marad. A gombok a
+// D0 = GPIO2 (wifireset) es a D1 = GPIO3 (reset).
+std::map<int, IsrFn> g_isr;
+std::map<int, int>   g_isrMode;
+void attachInterrupt(uint8_t pin, IsrFn fn, int mode) {
+  g_isr[pin] = fn; g_isrMode[pin] = mode;
+  simLog("attachInterrupt(" + std::to_string(pin) + "," + std::to_string(mode) + ")");
+}
+void detachInterrupt(uint8_t pin) { g_isr.erase(pin); simLog("detachInterrupt(" + std::to_string(pin) + ")"); }
+void simIsr(int pin) { auto it = g_isr.find(pin); if (it != g_isr.end() && it->second) it->second(); }
+
+bool     g_btnTrack = false;
+uint32_t g_btnLastPoll = 0;
+uint32_t g_btnMaxGap = 0;
+int digitalRead(uint8_t p) {
+  if (g_btnTrack && (p == 2 || p == 3)) {
+    const uint32_t gap = g_millis - g_btnLastPoll;
+    if (gap > g_btnMaxGap) g_btnMaxGap = gap;
+    g_btnLastPoll = g_millis;
+  }
+  auto it = g_pinRead.find(p); return it == g_pinRead.end() ? HIGH : it->second;
+}
 void yield() { g_millis += 10; }   // szimulált idő telik minden yield()-nél
 int64_t esp_timer_get_time() { return (int64_t)g_millis * 1000; }
 void esp_sleep_enable_timer_wakeup(uint64_t us) { g_wakeupUs = us; simLog("timer_wakeup(" + std::to_string(us) + ")"); }
@@ -192,4 +246,20 @@ size_t strlcpy(char* d, const char* s, size_t n) {
   size_t l = strlen(s);
   if (n) { size_t c = l >= n ? n - 1 : l; memcpy(d, s, c); d[c] = 0; }
   return l;
+}
+
+// --- Ido (NTP) modell ------------------------------------------------------
+uint32_t g_epochNow = 0;
+int      g_ntpStarts = 0;
+void configTzTime(const char* tz, const char* server) {
+  (void)tz; (void)server;
+  g_ntpStarts++;
+  simLog("configTzTime");
+}
+// A makro miatt a sajat definiciot is ki kell vedeni.
+#undef time
+time_t stub_time(time_t* out) {
+  const time_t t = (time_t)g_epochNow;
+  if (out) *out = t;
+  return t;
 }

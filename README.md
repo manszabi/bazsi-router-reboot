@@ -58,6 +58,12 @@ eltér; a két hibajelzés mindkettőt villogtatja, gyorsabban – az egyik egy�
 a másik ellenfázisban. A reset pulzus alatt azért villog a státusz LED, mert
 90 másodpercnyi sötét LED ránézésre a halott eszköztől sem különböztethető meg.
 
+> **A Wi-Fi LED késhet, legfeljebb egy percet.** A kapcsolat állapotát a
+> tesztciklus ellenőrzi, a sikeres teszt utáni 60 mp-es várakozás alatt viszont
+> nem. Ha a kapcsolat épp ekkor szakad meg, a LED legfeljebb **60 másodpercig**
+> még világít, aztán a következő teszt elején elalszik (mérve: `LED4`). A
+> működésre ez nem hat – csak a kijelzés késik.
+
 ## ⚙️ Működés
 
 ### 1. Első indulás – Wi-Fi konfiguráció
@@ -67,13 +73,23 @@ Ha nincs mentett Wi-Fi adat (vagy a Wi-Fi reset gombot megnyomtad):
 1. Az ESP **Access Point módba** lép
 2. Az AP neve: `ESP-<chipmodel>`, jelszó: `12345678`
 3. Csatlakozz az AP-hez, majd nyisd meg a böngészőben: `192.168.4.1`
-4. Töltsd ki az űrlapot:
+4. Töltsd ki az űrlapot (az **SSID, IP és Gateway előkitöltve** jelenik meg a
+   mentett értékekkel – a **jelszó soha nem**, azt mindig újra kell írni):
    - **SSID** – a Wi-Fi hálózat neve (max. 32 karakter)
    - **Password** – a Wi-Fi jelszó (max. 63 karakter)
    - **IP Address** – az ESP kívánt statikus IP-je (opcionális, ha üres → DHCP)
    - **Gateway** – a router IP-je (opcionális, ha üres → DHCP)
 5. Küldés után az ESP újraindul és csatlakozik a megadott hálózathoz
 
+> **Az üres címmező törlést jelent.** Ez a DHCP-re való visszatérés útja – és
+> pontosan ezért van a két címmező előkitöltve: enélkül aki csak a jelszót
+> akarja átírni, a böngésző által üresen küldött mezőkkel csendben elveszítené
+> a statikus IP-jét (mérve: `AP1`, `AP4`).
+>
+> **A jelszó mező viszont mindig üres**, mert azt nem küldjük ki a böngészőnek
+> (`AP2`). Következmény: minden mentésnél újra be kell írni – üresen hagyva
+> nyílt hálózatként mentődik, amit az űrlap ki is ír.
+>
 > **Statikus IP-hez mindkét mezőt ki kell tölteni.** Gateway nélkül a firmware
 > DHCP-re esne vissza, ezért a beállító portál a félig kitöltött párost
 > visszautasítja, ahelyett hogy sikert jelentene egy olyan fix címre, amit az
@@ -311,10 +327,44 @@ választ, és ez a hiba némán, a redundancia elvesztésével jelentkezne. A
 | **Reset** (D1) | ESP32-C3 azonnali újraindítása; deep sleepből felébreszti az eszközt |
 | **Wi-Fi Reset** (D0) | Mentett Wi-Fi adatok törlése + ESP újraindítás → visszaáll AP módba |
 
-> ⚠️ Induláskor **mindkét** gombot ellenőrizzük. Ha bármelyik beragadva marad, a
-> két LED 3 másodpercig **felváltva** villog (megkülönböztetésül a végzetes
-> hibától, ahol együtt villognak), majd az ESP 60 másodpercre deep sleep módba lép.
-> Ilyenkor a gombos ébresztés **nincs** bekapcsolva, különben a beragadt gomb végtelen boot loopot okozna.
+> **Egy rövid koppintás is elég.** A firmware minden saját várakozó ciklusában
+> 10 ms-onként mintavételezi mindkét gombot (mérve: `BTN1`) – egy futó **HTTP
+> teszt alatt viszont nem tud**, mert a `http.GET()` az ESP32 core blokkoló
+> hívása. Ez az ablak legfeljebb egy kérésnyi: 15 mp hallgató szervernél,
+> 33 mp halott DNS-nél (mérve: `BTN2`).
+>
+> Ezt az ablakot **megszakítás-alapú retesz** hidalja át. Mindkét gomb lábán
+> `CHANGE` megszakítás fut, és a kezelő **megméri a lenyomás hosszát**: a
+> lefutó élen jegyzi az időt, a felfutón pedig csak akkor reteszel, ha a gomb
+> legalább 50 ms-ig lent volt. A debounce tehát ugyanaz maradt, csak
+> hardveresen történik – és akkor is működik, amikor a `loop()` épp nem tud
+> mintavételezni. A blokkoló szakasz alatti gombnyomás így **nem vész el**,
+> csak a szakasz végéig késik (mérve: `LAT1`).
+>
+> A retesz nem kerül meg semmit: egy zajtüske továbbra sem indít újra (`LAT2`),
+> fájlírás közben a nyomás megmarad, de nem hat (`LAT4`), és egy beragadt gomb
+> nem reteszel, mert felfutó éle sosem lesz (`LAT5`).
+
+> **Pattogás (kontaktus-visszaugrás).** Egy mechanikus gomb sem a lenyomáskor,
+> sem a **felengedéskor** nem ad tiszta élt. A pollozott ág elölről indítja a
+> debounce-t minden `HIGH` olvasásra; a megszakításos retesz a felfutó élen
+> **nullázza is** a lenyomás idejét, így a felengedési pattogás után nem marad
+> hátra „félig lenyomott" állapot. Ez utóbbi azért lényeges, mert egy elavult
+> időbélyeggel egy jóval későbbi, magában ártalmatlan felfutó él azt látná,
+> hogy a gomb „régóta" nyomva van, és spontán újraindítást okozna (mérve:
+> `BNC1`). Egy folyamatosan recsegő, **kopott** gomb szándékosan **nem** indít
+> újra és nem is reteszel (`BNC3`) – inkább ne reagáljon, mint hogy magától
+> újrainduljon.
+
+> ⚠️ Induláskor **mindkét** gombot ellenőrizzük. Ha bármelyik nyomva van, előbb
+> **3 másodpercet várunk az elengedésére** – a reset gomb LOW szintre ébreszt,
+> tehát a felhasználó szükségképpen még nyomva tartja, amikor az eszköz bootolni
+> kezd; egy pillanatnyi beolvasás a saját ébresztő gombnyomását nézné
+> beragadásnak. Ha 3 másodperc után is nyomva van, a két LED 3 másodpercig
+> **felváltva** villog (megkülönböztetésül a végzetes hibától, ahol együtt
+> villognak), majd az ESP 60 másodpercre deep sleep módba lép. Ilyenkor a gombos
+> ébresztés **nincs** bekapcsolva, különben a beragadt gomb végtelen boot loopot
+> okozna.
 
 ### Deep sleep és ébredés
 
@@ -360,8 +410,8 @@ bazsi-router-reboot/
 
 A Wi-Fi beállító weboldal a sketch `CONFIG_FORM` konstansában él, a flash
 `.rodata` szekciójában – nincs külön feltöltendő `data/` mappa. A LittleFS-re
-így csak a négy konfigurációs fájl kerül (`/ssid.txt`, `/pass.txt`, `/ip.txt`,
-`/gateway.txt`).
+így csak a négy konfigurációs fájl és a mentett napló kerül (`/ssid.txt`,
+`/pass.txt`, `/ip.txt`, `/gateway.txt`, `/evlog.bin` – ez utóbbi ~400 bájt).
 
 ## 📦 Szükséges könyvtárak
 
@@ -424,7 +474,7 @@ a fájlrendszernek nem kell weblapot tárolnia.
 | `nvs` | data / nvs | `0x9000` | 20 KiB | a core saját kulcs-érték tára |
 | `phy_init` | data / phy | `0xE000` | 4 KiB | rádió kalibrációs adatok |
 | `factory` | app / factory | `0x10000` | **3520 KiB (~3,44 MB)** | a program |
-| `spiffs` | data / spiffs | `0x380000` | **512 KiB** | LittleFS (`/ssid.txt`, `/pass.txt`, `/ip.txt`, `/gateway.txt`) |
+| `spiffs` | data / spiffs | `0x380000` | **512 KiB** | LittleFS (`/ssid.txt`, `/pass.txt`, `/ip.txt`, `/gateway.txt`, `/evlog.bin`) |
 
 A tábla pontosan kitölti a XIAO ESP32-C3 4 MB-os flash-ét. Az app partíció
 kezdőcíme 64 KB-ra, a data partíciók 4 KB-ra igazítottak (a `0xF000`–`0x10000`
@@ -485,6 +535,74 @@ Successful Test
 
 SUCCESS_DELAY delay start.
 ```
+
+### Indulás és lezárás
+
+- **Indulás:** `Serial.begin(115200)`, majd max. **3 mp** várakozás a gazdára és
+  **0,5 mp** CDC-beállás – csak ezután megy ki az első sor, hogy egy frissen
+  csatlakoztatott monitoron ne vesszenek el az induló üzenetek.
+- **Alvás előtt:** `flush()`, majd `end()` – **a legvégén**, minden más
+  leállítási lépés után. A lezárás után egyetlen sort sem írunk.
+- **Újraindítás előtt:** `flush()` közvetlenül az `ESP.restart()` előtt.
+
+### Mennyit ír?
+
+A kimenet nem áraszthatja el a konzolt: a mért felső korlát **30 sor/perc**
+normál működésben és tartós internetkiesésben egyaránt, az AP beállító mód és a
+végzetes hiba villogó ciklusa pedig **egyetlen sort sem ír**. Ezt az
+ismétlődő események szűrése tartja fenn (`TEST FAIL`, `WIFI LOST`,
+`STUCK BUTTON` sorozatokból csak az első).
+
+## 🧠 Heap felügyelet
+
+A sketch maga semmit nem allokál dinamikusan, de az ESPAsyncWebServer, az
+AsyncTCP és a Wi-Fi driver igen. Egy lassú szivárgás hónapokig észrevétlen
+marad, aztán az eszköz „csak úgy" nem működik – **allokációs hibánál a legtöbb
+könyvtár csendben elbukik, nem panikol, tehát a watchdog sem fogja meg.**
+
+| | |
+|---|---|
+| Mintavétel | 10 mp-enként |
+| Soros állapotsor | 30 percenként (szabad heap, legnagyobb összefüggő tömb, **valaha volt legkisebb**) |
+| Figyelmeztetés | 25 000 B alatt – csak a küszöb **átlépésekor**, nem minden mérésnél |
+| Önkéntes újraindulás | 12 000 B alatt, vagy ha a legnagyobb tömb 6 000 B alá esik – de csak **3 egymást követő** mérés után |
+| Felső korlát | 3 heap-újraindulás, utána `MODE_FATAL` (a boot loop rosszabb, mint a megállás) |
+
+```
+Uptime: 0d 0h 0m 10s
+Heap: szabad 178432 B, legnagyobb tomb 110000 B, valaha volt legkisebb 178432 B
+```
+
+**Nem indul újra**, ha AP beállító módban vagy (elveszne a beírt konfiguráció),
+végzetes hiba módban, fájlírás közben, a relé impulzusa alatt, vagy **a router
+reset utáni ellenőrző ablakban**. Mindegyik helyzetnek megvan a maga kiútja: a
+portál 5 perc után elalszik, a többi eset pedig a következő mérésnél újra sorra
+kerül.
+
+> Az utolsó kizárás a legkevésbé nyilvánvaló. A gateway-eszkaláció **kétfázisú**:
+> ha a saját gateway sem érhető el, a router kap egy esélyt (újraindítás), és a
+> várakozás után **újra** ellenőrizzük – ha még mindig nincs gateway, a statikus
+> IP a rossz, jön az AP mód, hogy javítani lehessen. Azt, hogy „az első fázis már
+> lefutott", három sima globális hordozza együtt, és egy újraindulás mindhármat
+> elveszti. Az eszköz elölről kezdené: a router kapna **még egy fölösleges
+> áramtalanítást**, és az AP módba menetel egy teljes körrel később születne meg –
+> épp az járna rosszul, akinek a statikus IP-jét javítani kellene.
+
+**Amit az újraindulás átvisz** – két számláló, mindkettő egy-egy többfázisú
+létra állását őrzi:
+
+- a `testState.resetEvents`: hányszor indítottuk már újra a routert. Ez viszi az
+  eszközt az ötödiknél az 1 órás alvásba; enélkül **végtelenül újraindíthatná a
+  routert** ahelyett, hogy elalszik.
+- az `rtcRetryRounds`: a **2 napos ablak** állása. Ez `RTC_DATA_ATTR`, tehát
+  szoftveres resetre szándékosan nullázódik (a *felhasználói* beavatkozás tiszta
+  lapot kap) – a heap-újraindulás viszont nem felhasználói beavatkozás. Átvitel
+  nélkül az eszköz sosem érné el a 2 napos határt, vagyis **sosem menne AP
+  módba**, és a felhasználó sosem kapna esélyt a javításra.
+
+Mindkettő az RTC memórián megy át, és a `setup()` pontosan egyszer használja fel.
+Gombnyomásnál nincs átvitel, tehát ott marad a tiszta lap. Részletek:
+[MUKODES.md](MUKODES.md)
 
 ## ✅ Tesztelt konfiguráció
 
@@ -565,7 +683,7 @@ teljes egészében felügyelet alatt van:
 | Szakasz | Felügyelve? | Megjegyzés |
 |---|:---:|---|
 | `pinMode`-ok, relé hold feloldása, `Serial.begin()` + max. 3 mp várakozás | nem | ide még nem megy ki soros üzenet, tehát az `initWatchdog()` hibajelzése is elveszne |
-| gombellenőrzés, `checkWatchdogResets()` | **igen** | a beragadt gomb 3 mp-et villog, aztán deep sleep |
+| gombellenőrzés, `checkWatchdogResets()` | **igen** | 3 mp türelem az elengedésre, aztán 3 mp villogás és deep sleep |
 | LittleFS csatolás / **formázás** | **igen** | lásd lent |
 | konfiguráció beolvasása | **igen** | négy rövid fájl |
 | `WiFi.persistent()`, `initWiFi()`, AP portál indítása | **igen** | a Wi-Fi init a legvalószínűbb lefagyási pont; a 20 mp-es várakozás magától etet |
@@ -752,6 +870,30 @@ kapcsolatvesztés → 3 próba (30 mp szünetekkel)
                  → sikertelen → AP beállító portál
 ```
 
+> **Ha te magad áramtalanítod a routert:** az eszköz ezt **nem tudja
+> megkülönböztetni** attól, hogy a router lefagyott – a hálózat mindkét esetben
+> ugyanúgy eltűnik. A türelmi idő a hálózat eltűnésétől az ESP saját
+> router-resetjéig **2,0 perc** (mérve: `PWR3`). Ha ezen belül visszadugod, az
+> ESP **hozzá sem nyúl** a reléhez, csendben visszacsatlakozik (`PWR4`). Ha
+> tovább tart, ő is ad neki egy 90 másodperces áramtalanítást – kellemetlen,
+> de magától rendbe jön.
+
+### Áramszünet
+
+Áramszünetkor az ESP és a router **együtt** áll le, és együtt is indul – csak
+az ESP másodpercek alatt, a router percek alatt. A **10 perces türelmi idő**
+(`firstStartDelay`) minden hidegindulásnál megvédi a routert attól, hogy az ESP
+épp bootolás közben vegye el az áramát; a **60 mp-enkénti próba** pedig lezárja
+ezt a várakozást, amint a router ténylegesen felállt.
+
+| helyzet | mért eredmény |
+|---|---|
+| a router 3 perc alatt feláll | az ESP **3:21**-kor kezd tesztelni, a reléhez **hozzá sem nyúl** (`PWR1`) |
+| a router egyáltalán nem áll fel | az első router-újraindítás **12 perckor** (`PWR2`) |
+
+Az áramszünet **törli** a diagnosztikai naplót és az RTC-számlálókat (tiszta
+lap), de a Wi-Fi konfiguráció a LittleFS-en **megmarad**.
+
 ### Az AP beállító mód
 
 Az AP mód **5 perc** tétlenség után deep sleepbe megy, **időzített ébresztés
@@ -763,8 +905,11 @@ Két védelem gondoskodik arról, hogy a mentés ne vesszen el:
 - **Minden HTTP kérés újraindítja az 5 perces visszaszámlálást** – a 404-es
   válasszal végződő is. A határidő abszolút: mindig pontosan 5 perccel a
   *legutolsó* kérés utánra kerül, nem halmozódik, és felső korlát nincs.
-- **Fájlírás közben az eszköz soha nem alszik el** (`savingConfig` jelző), így
-  nem maradhat félig kiírt konfiguráció.
+- **Fájlírás közben az eszköz soha nem alszik el és nem indul újra**
+  (`savingConfig` jelző), így nem maradhat félig kiírt konfiguráció. A leállási
+  út nem csak megvárja a folyamatban lévő mentést, hanem **meg is szerzi a
+  zárat**, hogy a várakozás vége és a tényleges alvás/újraindítás közötti
+  ezredmásodpercekben se indulhasson új írás.
 
 ## 🚨 Végzetes hiba – a fájlrendszer nem használható
 
@@ -808,6 +953,7 @@ kezelve van – és ami fontosabb, **egyik sem hazudik sikert**.
 
 | Hiba | Viselkedés |
 |---|---|
+| A mentés félbeszakad (megtelt / haldokló flash) | A **régi érték is odavész**: a `FILE_WRITE` már a megnyitáskor csonkol, tehát mire kiderül, hogy az írás nem fér ki, a korábbi tartalom nincs meg. A válasz 500, az eszköz **nem indul újra**, és a következő induláskor üres SSID-vel **AP módba** kerül, ahol újra beállítható (mérve: `FS14`) |
 | A fájlrendszer nem csatolható | Konkrét ok kiírása (a `begin()` csak `ESP_FAIL`-nél formáz, hiányzó partíciónál nem), majd végzetes hibajelzés – lásd fent |
 | Hiányzó konfigurációs fájl | `CONFIG_MISSING` – nem hiba, AP beállító portál |
 | A fájl nem nyitható írásra | `writeConfigValue()` `false`-t ad, a mentés nem történik meg |
@@ -834,6 +980,13 @@ beírt adatok sem vesznek el.
   fájlrendszerről semmit nem szolgál ki, a `/` és a `/log` tartalma is a
   programból megy ki.
 - A jelszó soha nem kerül ki nyílt szövegként a soros portra, csak a hossza.
+- **A mentett jelszó semmilyen weboldalon nem érhető el**: sem az űrlap
+  előkitöltésében (`AP2`), sem a naplóoldalon (`LOG2`), sem a hibaüzenetekben –
+  azok fix szövegek, sosem a beírt érték. A beírás `type="password"` mezőben
+  történik, `POST` metódussal, tehát a böngésző előzményeibe sem kerül be.
+- **Az előkitöltött értékek HTML-escape-elve mennek ki** (`AP3`). Az SSID
+  tetszőleges 32 bájt lehet, idézőjelet és `<` jelet is: escape nélkül az
+  előkitöltés maga nyitna XSS-t a saját portálunkon.
 - Az AP jelszava (`12345678`) a forráskódban van; éles használat előtt
   érdemes lecserélni az `AP_PASSWORD` konstansban. A hosszát `static_assert`
   őrzi (WPA2: 8–63 karakter), mert a core rövidebbnél nem indítana AP-t, és a
@@ -910,7 +1063,33 @@ szekvencia, AP portál, alvás/ébredés:
 
 Az utolsó 32 esemény RTC memóriában, a beállító portál **`/log`** oldalán
 olvasható – soros kábel nélkül is. Túléli a deep sleepet, a watchdog resetet és
-a reset gombot; csak az áramtalanítás törli. Részletek:
+a reset gombot.
+
+**Az áramszünetet is túléli** – mert a program a fontos pillanatokban kiírja a
+naplót a LittleFS-re is (`/evlog.bin`): **router reset előtt**, **AP módba
+váltás előtt**, és **minden alvás előtt**. Ezek azok a pontok, ahol vagy
+hosszabb idő következik, vagy az eszköz beavatkozik – és mindkettő után könnyen
+jöhet egy áramszünet, ami az RTC naplót elvinné.
+
+| | |
+|---|---|
+| Mikor | router reset előtt, AP módba váltás előtt, és **minden alvás előtt** (egyetlen közös ponton, az `enterDeepSleep()` elején) |
+| Írás közben | nincs alvás, újraindulás és másik írás – ugyanaz a **konfigurációs zár**, amit a webes mentés használ; foglalt zárnál a mentés **kimarad**, nem blokkol |
+| Sikeresség | **visszaolvasással** ellenőrizve; a sikertelenség **nem végzetes**, az RTC napló ettől még ép |
+| A `/log` oldal | a **frissebbet** tölti be, és kiírja, melyik forrásból dolgozik |
+| Hiányzó / üres / hibás fájl | nem hiba: az RTC naplót mutatja |
+| Ha mindkettő üres | egyszerűen nincs napló a lapon |
+
+**Valós idő:** amint van kapcsolat – **bármelyik úton** jött is létre –, elindul
+az óraszinkron (`hu.pool.ntp.org`, magyar időzóna a nyári időszámítással). Amíg nincs szinkron,
+a lap `-`-t ír az Idő oszlopba – a napló ettől még működik. A valós idő a deep
+sleepet **túléli**, ezért használható a bejegyzések rendezésére bootolásokon át.
+
+**Nem fájlba megy**, hanem egy körpufferbe az RTC memóriában: nincs flash írás,
+nincs naplóírási hiba, amit kezelni kellene, és akkor is olvasható marad, ha
+épp a fájlrendszer csatolása bukott meg. Az ismétlődő eseményekből (`TEST
+FAIL`, `WIFI LOST`, `STUCK BUTTON`) csak az **első** kerül be, hogy egy tartós
+hiba ne söpörje ki a puffert – épp a hiba kezdetét veszítenénk el. Részletek:
 [MUKODES.md](MUKODES.md)
 
 ## 🧪 Tesztek

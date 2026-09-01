@@ -9,7 +9,10 @@ legyen.
 
 Jelölés: lekerekített doboz = belépési/kilépési pont, rombusz = döntés,
 téglalap = művelet. Az `EV_*` címkék a diagnosztikai napló eseménykódjai
-(lásd `MUKODES.md` 12. fejezet).
+(lásd `MUKODES.md` 15. fejezet). A `saveEventLog()` a naplót a LittleFS-re is
+kiírja – három fontos pillanatban: **router reset előtt**, **AP módba váltás
+előtt**, és **minden alvás előtt** (egyetlen közös ponton, az
+`enterDeepSleep()` elején); így egy áramszünet sem viszi el.
 
 ---
 
@@ -49,8 +52,10 @@ flowchart TD
     PWR([Bekapcsolás / reset / ébredés]) --> PINS["GPIO-k beállítása<br>relé = LOW, státusz LED = HIGH<br>relé hold feloldása (gpio_hold_dis)"]
     PINS --> SER["Serial indítása<br>max 3 s várakozás + 0,5 s CDC-beállás"]
     SER --> WDT["initWatchdog()<br>TWDT: 90 s, trigger_panic = true<br>a loop task feliratkoztatva<br>innentől a setup() is felügyelt"]
-    WDT --> STUCK{"Beragadt gomb?<br>reset (D1) vagy wifireset (D0) = LOW"}
-    STUCK -->|igen| SBLOG["EV_BOOT + EV_STUCK_BUTTON naplózása<br>(csak az első körben – az ismétlődő<br>60 s-os ébredések némák)"]
+    WDT --> STUCK{"Nyomva van valamelyik gomb?<br>reset (D1) vagy wifireset (D0) = LOW"}
+    STUCK -->|igen| HOLD{"Elengedik 3 s-on belül?<br>(STUCK_BUTTON_CONFIRM_MS)<br>a gombos ébresztés alatt a gomb<br>MINDIG lenyomva találtatik"}
+    HOLD -->|"igen – ez ébresztő gombnyomás volt"| BOOTLOG
+    HOLD -->|"nem – tényleg beragadt"| SBLOG["EV_BOOT + EV_STUCK_BUTTON naplózása<br>(csak az első körben – az ismétlődő<br>60 s-os ébredések némák)"]
     SBLOG --> SBLINK["3 s: a két LED FELVÁLTVA villog"]
     SBLINK --> SB60["Deep sleep 60 s<br>csak timer ébresztés, gomb NEM<br>(boot loop ellen)"]
     SB60 --> PWR
@@ -109,8 +114,10 @@ flowchart TD
 ```mermaid
 flowchart TD
     L([loop ciklus, 10 ms-onként]) --> RP{"restartPending és<br>letelt a 2 s türelmi idő?"}
-    RP -->|igen| WFW["waitForConfigWrite()<br>(fájlírás megvárása, max 5 s)"] --> RS([ESP.restart])
-    RP -->|nem| MODE{deviceMode}
+    RP -->|igen| WFW["lockConfigBeforeShutdown()<br>(fájlírás megvárása max 5 s,<br>ÉS a zár megszerzése)"] --> RS([ESP.restart])
+    RP -->|nem| WDC0["1 óra hibátlan futás után:<br>watchdog + heap számláló nullázása"]
+    WDC0 --> HEAP["checkHeap() – 10 s-onként mér<br>30 percenként állapotsor<br>25 kB alatt figyelmeztet<br>12 kB alatt (3 mérésen át) ÖNKÉNTES ÚJRAINDULÁS<br>a resetEvents átvitelével"]
+    HEAP --> MODE{deviceMode}
     MODE -->|MODE_FATAL| FB["Mindkét LED együtt villog (5 Hz)<br>gombok élnek"] --> F5{"5 perc letelt?"}
     F5 -->|igen| FSL["fatalSleep() – EV_SLEEP(4)<br>alvás timer NÉLKÜL"]
     F5 -->|nem| L
@@ -119,8 +126,7 @@ flowchart TD
     APT -->|nem| L
     MODE -->|MODE_MONITOR| FST{firstStart?}
     FST -->|igen| HFS["handleFirstStart() (3. ábra)"] --> L
-    FST -->|nem| WDC["1 óra hibátlan futás után:<br>watchdog számláló nullázása"]
-    WDC --> SM{currentState}
+    FST -->|nem| SM{currentState}
 
     SM -->|TESTING_STATE| WL{"WiFi.status()<br>== WL_CONNECTED?"}
     WL -->|nem| RC{"EV_WIFI_LOST<br>reconnectWifi()"}
@@ -167,7 +173,7 @@ flowchart TD
     IN([Mind az 5 végpont elbukott]) --> GW1{"Statikus IP aktív ÉS<br>a saját gateway sem pingelhető?"}
     GW1 -->|igen| GWL["EV_GW_UNREACHABLE(1)<br>a router kap még egy esélyt"]
     GW1 -->|nem| CNT
-    GWL --> CNT["resetEvents++<br>EV_ROUTER_RESET"]
+    GWL --> CNT["resetEvents++<br>EV_ROUTER_RESET<br>saveEventLog() – a napló kiírása<br>a fájlrendszerre, MÉG a relé előtt"]
     CNT --> MX{"resetEvents >= 5?"}
     MX -->|"igen (már 4 reset volt)"| NFS["internetFailSleep()<br>EV_SLEEP(2)<br>deep sleep 1 óra"]
     MX -->|nem| P1["Relé = HIGH: router áram nélkül<br>90 s (RESET_PULSE)<br>státusz LED VILLOG 2 Hz, Wi-Fi LED sötét"]
@@ -213,7 +219,7 @@ flowchart TD
     IN([startConfigPortal]) --> AP["WIFI_AP mód<br>SSID: ESP-ESP32-C3, jelszó: 12345678<br>végpontok: GET / , /ping, /log és POST /"]
     AP --> IDLE["5 perces tétlenségi visszaszámlálás<br>MINDEN kérés (404 is) újraindítja;<br>a nyitott lap 60 s-onként /ping-el"]
     IDLE --> REQ{Kérés típusa}
-    REQ -->|"GET /"| FORM["Beépített beállító űrlap (CONFIG_FORM)<br>a flashből; a LittleFS-ről semmit<br>nem szolgálunk ki"]
+    REQ -->|"GET /"| FORM["Beépített beállító űrlap (sendConfigForm)<br>SSID/IP/gateway ELŐKITÖLTVE, escape-elve;<br>a jelszó SOHA. A LittleFS-ről semmit<br>nem szolgálunk ki"]
     REQ -->|"GET /log"| LOG["Diagnosztikai napló:<br>reset ok, számlálók, 32 esemény"]
     REQ -->|"POST /"| VAL{"1. FÁZIS - validálás:<br>SSID 1-32 (trim), jelszó max 63 (trim),<br>IP és gateway: IPv4, nem 0.0.0.0, trim,<br>statikus IP CSAK párban"}
     VAL -->|hiba| E500["500 + konkrét indok<br>SEMMI nem íródik ki, a futó konfig<br>sem változik, NINCS újraindítás"]
@@ -240,7 +246,7 @@ sequenceDiagram
     W->>L: restartPending = true, restartAt = most + 2 s
     Note over L: savingConfig alatt tilos: gombkezelés,<br>alvás, újraindítás (sérült konfig ellen)
     L->>L: 2 s türelmi idő (dupla mentés beérhet)
-    L->>L: waitForConfigWrite() – max 5 s
+    L->>L: lockConfigBeforeShutdown() – max 5 s, a zárat meg is szerzi
     L->>L: ESP.restart()
 ```
 
@@ -252,9 +258,11 @@ Minden alvás a közös `enterDeepSleep()`-en megy át:
 
 ```mermaid
 flowchart TD
-    IN([enterDeepSleep timerUs]) --> W["waitForConfigWrite()<br>fájlírás közben nem alszunk"]
+    IN([enterDeepSleep timerUs]) --> SV["saveEventLog()<br>a napló kiírása a fájlrendszerre<br>(minden alvás előtt)"]
+    SV --> W["lockConfigBeforeShutdown()<br>fájlírás közben nem alszunk<br>(a zárat meg is szerzi)"]
     W --> OFF["LED-ek + relé = LOW<br>relé hold: gpio_hold_en + deep_sleep_hold<br>WiFi le, webszerver le, Serial le"]
-    OFF --> ARM["Minden ébresztőforrás törlése,<br>majd: reset gomb (D1 = GPIO3, RTC-képes)<br>élesítése LOW szintre"]
+    OFF --> DET["A gomb-megszakítások leválasztása<br>(ugyanazok a GPIO regiszterek)"]
+    DET --> ARM["Minden ébresztőforrás törlése,<br>majd: reset gomb (D1 = GPIO3, RTC-képes)<br>élesítése LOW szintre"]
     ARM --> TMR{"timerUs > 0?"}
     TMR -->|igen| T1["Timer élesítése"]
     TMR -->|"nem, DE a gombélesítés hibázott"| T2["Biztonsági háló:<br>1 órás timer mégis"]
@@ -270,7 +278,7 @@ flowchart TD
 | `internetFailSleep()` | 4 router reset után sincs internet | `EV_SLEEP(2)` | 1 óra | igen |
 | `apSleep()` | AP portál 5 perc tétlenség | `EV_SLEEP(3)` | – | igen |
 | `fatalSleep()` | végzetes hiba, 5 perc villogás után | `EV_SLEEP(4)` | – | igen |
-| beragadt gomb | reset/wifireset LOW induláskor | `EV_STUCK_BUTTON` | 60 s | **nem** (szándékosan) |
+| beragadt gomb | reset/wifireset LOW induláskor **és 3 s után is** | `EV_STUCK_BUTTON` | 60 s | **nem** (szándékosan) |
 
 Ébredéskor az eszköz teljesen újraindul (`setup()`, 2. ábra); a RAM-beli
 számlálók nullázódnak, az RTC memóriában csak a `rtcRetryRounds`, a watchdog
@@ -280,4 +288,4 @@ számláló és a diagnosztikai napló él túl.
 
 *Az ábrák a `bazsi_router_reboot.ino` aktuális állapotát dokumentálják.
 Módosításkor a kóddal együtt frissítendők – a viselkedést a `test/` alatti
-196 forgatókönyves (640 ellenőrzéses) tesztkészlet rögzíti.*
+277 forgatókönyves (1015 ellenőrzéses) tesztkészlet rögzíti.*

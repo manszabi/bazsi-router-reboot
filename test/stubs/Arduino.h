@@ -87,6 +87,25 @@ static const uint8_t D8 = 8;
 static const uint8_t D9 = 9;
 static const uint8_t D10 = 10;
 
+// --- megszakitasok ---
+// A sketch attachInterrupt()-tel reteszeli a gombnyomasokat. A harness NEM
+// szimulal valodi megszakitasokat: a regisztralt kezelot a teszt hivja meg
+// kezzel (simIsr), miutan beallitotta a lab allapotat. Igy pontosan az
+// ellenorizheto, amit a valodi ISR is latna.
+typedef void (*IsrFn)();
+extern std::map<int, IsrFn> g_isr;
+extern std::map<int, int>   g_isrMode;
+void attachInterrupt(uint8_t pin, IsrFn fn, int mode);
+void detachInterrupt(uint8_t pin);
+static inline uint8_t digitalPinToInterrupt(uint8_t p) { return p; }
+// A teszt ezzel "sut el" egy elt: eloszor allitsd be a g_pinRead[pin]-t.
+void simIsr(int pin);
+
+// --- gomb-mintavetelezes merese (lasd main_stub.cpp) ---
+extern bool     g_btnTrack;
+extern uint32_t g_btnLastPoll;
+extern uint32_t g_btnMaxGap;
+
 // --- szimulált idő / naplózás ---
 extern uint32_t g_millis;
 extern std::vector<std::string> g_log;
@@ -219,11 +238,19 @@ protected:
   std::string buf_;
 };
 
+// A soros port ELETCIKLUSA merheto: mikor indult, mikor ment ki az elso sor
+// (a CDC beallasa utan kell), lezarult-e rendezetten (flush, majd end), es
+// irtunk-e barmit a lezaras UTAN (az elveszne).
+extern unsigned long g_serialBaud;
+extern uint32_t g_serialFirstWriteMs;   // az elso kiirt sor ideje
+extern int      g_serialWritesAfterEnd; // end() utani irasok szama
+extern bool     g_serialFlushedAll;     // az utolso iras ota volt-e flush
+
 class HardwareSerial : public Print {
 public:
-  void begin(unsigned long) { g_serialOn = true; }
-  void end() { g_serialOn = false; }
-  void flush() {}
+  void begin(unsigned long b) { g_serialOn = true; g_serialBaud = b; }
+  void end();
+  void flush();
   operator bool() const { return true; }
 };
 extern HardwareSerial Serial;
@@ -290,10 +317,40 @@ inline size_t Print::println(const IPAddress& a) { buf_ += a.str(); flushLine();
 // hogy a "masik lapkan nem mukodik" viselkedes ellenorizheto legyen.
 extern uint64_t g_efuseMac;
 
+// A heap merhetove tetele. A valodi ertekeket a forgatokonyv allitja; a
+// g_heapDrainPerCall-lal modellezheto egy LASSU SZIVARGAS is (minden lekerdezes
+// ennyivel kevesebbet ad vissza), ami nelkul a kuszob atlepese nem lenne
+// jatszhato.
+extern uint32_t g_freeHeap;
+extern uint32_t g_minFreeHeap;
+extern uint32_t g_maxAllocHeap;
+extern uint32_t g_heapDrainPerCall;
+extern int      g_heapQueries;
+
 class EspClass {
 public:
   void restart() { simLog("ESP.restart"); throw RestartSignal{}; }
   const char* getChipModel() { return "ESP32-C3"; }
   uint64_t getEfuseMac() { return g_efuseMac; }
+  uint32_t getFreeHeap();
+  uint32_t getMinFreeHeap() { return g_minFreeHeap; }
+  uint32_t getMaxAllocHeap();
 };
 extern EspClass ESP;
+
+// --- Ido (NTP) modell ------------------------------------------------------
+// A valodi eszkozon a configTzTime() elinditja az SNTP klienst, es a
+// rendszerora a hatterben all be. A harness ezt egyetlen valtozoval modellezi:
+// g_epochNow = 0 -> nincs szinkron (a time() 1970-et ad), egyebkent ennyi.
+extern uint32_t g_epochNow;
+extern int      g_ntpStarts;
+void configTzTime(const char* tz, const char* server);
+
+// A time() ATIRANYITASA. A hoston a valodi time() a mai datumot adna, es
+// azzal a "nincs meg oraszinkron" ag SOSEM futna le - epp az, amit meg kell
+// merni. A <time.h>-t ITT hozzuk be, es CSAK utana definialjuk a makrot: a
+// sketch kesobbi #include <time.h> sora igy az include guard miatt ures, tehat
+// a makro sosem ir at egy fejlecbeli deklaraciot.
+#include <time.h>
+time_t stub_time(time_t* out);
+#define time(p) stub_time(p)

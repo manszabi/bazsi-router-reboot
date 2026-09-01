@@ -22,6 +22,9 @@ private:
 class AsyncResponseStream : public Print {
 public:
   std::string out;
+  // A valodi AsyncResponseStream a Print-tol orokli a write(uint8_t)-ot; a
+  // sketch ezzel ir ki egyetlen karaktert (HTML-escape).
+  size_t write(uint8_t c) { out += (char)c; return 1; }
   size_t print(const char* s) { out += s; return 0; }
   size_t print(const String& s) { out += s.c_str(); return 0; }
   size_t printf(const char* f, ...) {

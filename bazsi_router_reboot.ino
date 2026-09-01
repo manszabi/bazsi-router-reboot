@@ -15,6 +15,7 @@
 // Az esp_timer_get_time()-ot a core is expliciten includeolja (esp32-hal-misc.c),
 // nem hagyatkozik a FreeRTOS fejlecek atteteles behuzasara. Mi sem tesszuk.
 #include "esp_timer.h"
+#include <time.h>
 // A rele labanak rogzitese deep sleep idejere: gpio_hold_en() +
 // gpio_deep_sleep_hold_en(). A C3-on a digitalis padek (GPIO6-21) holdjat csak
 // ez a paros tartja meg alvas alatt (driver/gpio.h, a gpio_hold_en 3. megj.).
@@ -43,21 +44,16 @@ const char PARAM_GATEWAY[] = "gateway";
   "document.onvisibilitychange=()=>document.hidden||f()</script>"
 const char KEEPALIVE_JS[] = KEEPALIVE_JS_LIT;
 
-// A beállító űrlap. Programba építve él, a flash .rodata szekciójában: nincs
-// külön feltöltendő data/ mappa, és a LittleFS-re csak a négy konfigurációs
-// fájl kerül. Így a fájlrendszer állapotától FÜGGETLENÜL mindig van használható
-// űrlap - korábban egy elfelejtett LittleFS-feltöltés konfigurálhatatlanná
-// tette az eszközt.
-const char CONFIG_FORM[] =
+// A beállító űrlap FEJLÉCE és LÁBLÉCE. A középső, mezőket tartalmazó rész
+// futásidőben generálódik, mert a mentett SSID-t, IP-t és gateway-t
+// ELŐKITÖLTVE mutatjuk - lásd sendConfigForm().
+const char FORM_HEAD[] =
   "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
   "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
   "<title>ESP Wi-Fi Manager</title></head><body>"
   "<h2>ESP Wi-Fi Manager</h2>"
-  "<form action=\"/\" method=\"POST\">"
-  "SSID <input name=\"ssid\" maxlength=\"32\" required><br>"
-  "Password <input name=\"pass\" type=\"password\" maxlength=\"63\"><br>"
-  "IP <input name=\"ip\" maxlength=\"15\" placeholder=\"opcionalis\"><br>"
-  "Gateway <input name=\"gateway\" maxlength=\"15\" placeholder=\"opcionalis\"><br>"
+  "<form action=\"/\" method=\"POST\">";
+const char FORM_TAIL[] =
   "<small>Statikus IP-hez mindket cimmezot toltsd ki, csak IPv4. "
   "DHCP-hez hagyd mindkettot uresen.</small><br>"
   "<input type=\"submit\" value=\"Submit\"></form>"
@@ -208,6 +204,76 @@ constexpr uint32_t RESTART_GRACE_MS = 2000;  // válasz kiküldése újraindít�
 constexpr uint64_t SLEEP_DURATION_US = 3600ULL * 1000000ULL;      // 1 óra
 constexpr uint64_t STUCK_BUTTON_SLEEP_US = 60ULL * 1000000ULL;    // 60 másodperc
 
+// Ennyi ideig várunk a beragadtnak látszó gomb ELENGEDÉSÉRE, mielőtt tényleg
+// beragadásnak minősítenénk.
+//
+// MIÉRT KELL EZ? A reset gomb LOW SZINTRE ébreszt az alvásból, tehát a
+// felhasználó szükségképpen MÉG NYOMVA TARTJA, amikor az eszköz bootolni kezd.
+// Minden gombos ébredés ilyen. Ha a setup() egyetlen pillanatnyi digitalRead()
+// alapján döntene, egy teljesen normális, fél-egy másodperces gombnyomás
+// "beragadásnak" minősülne, és az eszköz azonnal visszaaludna 60 mp-re - a
+// felhasználó szemszögéből "a gomb nem csinál semmit", pedig épp ő nyomta meg.
+//
+// Mérve (SH3): a döntés régen a Serial.begin() utáni várakozás hosszától
+// függött, ami viszont attól, hogy VAN-E USB GAZDA. Bedugott USB-vel a határ
+// ~600 ms volt (egy szándékos gombnyomás bőven fölé megy), USB nélkül ~3,5 mp.
+// Vagyis ugyanaz a gombnyomás máshogy sült el aszerint, hogy be van-e dugva a
+// kábel. Ez a konstans a küszöböt kimondottá és a kábeltől függetlenné teszi.
+//
+// A hosszát nem kell finomhangolni: egy TÉNYLEG beragadt gomb sosem enged el,
+// tehát a 3 mp csak annyit késleltet, ami után úgyis a 60 mp-es alvás jön.
+constexpr uint32_t STUCK_BUTTON_CONFIRM_MS = 3000;
+
+// --- Valos ido (NTP) -------------------------------------------------------
+//
+// MIERT KELL? A naplo eddig csak uptime belyeget hordozott, ami minden
+// indulaskor nullarol kezd - ket bootolas esemenyei igy nem rendezhetok
+// egymashoz. A LittleFS-re mentett naplo ertelmezesehez viszont epp ez kell:
+// melyik a frissebb, a fajlban levo vagy az RTC-ben levo?
+//
+// A szinkronizalas NEM BLOKKOL: a configTzTime() csak elinditja az SNTP
+// klienst, a valasz a hatterben erkezik. Amig nem erkezett meg, az epoch mezo
+// 0 marad - a naplo attol meg mukodik, csak uptime-ot mutat.
+constexpr char NTP_SERVER[] = "hu.pool.ntp.org";
+// Magyarorszag: CET/CEST, a nyari idoszamitas valtasaival egyutt (POSIX TZ).
+constexpr char NTP_TZ[] = "CET-1CEST,M3.5.0,M10.5.0/3";
+// Ennel korabbi ertek nem lehet valodi szinkron (2025-01-01). A rendszerora
+// szinkron nelkul 1970-bol indul, tehat egy egyszeru also korlat elegendo.
+constexpr uint32_t NTP_MIN_VALID_EPOCH = 1735689600UL;
+
+// --- Heap felugyelet -------------------------------------------------------
+//
+// MIERT KELL? A sketch maga semmit nem allokal dinamikusan, az
+// ESPAsyncWebServer / AsyncTCP / a Wi-Fi driver viszont igen. Egy lassu
+// szivargas vagy elaprozodas honapokig eszrevetlen marad, aztan egy nap az
+// eszkoz "csak ugy" nem mukodik - allokacios hiba eseten a legtobb konyvtar
+// csendben elbukik, nem panikol. Ezert merunk, kiirunk, es vegso esetben
+// magunktol ujraindulunk, MIELOTT barmi elromlana.
+constexpr uint32_t HEAP_CHECK_INTERVAL_MS = 10 * 1000;        // mintaveteli koz
+constexpr uint32_t HEAP_LOG_INTERVAL_MS   = 30 * 60 * 1000;   // rendszeres sor
+
+// A KET KUSZOB. A C3-on Wi-Fi + webszerver mellett a tipikus szabad heap
+// 120-200 KB. A Wi-Fi driver es az AsyncTCP egyszerre tobb KB-os tomboket is
+// ker, ezert nem a nulla a veszelyes hatar, hanem az a szint, ahol egy
+// szokasos foglalas mar elbukhat.
+constexpr uint32_t HEAP_WARN_BYTES  = 25000;   // figyelmeztetes (naplo + soros)
+constexpr uint32_t HEAP_CRIT_BYTES  = 12000;   // ujrainditas
+
+// ELAPROZODAS. Lehet 30 KB szabad heap ugy, hogy a legnagyobb OSSZEFUGGO tomb
+// csak 4 KB - ilyenkor a szabad heap onmagaban megnyugtato, kozben a
+// foglalasok mar buknak. Ezert a legnagyobb tombot kulon is nezzuk.
+constexpr uint32_t HEAP_CRIT_BLOCK_BYTES = 6000;
+
+// A kritikus szintnek KI KELL TARTANIA. Egy pillanatnyi melypont (egy epp
+// futo HTTP keres, egy nagyobb valasz osszeallitasa) nem szivargas. Harom
+// egymas utani minta = 30 masodperc.
+constexpr uint8_t HEAP_CRIT_SAMPLES = 3;
+
+// Es a heap miatti ujrainditasnak is van felso hatara: ha az ujraindulas sem
+// segit (tartos elaprozodas, valodi szivargas mar indulaskor), a boot loop
+// rosszabb, mint a megallas. Ugyanaz a politika, mint a watchdognal.
+constexpr uint32_t MAX_HEAP_RESTARTS = 3;
+
 // A hosszú várakozások (firstStartDelay, RESET_DELAY) korai lezárása.
 //
 // Mindkét várakozás arra való, hogy a router bootolására időt hagyjunk - de ha
@@ -304,8 +370,6 @@ enum ConfigStatus : uint8_t {
 State currentState = TESTING_STATE;
 DeviceMode deviceMode = MODE_MONITOR;
 
-// Az aszinkron webszerver callbackjéből nem szabad blokkolni/újraindítani,
-// ezért csak jelzünk, az újraindítást a loop() végzi el.
 // Sikerült-e a LittleFS csatolása. Ha nem, a beállítások nem menthetők.
 bool fsReady = false;
 
@@ -314,12 +378,46 @@ bool fsReady = false;
 // definíció szerint helyes - ott nincs mit ellenőrizni.
 bool staticConfigActive = false;
 
+// MEGSZAKITAS-ALAPU GOMBRETESZ
+//
+// MIERT KELL? A gombokat a sajat varakozo ciklusaink 10 ms-onkent nezik - de
+// egy futo HTTP teszt alatt nem tudjak: a http.GET() a core blokkolo hivasa,
+// nincs benne visszahivas. Ez az ablak halott DNS mellett 33 masodperc (merve:
+// BTN2), es egy rovid koppintas nyom nelkul elveszett benne, mert a lab
+// allapotat csak mintavetelkor olvastuk.
+//
+// A MEGOLDAS NEM az, hogy a megszakitas azonnal cselekszik - az kikerulne a
+// debounce-t, es egy zajtuske ujrainditana az eszkozt (lasd B1 teszt). Ehelyett
+// a megszakitas MEGMERI a lenyomas hosszat: a lefuto elen jegyzi az idot, a
+// felfuton pedig csak akkor reteszel, ha a gomb legalabb BUTTON_DEBOUNCE_MS-ig
+// lent volt. Igy a debounce ugyanaz marad, csak hardveresen tortenik - es
+// akkor is mukodik, amikor a loop epp nem tud mintavetelezni.
+//
+// A retesz nem kerul meg semmi mast: a savingConfig kaput es a konfigzarat a
+// feldolgozas ugyanugy tiszteletben tartja, tehat egy blokkolo szakasz alatt
+// erkezett gombnyomas csak KESIK, de nem vagja felbe a fajlirast.
+volatile bool btnResetLatched = false;
+volatile bool btnWifiResetLatched = false;
+volatile uint32_t btnResetDownAt = 0;
+volatile uint32_t btnWifiResetDownAt = 0;
+
 // A korai kilépés próbáinak sebességkorlátozó órái. Nem a TimingState-ben
 // vannak, mert az a struct a valódi állapotgép idejeit tartja; ez csak
 // "mikor pingettünk utoljára". Kettő kell belőlük: a két várakozás egymás
 // után is lefuthat ugyanabban a körben.
 uint32_t resetDelayProbeLast = 0;   // FAILURE_STATE, RESET_DELAY
 uint32_t firstStartProbeLast = 0;   // handleFirstStart(), firstStartDelay
+
+// A heap felugyelet orai es jelzoi. SZANDEKOSAN fajl-szintu globalisok, nem
+// fuggveny-szintu static-ok: a sketch tobbi per-boot allapota (resetDelayProbeLast,
+// firstStartProbeLast, testState, timing) is igy all, es a teszt-harness
+// hidegindulasa (coldBoot) igy tudja mindet egy helyen visszaallitani. Egy
+// rejtett static ugyanezt a szerepet toltene be a valos eszkozon, de a
+// forgatokonyvek kozott atszivarogna.
+uint32_t heapCheckLast = 0;    // az utolso meres ideje
+uint32_t heapLogLast = 0;      // az utolso rendszeres allapotsor ideje
+uint8_t  heapCritStreak = 0;   // hany egymas utani kritikus meres volt
+bool     heapWarnActive = false;  // szol-e eppen a figyelmeztetes
 
 // Fut-e már a watchdog. Az initWatchdog() a setup() elején fut, de EL IS
 // BUKHAT (kikapcsolt TWDT, sikertelen feliratkozás) - és ilyenkor szándékosan
@@ -346,7 +444,9 @@ RTC_DATA_ATTR uint32_t rtcRetryRounds = 0;
 // --- Diagnosztikai eseménynapló ---------------------------------------------
 // RTC_NOINIT_ATTR: túléli a deep sleepet, a watchdog resetet ÉS a reset gombot
 // is - vagyis pont azokat a hibákat, amiket ki akarunk vizsgálni. Csak az
-// áramtalanítás törli. Az ESP32-C3-on ~8 KB RTC fast memória van, ez 264 bájt.
+// áramtalanítás törli. Az ESP32-C3-on ~8 KB RTC memória van; ez a napló
+// 392 bájt (2 x 4 bájt fejléc + 32 x 12 bájt bejegyzés), a program összes RTC
+// állapota együtt is ~420 bájt.
 enum EventCode : uint8_t {
   EV_BOOT = 1,          // param: reset ok (esp_reset_reason_t)
   EV_WIFI_OK = 2,       // param: kör sorszám, amiben sikerült
@@ -358,27 +458,114 @@ enum EventCode : uint8_t {
   EV_CONFIG_SAVED = 7,  // param: 0
   EV_SLEEP = 8,         // param: ok (1=retry 2=internet 3=AP timeout 4=fatal)
   EV_FATAL = 9,         // param: ok (1=FS mount 2=konfig olvasás 3=watchdog
-                        //           4=wifireset törlés sikertelen)
+                        //           4=wifireset törlés sikertelen
+                        //           5=tartósan kevés a szabad heap)
   EV_WDT_RESET = 10,    // param: hányadik watchdog reset
   EV_STUCK_BUTTON = 11, // param: 0 = reset gomb, 1 = wifireset gomb
-  EV_GW_UNREACHABLE = 12  // param: 1 = reset elott, 2 = a reset utan is
+  EV_GW_UNREACHABLE = 12, // param: 1 = reset elott, 2 = a reset utan is
+  EV_LOW_HEAP = 13,     // param: a szabad heap KiB-ban, a kuszob atlepesekor
+  EV_HEAP_RESTART = 14  // param: a szabad heap KiB-ban az ujrainditas elott
 };
 
-// Pontosan 8 bájt. A kitöltő mező explicit, hogy a RTC memóriában tárolt
-// elrendezés akkor se változzon, ha a fordító igazítási szabályai eltérnek.
+// Pontosan 12 bájt. A kitöltő mező explicit, hogy a RTC memóriában tárolt
+// elrendezés akkor se változzon, ha a fordító igazítási szabályai eltérnek -
+// és ez most már nem csak az RTC-re igaz: ez a struktúra megy ki bájtról
+// bájtra a LittleFS-re mentett naplófájlba is (lásd saveEventLog()), tehát a
+// méret és a sorrend a FÁJLFORMÁTUM része. Ha valaha változik, a fájl
+// verziószámát (EVFILE_VERSION) is emelni kell.
 struct EventEntry {
   uint32_t uptimeSec;
+  uint32_t epoch;     // valos ido (unix), 0 ha az NTP meg nem szinkronizalt
   uint16_t param;
   uint8_t code;
   uint8_t reserved;
 };
 
 constexpr uint8_t EVLOG_SIZE = 32;
-constexpr uint32_t EVLOG_MAGIC = 0x42415A4CUL;  // "BAZL"
+// A magic EGYBEN VERZIOJELZO is. Az RTC NOINIT terulet a szoftveres resetet -
+// tehat egy SOROS PORTON KERESZTULI FIRMWARE FRISSITEST is - tulel: az uj
+// firmware a regi tartalmat talalja ott. Ha kozben az EventEntry elrendezese
+// valtozott (mint amikor 8-rol 12 bajtra nott az epoch mezovel), a regi
+// bejegyzesek UJ elrendezeskent ertelmezve szemetet adnanak - es a
+// saveEventLog() ezt a szemetet meg ki is irna a fajlrendszerre.
+//
+// Ezert: HA AZ EventEntry VAGY AZ EVLOG_SIZE VALTOZIK, EZT A MAGIC-ET IS
+// EMELNI KELL. Az uj firmware igy ervenytelennek latja a regi naplot, es
+// tiszta lappal indul - egyetlen bootnyi naplo elvesztese az ara, cserebe
+// nincs hamis diagnosztika.
+constexpr uint32_t EVLOG_MAGIC = 0x42415A4DUL;  // "BAZM" (v2: 12 bajtos bejegyzes)
 RTC_NOINIT_ATTR uint32_t rtcEvMagic;
 RTC_NOINIT_ATTR uint32_t rtcEvNext;   // következő írási pozíció (monoton nő)
 RTC_NOINIT_ATTR EventEntry rtcEvents[EVLOG_SIZE];
 
+// --- A naplo mentese LittleFS-re -------------------------------------------
+//
+// MIERT? Az RTC naplo az aramszunetet NEM eli tul - epp azt a hibat nem, ami
+// utan a leginkabb tudni akarnank, mi tortent elotte. Ezert a program a
+// FONTOS pillanatokban kiirja a naplot a fajlrendszerre is: router reset
+// elott, AP modba valtas elott, es az 1 oras alvas elott. Ezek azok a
+// pontok, ahol vagy hosszabb ido kovetkezik, vagy az eszkoz beavatkozik -
+// mindketto olyan, amit egy kesobbi vizsgalat latni akar.
+//
+// A fajl a teljes korpuffer pillanatkepe, tehat mindig "az utolso 32 esemeny,
+// ahogy a legutobbi fontos pillanatban allt".
+constexpr char evLogPath[] = "/evlog.bin";
+constexpr uint32_t EVFILE_MAGIC = 0x42415A46UL;   // "BAZF"
+constexpr uint16_t EVFILE_VERSION = 1;
+
+// A fajl fejlece. Fix meretu, es a struktura elrendezese a formatum resze.
+struct EvFileHeader {
+  uint32_t magic;
+  uint16_t version;
+  uint16_t count;        // hany bejegyzes kovetkezik (0..EVLOG_SIZE)
+  uint32_t evNextAtSave; // az rtcEvNext erteke a mentes pillanataban
+  uint32_t savedEpoch;   // mikor mentettuk (0 ha nem volt NTP)
+  uint32_t savedUptime;  // uptime a mentes pillanataban
+};
+
+// Az rtcEvNext erteke a legutobbi SIKERES mentesnel. Ket dolgot ad:
+//  - nem irunk feleslegesen (ha azota nem tortent esemeny, nincs mit menteni),
+//  - es igy a flash kopasa a tenyleges esemenyekhez igazodik.
+RTC_NOINIT_ATTR uint32_t rtcSavedEvNext;
+
+// --- A heap miatti ujraindulas atvitele ------------------------------------
+//
+// MIT KELL ATVINNI? Egy ESP.restart() a RAM-ot torli, tehat minden sima
+// globalis elveszik: testState, timing, uiFlags. A tobbsegukert nem kar - a
+// timing ujraszamolodik, a firstStart varakozas ujra lefut (es a proba
+// perceken belul le is zarja), a cycleIndex/failedCount pedig csak azt
+// mondja meg, hol tart az OT teszt kozott.
+//
+// EGY kivetel van, es annal az elvesztes VISELKEDESI hibat okozna: a
+// testState.resetEvents. Ez szamolja, hanyszor indítottuk mar ujra a routert
+// ebben a sorozatban, es ez viszi el az eszkozt az otodiknel az 1 oras
+// alvasba (internetFailSleep). Ha egy heap-ujraindulas ezt nullazna, a
+// szamlalo mindig elolrol kezdene, es az eszkoz VEGTELENUL ujraindithatna a
+// routert ahelyett, hogy elalszik. Ezert ezt az egyet atvisszuk.
+//
+// A 0xFF a "nincs atvitel" jelolese: a setup() egyszer felhasznalja, majd
+// vissza is allitja, hogy egy KESOBBI, mas okbol tortent ujraindulas (gomb,
+// watchdog) ne allitson vissza elavult erteket.
+constexpr uint32_t HEAP_MAGIC = 0x42415A48UL;   // "BAZH"
+constexpr uint8_t  CARRY_NONE = 0xFF;
+RTC_NOINIT_ATTR uint32_t rtcHeapMagic;
+RTC_NOINIT_ATTR uint32_t rtcHeapRestarts;      // egymast koveto heap-ujrainditasok
+RTC_NOINIT_ATTR uint8_t  rtcCarryResetEvents;  // atvitt resetEvents (CARRY_NONE = nincs)
+// ...es a 2 napos ablak szamlaloja. MIERT KELL EZ IS ATVINNI?
+//
+// Az rtcRetryRounds SZANDEKOSAN RTC_DATA_ATTR: a deep sleepet tuleli, de
+// bekapcsolaskor ES SZOFTVERES RESETRE nullazodik - "a felhasznaloi
+// beavatkozas tiszta 2 napos ablakkal indit". A gombnyomasra ez helyes.
+//
+// A heap miatti ujraindulas viszont NEM felhasznaloi beavatkozas, hanem a sajat
+// dontesunk - megis ugyanolyan szoftveres reset, tehat ugyanugy nullazna a
+// szamlalot. Az eszkoz igy SOHA nem erne el a 2 napos hatarra, vagyis sosem
+// menne AP beallito modba: orokke ujraprobalkozna, es a felhasznalo sosem
+// kapna eselyt a konfiguracio javitasara. Ezert ezt is atvisszuk.
+RTC_NOINIT_ATTR uint32_t rtcCarryRetryRounds;
+
+// Az aszinkron webszerver callbackjéből nem szabad blokkolni/újraindítani,
+// ezért csak jelzünk, az újraindítást a loop() végzi el.
 volatile bool restartPending = false;
 volatile uint32_t restartAt = 0;
 
@@ -392,12 +579,15 @@ volatile bool savingConfig = false;
 void printUptime();
 void resetbutton();
 void wifiresetbutton();
+void armButtonLatches();
+void restartFromButton(const char* reason);
+void doWifiReset();
 void blockingDelay(uint32_t duration);
 void waitWithButtons(uint32_t duration);
 bool waitWithButtonsUntilOnline(uint32_t duration);
 bool onlineProbe();
 bool onlineProbeDue(uint32_t& lastProbe, uint32_t now);
-void waitForConfigWrite();
+void lockConfigBeforeShutdown();
 void internetFailSleep();
 void fatalSleep();
 void apSleep();
@@ -410,11 +600,25 @@ bool reset_device();
 void logEvent(EventCode code, uint16_t param);
 bool beginConfigWrite();
 void startConfigPortal();
+const char* resetReasonName(esp_reset_reason_t r);
+void sendConfigForm(AsyncWebServerRequest* request);
+void printHtmlEscaped(AsyncResponseStream* r, const char* s);
 void enterFatal(const char* reason);
 void fatalHalt(const char* reason);
 void enterDeepSleep(uint64_t timerUs);
 void holdRelayForSleep();
 bool stuckCycleAlreadyLogged(uint16_t which);
+bool lastEventWas(uint8_t code);
+int pressedButtonNow();
+void checkHeap(uint32_t now);
+bool saveEventLog(const char* reason);
+bool loadEventLogHeader(EvFileHeader& fej);
+bool loadEventLogEntries(const EvFileHeader& fej, EventEntry* ki);
+uint32_t nowEpoch();
+void startNtp();
+void ensureNtp();
+void initHeapState();
+void applyHeapCarry();
 bool initWiFi();
 bool reconnectWifi();
 bool writeConfigValue(fs::FS& fs, const char* path, const char* message);
@@ -437,15 +641,41 @@ void logEvent(EventCode code, uint16_t param) {
   if (rtcEvMagic != EVLOG_MAGIC) {
     rtcEvMagic = EVLOG_MAGIC;
     rtcEvNext = 0;
+    rtcSavedEvNext = 0;
     memset(rtcEvents, 0, sizeof(rtcEvents));
   }
   EventEntry& e = rtcEvents[rtcEvNext % EVLOG_SIZE];
   e.uptimeSec = (uint32_t)(esp_timer_get_time() / 1000000);
+  // Ha az NTP mar szinkronizalt, a valos idot is eltesszuk. Enelkul csak
+  // uptime van, ami minden indulaskor nullarol kezd - ket bootolas esemenyei
+  // igy nem rendezhetok egymashoz. A time() nem blokkol es nem allokal.
+  e.epoch = nowEpoch();
   e.code = (uint8_t)code;
   e.param = param;
   e.reserved = 0;
   rtcEvNext++;
   portEXIT_CRITICAL(&evLogMux);
+}
+
+// Az indulás okának EMBERI neve. A /log oldalon eddig a nyers enum-szám
+// szerepelt ("Utolso indulas oka: 8"), amihez a felhasználónak az ESP-IDF
+// fejlécét kellett volna kikeresnie - épp azt a diagnózist nehezítve, amiért
+// az oldal egyáltalán van. A számot zárójelben megtartjuk, hogy egy
+// hibajelentés továbbra is egyértelmű legyen.
+const char* resetReasonName(esp_reset_reason_t r) {
+  switch (r) {
+    case ESP_RST_POWERON:    return "bekapcsolas / aramtalanitas";
+    case ESP_RST_EXT:        return "kulso reset lab";
+    case ESP_RST_SW:         return "szoftveres ujrainditas (ESP.restart)";
+    case ESP_RST_PANIC:      return "PANIC - a program osszeomlott";
+    case ESP_RST_INT_WDT:    return "megszakitas-watchdog";
+    case ESP_RST_TASK_WDT:   return "TASK WATCHDOG - a loop megallt";
+    case ESP_RST_WDT:        return "egyeb watchdog";
+    case ESP_RST_DEEPSLEEP:  return "ebredes deep sleepbol";
+    case ESP_RST_BROWNOUT:   return "BROWNOUT - leesett a tapfeszultseg";
+    case ESP_RST_CPU_LOCKUP: return "CPU lefagyas";
+    default:                 return "ismeretlen";
+  }
 }
 
 const char* eventName(uint8_t code) {
@@ -462,6 +692,8 @@ const char* eventName(uint8_t code) {
     case EV_WDT_RESET: return "WDT RESET";
     case EV_STUCK_BUTTON: return "STUCK BUTTON";
     case EV_GW_UNREACHABLE: return "GW UNREACH";
+    case EV_LOW_HEAP: return "LOW HEAP";
+    case EV_HEAP_RESTART: return "HEAP RESTART";
     default: return "?";
   }
 }
@@ -747,6 +979,445 @@ void enterFatal(const char* reason) {
 
 // Watchdog/panic miatti újraindulások figyelése. Ha a program ismételten
 // megakad, az újraindítgatás önmagában nem megoldás - inkább jelezzünk.
+// A heap allapot RTC blokkjanak felelesztese. Ugyanaz a minta, mint a
+// watchdog szamlalonal: bekapcsolas utan a NOINIT terulet tartalma szemet.
+// A rendszerora aktualis erteke, ha az NTP mar szinkronizalt - kulonben 0.
+// Nem blokkol, nem allokal, es szinkron nelkul is biztonsagos.
+uint32_t nowEpoch() {
+  const time_t t = time(nullptr);
+  if (t < (time_t)NTP_MIN_VALID_EPOCH) {
+    return 0;
+  }
+  return (uint32_t)t;
+}
+
+// Elindult-e mar az oraszinkron a MOSTANI kapcsolaton?
+bool ntpStarted = false;
+// Bejelentettuk-e mar a soros porton ebben a bootban? (Lasd startNtp().)
+bool ntpAnnounced = false;
+
+// Az SNTP kliens elinditasa. CSAK elinditja: a valasz a hatterben erkezik, a
+// hivas nem var ra. Tobbszor is hivhato (ujracsatlakozasnal), a kliens
+// ujraindul. A rendszeroraval egyutt a nyari idoszamitas kezelese is beall.
+//
+// FONTOS: a valos ido a DEEP SLEEPET TULELI. Az esp_timer (es igy a millis())
+// ebredeskor nullarol indul, a gettimeofday() alapu rendszerora viszont az RTC
+// orabol jon, tehat egy 1 oras alvas utan is jo idot mutat - epp ezert
+// hasznalhato a naplo bejegyzesek rendezesere bootolasokon at.
+void startNtp() {
+  configTzTime(NTP_TZ, NTP_SERVER);
+  // A KIIRAS CSAK AZ ELSO ALKALOMMAL. Az SNTP klienst minden
+  // ujracsatlakozasnal ujra kell inditani (a disconnect a netifet is
+  // lebontja), egy PISLAKOLO kapcsolat viszont masodpercenkent tobbszor is
+  // ad ilyen atmenetet - a kiirast tehat ugyanaz a spam-vedelmi szabaly koti,
+  // mint a WIFI LOST sorokat: csak a sorozat elso tagja beszel.
+  // (Merve: LOG4, ami a soros sor/perc erteket is meri.)
+  //
+  // A jelzo FAJL-SZINTU, nem fuggveny-szintu static - ugyanaz a szabaly, mint
+  // a heap felugyelet orainal: a sketch per-boot allapota egy helyen legyen
+  // visszaallithato (a teszt-harness hidegindulasa igy tudja nullazni).
+  if (ntpAnnounced) {
+    return;
+  }
+  ntpAnnounced = true;
+  printUptime();
+  Serial.print("NTP inditva: ");
+  Serial.println(NTP_SERVER);
+}
+
+// Az oraszinkron gondozasa: elinditja, AMINT van halozat - barmelyik uton is
+// jott letre a kapcsolat.
+//
+// MIERT NEM AZ initWiFi()-BOL? Mert nem minden kapcsolat rajta keresztul jon
+// letre. Harom ag kerulte volna meg:
+//   - az initWiFi() "mar csatlakozva vagyunk" korai visszaterese,
+//   - a handleFirstStart() korai kilepese (a proba igazolta a kapcsolatot,
+//     tehat nincs mit ujracsatlakoztatni) - ez a LEGGYAKORIBB helyreallasi
+//     ut aramszunet utan,
+//   - es a FAILURE_STATE RESET_DELAY korai kilepese.
+// Mindharomban elmaradt volna a szinkron, es a naplo epoch mezoje vegig 0
+// maradt volna. Ezert a gondozas a loop()-bol fut, egyetlen helyrol: egy uj
+// kapcsolati ut sem tudja elfelejteni. (Merve: NV10.)
+//
+// A jelzot a kapcsolat elvesztesekor toroljuk, mert a WiFi.disconnect(true) a
+// netifet is lebontja - ujracsatlakozas utan az SNTP klienst ujra kell
+// inditani.
+void ensureNtp() {
+  if (WiFi.status() != WL_CONNECTED) {
+    ntpStarted = false;
+    return;
+  }
+  if (ntpStarted) {
+    return;
+  }
+  ntpStarted = true;
+  startNtp();
+}
+
+// Egy idopont ember altal olvashato alakja. Ha nincs valos ido, a hivo
+// dontse el, mit ir helyette - ez a fuggveny csak akkor ad true-t, ha tenyleg
+// van mit formazni.
+bool formatEpoch(uint32_t epoch, char* out, size_t outSize) {
+  if (epoch < NTP_MIN_VALID_EPOCH || outSize < 20) {
+    return false;
+  }
+  const time_t t = (time_t)epoch;
+  struct tm tmv;
+  if (localtime_r(&t, &tmv) == nullptr) {
+    return false;
+  }
+  strftime(out, outSize, "%Y-%m-%d %H:%M:%S", &tmv);
+  return true;
+}
+
+// A napló kiírása a fájlrendszerre.
+//
+// A ZAR. A muvelet ATOMIKUSAN szerzi meg a konfiguraciós zárat, ugyanazt,
+// amit a webes mentés és a wifireset gomb használ. Amíg a zár a miénk:
+//   - nem alszik el az eszköz és nem indul újra (a leállási út megvárja),
+//   - a gombok nem szólnak közbe,
+//   - és másik fájlírás sem indulhat.
+// Ha a zár épp foglalt, NEM várunk rá: a mentés kimarad. Ez helyes döntés -
+// a napló diagnosztika, nem szabad miatta blokkolni egy fontos műveletet
+// (router reset, alvás), és a következő fontos pillanatban úgyis próbáljuk.
+//
+// A zárat a végén FELOLDJUK - eltérően a leállási úttól, ami már nem tér vissza.
+bool saveEventLog(const char* reason) {
+  if (!fsReady) {
+    return false;   // nincs hova irni; ez nem hiba, csak nincs mentes
+  }
+
+  // Nincs mit menteni? Akkor a flasht sem koptatjuk. Ez nem optimalizacio,
+  // hanem a kopas es a tenyleges esemenyek osszehangolasa.
+  uint32_t evTotal;
+  portENTER_CRITICAL(&evLogMux);
+  evTotal = (rtcEvMagic == EVLOG_MAGIC) ? rtcEvNext : 0;
+  portEXIT_CRITICAL(&evLogMux);
+  if (evTotal == 0 || evTotal == rtcSavedEvNext) {
+    return false;
+  }
+
+  if (!beginConfigWrite()) {
+    printUptime();
+    Serial.println("A naplo mentese kimarad: eppen mas fajliras folyik.");
+    return false;
+  }
+
+  // Pillanatkep a mux alatt, ugyanugy, mint a /log oldalon: a naploba az
+  // async_tcp task is ir, tehat a pozicio es a tartalom egyutt nem olvashato
+  // atomian.
+  EvFileHeader fej;
+  EventEntry masolat[EVLOG_SIZE];
+  portENTER_CRITICAL(&evLogMux);
+  fej.evNextAtSave = rtcEvNext;
+  memcpy(masolat, rtcEvents, sizeof(masolat));
+  portEXIT_CRITICAL(&evLogMux);
+
+  fej.magic = EVFILE_MAGIC;
+  fej.version = EVFILE_VERSION;
+  fej.count = (uint16_t)(fej.evNextAtSave < EVLOG_SIZE ? fej.evNextAtSave : EVLOG_SIZE);
+  fej.savedEpoch = nowEpoch();
+  fej.savedUptime = (uint32_t)(esp_timer_get_time() / 1000000);
+
+  // A bejegyzeseket a LEGREGEBBITOL a legujabbig irjuk ki, kiegyenesitve -
+  // igy az olvasonak nem kell tudnia, hol tartott a korpuffer. Ehhez NEM
+  // masolunk egy ujabb 384 bajtos verempuffert: a korpuffer legfeljebb ket
+  // OSSZEFUGGO szakaszra bomlik (a kezdoponttol a tomb vegeig, majd a tomb
+  // elejetol), es ezt a kettot irjuk ki egymas utan. A loop task verme igy
+  // 384 bajttal kevesebbet visz.
+  const uint32_t elso = fej.evNextAtSave - fej.count;
+  const uint16_t kezdet = (uint16_t)(elso % EVLOG_SIZE);
+  const uint16_t elsoDb = (uint16_t)((kezdet + fej.count <= EVLOG_SIZE)
+                                     ? fej.count : (EVLOG_SIZE - kezdet));
+  const uint16_t masodikDb = (uint16_t)(fej.count - elsoDb);
+
+  printUptime();
+  Serial.print("Naplo mentese a fajlrendszerre (");
+  Serial.print(reason);
+  Serial.println(")...");
+
+  bool ok = false;
+  File f = LittleFS.open(evLogPath, FILE_WRITE);
+  if (!f) {
+    Serial.println("- a naplofajl nem nyithato irasra");
+  } else {
+    const size_t fejBytes = f.write((const uint8_t*)&fej, sizeof(fej));
+    size_t adatBytes = 0;
+    if (elsoDb) {
+      adatBytes += f.write((const uint8_t*)&masolat[kezdet],
+                           sizeof(EventEntry) * elsoDb);
+    }
+    if (masodikDb) {
+      adatBytes += f.write((const uint8_t*)&masolat[0],
+                           sizeof(EventEntry) * masodikDb);
+    }
+    f.flush();
+    f.close();
+    const size_t vart = sizeof(fej) + sizeof(EventEntry) * fej.count;
+    if (fejBytes + adatBytes != vart) {
+      Serial.print("- rovid iras: ");
+      Serial.print((unsigned)(fejBytes + adatBytes));
+      Serial.print(" / ");
+      Serial.print((unsigned)vart);
+      Serial.println(" bajt (megtelt a fajlrendszer?)");
+    } else {
+      // VISSZAOLVASAS. Ugyanaz az elv, mint a writeConfigValue()-nal: a siker
+      // nem az, hogy az iras nem panaszkodott, hanem hogy a tartalom tenyleg
+      // ott van. Csak a fejlecet olvassuk vissza - ha az ep, a fajlmeret
+      // pedig egyezik, a tartalom is kiirodott.
+      File v = LittleFS.open(evLogPath, "r");
+      if (!v) {
+        Serial.println("- verify: a fajl nem nyithato olvasasra");
+      } else {
+        EvFileHeader vissza;
+        const size_t olvasott = v.read((uint8_t*)&vissza, sizeof(vissza));
+        const size_t meret = v.size();
+        v.close();
+        if (olvasott != sizeof(vissza) || meret != vart
+            || vissza.magic != EVFILE_MAGIC || vissza.count != fej.count
+            || vissza.evNextAtSave != fej.evNextAtSave) {
+          Serial.println("- verify FAILED: a visszaolvasott fejlec nem egyezik");
+        } else {
+          ok = true;
+        }
+      }
+    }
+  }
+
+  if (ok) {
+    rtcSavedEvNext = fej.evNextAtSave;
+    Serial.print("- naplo mentve, ");
+    Serial.print((unsigned)fej.count);
+    Serial.println(" bejegyzes");
+  } else {
+    // A SIKERTELENSEG NEM VEGZETES. A naplo diagnosztika: ha nem sikerul
+    // kiirni, az RTC-ben tovabbra is ott van, es a program dolga (router
+    // reset, alvas) fontosabb. Csak szolunk rola.
+    Serial.println("- a naplo mentese NEM sikerult, az RTC naplo ettol meg el");
+  }
+  savingConfig = false;   // a zar feloldasa - itt meg VISSZATERUNK
+  return ok;
+}
+
+// A mentett naplo FEJLECENEK beolvasasa es ellenorzese. Igaz, ha a fajl
+// letezik, ep, es van benne legalabb egy bejegyzes. Minden mas esetben (nincs
+// fajl, ures fajl, rossz magic, csonka tartalom, ismeretlen verzio, a
+// fejlecben igert darabszamnal rovidebb fajl) hamis - a hivo ilyenkor az RTC
+// naplot hasznalja, kulon hibauzenet nelkul.
+//
+// MIERT KULON A FEJLEC ES A TARTALOM? Az async_tcp task verme veges, es 32
+// bejegyzes mar 384 bajt. Ha itt is puffert kernenk, a /log kezelo EGYSZERRE
+// ket ilyet tartana (az RTC pillanatkepet es a fajlet). Igy viszont eloszb
+// eldontjuk a fejlecbol, melyik forras kell - es csak azt toltjuk be, EGY
+// pufferbe.
+bool loadEventLogHeader(EvFileHeader& fej) {
+  if (!fsReady || !LittleFS.exists(evLogPath)) {
+    return false;
+  }
+  File f = LittleFS.open(evLogPath, "r");
+  if (!f) {
+    return false;
+  }
+  const size_t meret = f.size();
+  if (meret < sizeof(EvFileHeader)
+      || f.read((uint8_t*)&fej, sizeof(fej)) != sizeof(fej)) {
+    f.close();   // ures vagy csonka fajl
+    return false;
+  }
+  f.close();
+  if (fej.magic != EVFILE_MAGIC || fej.version != EVFILE_VERSION
+      || fej.count == 0 || fej.count > EVLOG_SIZE) {
+    return false;
+  }
+  // A fejlec tobbet igerhet, mint amennyi tenyleg ott van (megtelt fajlrendszer,
+  // felbeszakadt iras). Ezt MOST ellenorizzuk, hogy a betoltes mar biztos legyen.
+  return meret >= sizeof(EvFileHeader) + sizeof(EventEntry) * fej.count;
+}
+
+// A bejegyzesek betoltese - csak akkor, ha a fejlec mar rendben volt.
+bool loadEventLogEntries(const EvFileHeader& fej, EventEntry* ki) {
+  File f = LittleFS.open(evLogPath, "r");
+  if (!f) {
+    return false;
+  }
+  EvFileHeader eldobando;    // a fejlecet atugorjuk (a stream nem kereshet)
+  if (f.read((uint8_t*)&eldobando, sizeof(eldobando)) != sizeof(eldobando)) {
+    f.close();
+    return false;
+  }
+  const size_t kell = sizeof(EventEntry) * fej.count;
+  const size_t olvasott = f.read((uint8_t*)ki, kell);
+  f.close();
+  return olvasott == kell;
+}
+
+void initHeapState() {
+  if (rtcHeapMagic != HEAP_MAGIC) {
+    rtcHeapMagic = HEAP_MAGIC;
+    rtcHeapRestarts = 0;
+    rtcCarryResetEvents = CARRY_NONE;
+    rtcCarryRetryRounds = 0;
+  }
+}
+
+// Az atvitt allapot FELHASZNALASA - pontosan egyszer. A visszaallitas utan a
+// jelolot toroljuk, kulonben egy kesobbi, mas okbol tortent ujraindulas
+// (gombnyomas, watchdog) egy regi resetEvents erteket tamasztana fel.
+void applyHeapCarry() {
+  if (rtcCarryResetEvents == CARRY_NONE) {
+    return;
+  }
+  testState.resetEvents = rtcCarryResetEvents;
+  // A 2 napos ablak szamlaloja: a sajat ujraindulasunk NE nullazza. A
+  // rtcCarryResetEvents egyben az ervenyesseg jelzoje is, tehat a kettot
+  // egyutt irjuk es egyutt is hasznaljuk fel.
+  rtcRetryRounds = rtcCarryRetryRounds;
+  rtcCarryResetEvents = CARRY_NONE;
+  printUptime();
+  Serial.print("Heap miatti ujraindulas utan folytatjuk: router reset szamlalo = ");
+  Serial.print(testState.resetEvents);
+  Serial.print(" / ");
+  Serial.print(maxfailureEvents);
+  Serial.print(", ujraprobalkozasi kor = ");
+  Serial.print(rtcRetryRounds);
+  Serial.print(" / ");
+  Serial.println(MAX_RETRY_ROUNDS);
+}
+
+// A heap allapotanak nyomon kovetese: mereskovetes, ritkitott soros kiiras, es
+// vegso esetben onkentes ujraindulas.
+//
+// A KIIRAS RITKITASA. A meres 10 mp-enkent fut, a rendszeres allapotsor
+// viszont csak felorankent - ez 0,03 sor/perc, vagyis a 30 sor/perces
+// koltsegvetesbol semmit nem visz el. A figyelmeztetes ezen felul jon, de
+// csak a kuszob ATLEPESEKOR (nem minden korben) - ugyanaz a "csak a sorozat
+// elso tagja" szabaly, mint a TEST FAIL / WIFI LOST eseteben.
+void checkHeap(uint32_t now) {
+  if (now - heapCheckLast < HEAP_CHECK_INTERVAL_MS) {
+    return;
+  }
+  heapCheckLast = now;
+
+  const uint32_t szabad = ESP.getFreeHeap();
+  const uint32_t tomb   = ESP.getMaxAllocHeap();
+
+  // Rendszeres allapotsor. A HARMADIK ertek (a valaha volt legkisebb) a
+  // legfontosabb: egy lassu szivargas ebbol latszik meg akkor is, ha a
+  // pillanatnyi ertek epp rendben van.
+  if (now - heapLogLast >= HEAP_LOG_INTERVAL_MS) {
+    heapLogLast = now;
+    printUptime();
+    Serial.printf("Heap: szabad %u B, legnagyobb tomb %u B, valaha volt legkisebb %u B\n",
+                  (unsigned)szabad, (unsigned)tomb, (unsigned)ESP.getMinFreeHeap());
+  }
+
+  // Figyelmeztetes - csak az ATLEPESKOR. A heapWarnActive jelzo tartja szamon,
+  // hogy a figyelmeztetes mar szol-e; visszaallni is csak akkor lehet, ha a
+  // heap ERDEMBEN (10%-kal) a kuszob fole ment, hogy a kuszob korul
+  // ingadozva ne kapcsolgasson oda-vissza.
+  if (!heapWarnActive && szabad < HEAP_WARN_BYTES) {
+    heapWarnActive = true;
+    logEvent(EV_LOW_HEAP, (uint16_t)(szabad / 1024));
+    printUptime();
+    Serial.printf("FIGYELEM: alacsony a szabad heap (%u B), a kuszob %u B.\n",
+                  (unsigned)szabad, (unsigned)HEAP_WARN_BYTES);
+  } else if (heapWarnActive && szabad > HEAP_WARN_BYTES + HEAP_WARN_BYTES / 10) {
+    heapWarnActive = false;
+    printUptime();
+    Serial.printf("A szabad heap visszaallt (%u B).\n", (unsigned)szabad);
+  }
+
+  // Kritikus szint. KI KELL TARTANIA: egy pillanatnyi melypont (epp futo HTTP
+  // keres, osszeallitas alatt levo valasz) nem szivargas.
+  const bool kritikus = (szabad < HEAP_CRIT_BYTES) || (tomb < HEAP_CRIT_BLOCK_BYTES);
+  if (!kritikus) {
+    heapCritStreak = 0;
+    return;
+  }
+  // A szamlalo TELITODIK, nem no tovabb. Ez akkor szamit, ha az ujraindulas
+  // epp tiltott (AP mod, fajliras, rele impulzus): ilyenkor a kritikus
+  // allapot sokaig allhat, es egy korlatlanul novo uint8_t 255 utan
+  // korbefordulna nullara - vagyis epp a legrosszabb pillanatban ejtene el a
+  // mar kiszolgalt varakozast.
+  if (heapCritStreak < HEAP_CRIT_SAMPLES) {
+    heapCritStreak++;
+    return;
+  }
+
+  // MIKOR NEM SZABAD UJRAINDULNI. Mind a negy kizaras arrol szol, hogy az
+  // ujraindulas ne rontson tobbet, mint amennyit javit:
+  //
+  //  - AP beallito modban a felhasznalo epp a portalon dolgozik; az
+  //    ujraindulas eldobna a beirt adatokat. Nem is maradunk igy orokre: a
+  //    portal 5 perc tetlenseg utan ugyis elalszik, abbol pedig friss
+  //    bootolas jon.
+  //  - MODE_FATAL-ban a program mar nem fut allapotgepet, es 5 perc mulva
+  //    elalszik - ott is jon a friss bootolas.
+  //  - Fajliras kozben soha (ezt a zar biztositja lejjebb is).
+  //  - A rele impulzusa alatt sem: a router epp aram nelkul van, es az
+  //    ujraindulas felbevagna a 90 mp-es pulzust.
+  //  - ES a router reset UTANI ellenorzo ablakban sem. Ez a legkevesbe
+  //    nyilvanvalo kizaras, ezert reszletesen:
+  //
+  //    A gateway-eszkalacio KETFAZISU, es a ket fazis kozott akar 10 perc is
+  //    eltelhet (RESET_DELAY):
+  //      1. fazis: a sajat gateway sem elerheto -> GW UNREACH(1) naplozas,
+  //         a router kap EGY eselyt: ujrainditas, majd varakozas.
+  //      2. fazis: a varakozas utan UJRA ellenorizzuk. Ha a gateway meg
+  //         mindig nem valaszol, a statikus IP a rossz -> AP beallito mod,
+  //         hogy javitani lehessen.
+  //
+  //    Azt, hogy "az elso fazis mar lefutott", HAROM sima globalis egyutt
+  //    hordozza: currentState == FAILURE_STATE, uiFlags.resetPrinted es
+  //    timing.stateStart. Egy ujraindulas MINDHARMAT elvesziti - a
+  //    timing.stateStart-ot ertelmesen nem is lehetne atvinni, mert a millis()
+  //    ebredeskor nullarol indul. Az eszkoz igy ELOLROL kezdene: megint az
+  //    elso fazis futna le, vagyis a router kapna MEG egy folosleges
+  //    aramtalanitast, es a masodik fazis dontese - az AP modba menetel -
+  //    csak egy teljes korrel kesobb szuletne meg. Epp az a felhasznalo
+  //    jarna rosszul, akinek a statikus IP-jet javitani kellene.
+  //
+  //    Ezert itt inkabb VARUNK. Az ablak korlatos (RESET_DELAY + a
+  //    visszacsatlakozas, ~13 perc), a heapCritStreak pedig telitve marad,
+  //    tehat az ablak bezarultaval az ujraindulas azonnal megtortenik.
+  //    (Merve: GW1, GW2.)
+  const bool resetEllenorzoAblak =
+      (currentState == FAILURE_STATE) && uiFlags.resetPrinted;
+  if (deviceMode != MODE_MONITOR || savingConfig || restartPending
+      || testState.resetStep != 0 || resetEllenorzoAblak) {
+    return;
+  }
+
+  // Ha az ujraindulas sem segit, a boot loop rosszabb, mint a megallas.
+  if (rtcHeapRestarts >= MAX_HEAP_RESTARTS) {
+    logEvent(EV_FATAL, 5);
+    enterFatal("Tartosan keves a szabad heap - az ujrainditas sem segitett.");
+    return;
+  }
+
+  // Az ATVITEL beallitasa, MIELOTT ujraindulnank. Lasd a rtcCarryResetEvents
+  // leirasat: ez az egyetlen sima globalis, aminek az elvesztese viselkedesi
+  // hibat okozna.
+  rtcCarryResetEvents = testState.resetEvents;
+  rtcCarryRetryRounds = rtcRetryRounds;
+  rtcHeapRestarts++;
+  logEvent(EV_HEAP_RESTART, (uint16_t)(szabad / 1024));
+  printUptime();
+  Serial.printf("KRITIKUS: a szabad heap %u B (legnagyobb tomb %u B) %u meresen at.\n",
+                (unsigned)szabad, (unsigned)tomb, (unsigned)HEAP_CRIT_SAMPLES);
+  Serial.print("Onkentes ujraindulas, sorszam: ");
+  Serial.print(rtcHeapRestarts);
+  Serial.print(" / ");
+  Serial.println(MAX_HEAP_RESTARTS);
+
+  // A zarat itt is ATOMIKUSAN szerezzuk meg, ugyanazert, mint minden mas
+  // leallasnal: a kiirasok es az ESP.restart() kozott meg elindulhatna egy
+  // mentes, amit az ujraindulas felbevagna. (Lasd lockConfigBeforeShutdown().)
+  lockConfigBeforeShutdown();
+  Serial.flush();
+  ESP.restart();
+}
+
 void checkWatchdogResets() {
   const esp_reset_reason_t reason = esp_reset_reason();
 
@@ -857,6 +1528,49 @@ void initWatchdog() {
 }
 
 // Csak akkor etetünk, ha a loop task már fel van iratkozva.
+// A ket megszakitas-kezelo. IRAM_ATTR: a flash epp foglalt lehet (SPI olvasas),
+// ezert az ISR nem elhet flashben. Mindketto CSAK jelzoket allit - semmi mas.
+// A millis() ISR-bol is hivhato: a core-ban esp_timer_get_time()-ra epul, ami
+// IRAM-ban van es megszakitasbol is ervenyes.
+void IRAM_ATTR onResetButtonEdge() {
+  if (digitalRead(resetPin) == LOW) {
+    // A 0 a "nincs folyamatban levo lenyomas" jelolese; ha a millis() eppen 0
+    // (korbefordulas), 1-re kerekitunk - ugyanaz a sentinel-kezeles, mint a
+    // pollozott agban. Enelkul a korbefordulas pillanataban indult nyomas
+    // sosem reteszelne.
+    const uint32_t now = millis();
+    btnResetDownAt = (now != 0) ? now : 1;
+    return;
+  }
+  // Felfuto el: csak akkor reteszelunk, ha a lenyomas TELJES ERTEKU volt.
+  const uint32_t down = btnResetDownAt;
+  btnResetDownAt = 0;
+  if (down != 0 && millis() - down >= BUTTON_DEBOUNCE_MS) {
+    btnResetLatched = true;
+  }
+}
+
+void IRAM_ATTR onWifiResetButtonEdge() {
+  if (digitalRead(wifiresetPin) == LOW) {
+    const uint32_t now = millis();      // lasd a 0 sentinelt az onResetButtonEdge()-ben
+    btnWifiResetDownAt = (now != 0) ? now : 1;
+    return;
+  }
+  const uint32_t down = btnWifiResetDownAt;
+  btnWifiResetDownAt = 0;
+  if (down != 0 && millis() - down >= BUTTON_DEBOUNCE_MS) {
+    btnWifiResetLatched = true;
+  }
+}
+
+// A reteszek elesitese. A setup()-ban a beragadt gomb ellenorzese UTAN hivjuk:
+// egy beragadt gomb ugyis csak lefuto elt adna, felfutot sosem, tehat nem
+// reteszelne - de a sorrend igy is egyertelmubb.
+void armButtonLatches() {
+  attachInterrupt(digitalPinToInterrupt(resetPin), onResetButtonEdge, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(wifiresetPin), onWifiResetButtonEdge, CHANGE);
+}
+
 void feedWatchdog() {
   if (watchdogEnabled) {
     feedLoopWDT();
@@ -905,6 +1619,45 @@ void waitWithButtons(uint32_t duration) {
 // FLASH: ez a függvény semmit nem ír a fájlrendszerre, és a WiFi.begin() sem
 // ír NVS-be, mert a setup() WiFi.persistent(false)-t hívott. Az esemény-napló
 // RTC RAM-ban van. Tehát tetszőleges gyakorisággal ismételhető.
+// KET TASK, EGY MEMORIA. A programban ket task fut: a loop task es az
+// AsyncTCP webszerver "async_tcp" taskja. Az alabbi globalisokhoz mindketto
+// hozzafer - ezert erdemes egy helyen kimondani, mi vedi oket:
+//
+//   apDeadline              az async task irja (touchApDeadline, mind a 4
+//                           kezelo), a loop olvassa. volatile, 32 bites
+//                           igazitott szo - a C3-on egyetlen utasitas, nem
+//                           szakadhat ketté.
+//   restartPending/restartAt  ugyanez, volatile.
+//   savingConfig            spinlock (beginConfigWrite) - ez a KONFIGZAR.
+//   rtcEvents/rtcEvNext     evLogMux kritikus szakasz mindket iranyban.
+//   rtcWdtResets            az async task CSAK OLVASSA (a /log lapon), a loop
+//   rtcRetryRounds          irja. Igazitott szo, tehat nem szakadhat ketté; a
+//                           lapon legfeljebb egy pillanattal regi ertek all -
+//                           diagnosztikai kijelzon ez nem szamit.
+//   ssid/pass/ipStr/gatewayStr   lasd alább.
+//
+// A NEGY KONFIGURACIOS PUFFERT az async task IRJA (a POST kezelo 2. fazisa),
+// a loop task pedig OLVASSA - a WiFi.begin() hivasaiban. Ezt NEM zar vedi,
+// hanem egy szerkezeti invarians:
+//
+//   Az initWiFi() es az onlineProbe() CSAK olyan helyekrol fut, ahol a
+//   beallito portal nem letezik.
+//
+// Miert all ez? A portalt egyedul a startConfigPortal() inditja, az pedig
+// deviceMode = MODE_CONFIG-ot allit, es a server.begin() az UTOLSO sora. A
+// loop() a MODE_CONFIG (es a MODE_FATAL) againak elejen visszater - egyik ag
+// sem er el sem initWiFi()-ig, sem onlineProbe()-ig. Visszafele ut nincs:
+// MODE_CONFIG-bol csak ujraindulassal vagy MODE_FATAL-ba lehet kilepni, es
+// MODE_MONITOR-ba egyik sem vezet vissza. A setup() ket MODE_MONITOR
+// ertekadasa a portal letrejotte ELOTT van.
+//
+// Ket kezelo egymassal sem versenyez: az ESPAsyncWebServer MINDEN kezelot
+// ugyanazon az async_tcp taskon, sorosan hiv - tehat a GET urlap (ami olvassa
+// az ssid-t) es a POST (ami irja) sem futhat egyszerre.
+//
+// HA EZ VALAHA MEGVALTOZNA - barmi, ami a portal futasa kozben hivna
+// initWiFi()-t vagy onlineProbe()-ot -, a negy puffert zar ala kell tenni.
+// (Merve: CC1, CC2.)
 bool onlineProbe() {
   // 1. LÉPÉS - Wi-Fi. Ez NEM teszt, hanem CSATLAKOZÁSI KÍSÉRLET, és nincs
   // következménye: ha nem sikerül, semmilyen számláló nem nő, semmilyen
@@ -916,6 +1669,15 @@ bool onlineProbe() {
     // kezdeményezünk, a választ a KÖVETKEZŐ próba status()-a adja meg. A
     // hívások közt egy teljes ONLINE_PROBE_INTERVAL_MS telik, ami sokszorosa
     // egy asszociáció idejének - így nem szakítunk félbe egy futó próbát.
+    // FONTOS INVARIANS: itt NINCS WiFi.mode() és NINCS WiFi.config(). Ez azért
+    // helyes, mert a próba csak olyan helyekről fut, ahol a netif konfigurációja
+    // ÉRINTETLEN az utolsó initWiFi() óta - a WiFi.disconnect(true) ugyanis
+    // eldobná a statikus IP/DNS beállítást, és a begin() csendben DHCP-vel
+    // jönne vissza. A sketchben mindössze két disconnect(true) van: az egyik
+    // az enterDeepSleep()-ben (utána újraindulás), a másik a FAILURE_STATE
+    // ágán, közvetlenül egy reconnectWifi() ELŐTT, ami újra alkalmazza a
+    // konfigot. Ha valaha új disconnect(true) kerülne egy VÁRAKOZÁS elé, ezt
+    // a függvényt is ki kell egészíteni. (Regresszió: WF10.)
     if (ssid[0] != '\0') {
       WiFi.begin(ssid, pass);
     }
@@ -991,22 +1753,96 @@ bool beginConfigWrite() {
   return acquired;
 }
 
-void waitForConfigWrite() {
-  if (!savingConfig) {
-    return;
+// Az alvas es az ujraindulas kozos torlopontja: megvarja a folyamatban levo
+// fajlirast, ES MEG IS SZEREZI a zarat.
+//
+// MIERT NEM ELEG MEGVARNI? A puszta megvaras ugy ter vissza, hogy a zar
+// SZABAD. A visszateres es a tenyleges esp_deep_sleep_start() / ESP.restart()
+// kozott viszont meg lefut ket-harom println es egy Serial.flush() - ez valos
+// ezredmasodpercek -, es abban az ablakban az async_tcp task ELINDITHAT egy uj
+// mentest. Pontosan azt a felbevagott fajlirast kapnank, ami ellen a varakozas
+// egyaltalan van. A halasztott ujraindulas komment sajat maga mondja ki, hogy
+// a mobilos DUPLA KOPPINTAS gyakori - tehat epp ilyen sorozat all elo.
+// Ugyanaz a hiba volt a restartFromButton()-ben is; ott a beginConfigWrite()
+// atomikus megszerzese oldotta meg, itt ugyanaz a megoldas. (Merve: SH1.)
+//
+// A zarat NEM oldjuk fel: aki ezt hivja, mar nem ter vissza. A hataridos
+// kilepes viszont megmarad - egy beragadt jelzo miatt az eszkoz nem fagyhat le,
+// es 5 mp utan a zar nelkul is tovabblepunk (a regi viselkedes).
+void lockConfigBeforeShutdown() {
+  if (beginConfigWrite()) {
+    return;  // szabad volt, es most mar a mienk
   }
   printUptime();
   Serial.println("Fajliras folyik - megvarjuk, mielott alszunk vagy ujraindulunk.");
   const uint32_t start = millis();
-  while (savingConfig && millis() - start < SAVE_WAIT_MAX_MS) {
+  bool acquired = false;
+  while (millis() - start < SAVE_WAIT_MAX_MS) {
     feedWatchdog();
     delay(BUTTON_POLL_MS);
+    if (beginConfigWrite()) {
+      acquired = true;
+      break;
+    }
   }
-  if (savingConfig) {
-    Serial.println("FIGYELEM: a mentes 5 mp alatt sem fejezodott be, tovabblepunk.");
-  } else {
+  if (acquired) {
     Serial.println("A fajliras befejezodott.");
+  } else {
+    Serial.println("FIGYELEM: a mentes 5 mp alatt sem fejezodott be, tovabblepunk.");
   }
+}
+
+// HTML-escape egy attribútumérték számára.
+//
+// MIÉRT KELL: az SSID tetszőleges 32 bájt lehet - idézőjelet, `<`-t és `&`-et
+// is tartalmazhat. Escape NÉLKÜL az előkitöltés maga nyitna biztonsági rést a
+// saját portálunkon: egy idézőjel kitörne a value="..." attribútumból, egy
+// <script> pedig a lapba kerülne. A mentett SSID ráadásul a POST kezelőn át
+// bármi lehet, tehát ez nem elméleti.
+void printHtmlEscaped(AsyncResponseStream* r, const char* s) {
+  for (const char* p = s; *p != '\0'; p++) {
+    switch (*p) {
+      case '&':  r->print(F("&amp;"));  break;
+      case '<':  r->print(F("&lt;"));   break;
+      case '>':  r->print(F("&gt;"));   break;
+      case '"':  r->print(F("&quot;")); break;
+      case '\'': r->print(F("&#39;"));  break;
+      default:   r->write((uint8_t)*p); break;
+    }
+  }
+}
+
+// A beállító űrlap kiszolgálása, a mentett értékekkel ELŐKITÖLTVE.
+//
+// MIÉRT ELŐKITÖLTVE? Mert az üres címmező TÖRLÉST jelent. Aki statikus IP-vel
+// üzemel és csak a jelszót akarja átírni, annak a böngésző üresen küldené a
+// cím mezőket - és a mentés csendben DHCP-re váltana. (Mérve: AP1.)
+//
+// A JELSZÓT SOHA NEM töltjük elő: az az egyetlen titok ezen a lapon, és a
+// portál WPA2 kulcsa nyilvános, tehát a lap tartalma nem tekinthető védettnek.
+void sendConfigForm(AsyncWebServerRequest* request) {
+  AsyncResponseStream* r = request->beginResponseStream("text/html", 1024);
+  r->print(FORM_HEAD);
+
+  r->print(F("SSID <input name=\"ssid\" maxlength=\"32\" required value=\""));
+  printHtmlEscaped(r, ssid);
+  r->print(F("\"><br>"));
+
+  // A jelszó mező ÜRESEN indul, és a következménye ki van írva: enélkül a
+  // felhasználó azt hinné, hogy a mentett jelszó megmarad.
+  r->print(F("Password <input name=\"pass\" type=\"password\" maxlength=\"63\">"
+             " <small>(ures = nyilt halozat)</small><br>"));
+
+  r->print(F("IP <input name=\"ip\" maxlength=\"15\" placeholder=\"opcionalis\" value=\""));
+  printHtmlEscaped(r, ipStr);
+  r->print(F("\"><br>"));
+
+  r->print(F("Gateway <input name=\"gateway\" maxlength=\"15\" placeholder=\"opcionalis\" value=\""));
+  printHtmlEscaped(r, gatewayStr);
+  r->print(F("\"><br>"));
+
+  r->print(FORM_TAIL);
+  request->send(r);
 }
 
 // A relé lábának rögzítése az alvás idejére. Deep sleep alatt a digitális
@@ -1027,6 +1863,24 @@ void holdRelayForSleep() {
   }
 }
 
+// Igaz, ha a napló LEGUTOLSÓ bejegyzése már ez a kód. A sorozatok elleni
+// spam-védelem közös alapja: a 32 bejegyzéses körpuffer néhány másodperc
+// alatt kiszorítaná a kivizsgálandó eseményeket (BOOT, ROUTER RESET, FATAL),
+// ha egy ismétlődő állapot minden körben új sort írna.
+//
+// A mux ugyanazért kell, mint a logEvent()-ben: a naplóba az async_tcp task
+// is ír (a POST kezelő CONFIG_SAVED sora), tehát a pozíció és a slot együtt
+// nem olvasható atomian.
+bool lastEventWas(uint8_t code) {
+  bool egyezik = false;
+  portENTER_CRITICAL(&evLogMux);
+  if (rtcEvMagic == EVLOG_MAGIC && rtcEvNext > 0) {
+    egyezik = (rtcEvents[(rtcEvNext - 1) % EVLOG_SIZE].code == code);
+  }
+  portEXIT_CRITICAL(&evLogMux);
+  return egyezik;
+}
+
 // Igaz, ha a napló legutóbbi két bejegyzése már pontosan ez a beragadt-gomb
 // kör (BOOT, majd STUCK BUTTON ugyanazzal a gombbal) - vagyis a mostani
 // ébredés csak a 60 mp-es alvás-ébredés kör ismétlése.
@@ -1045,6 +1899,15 @@ bool stuckCycleAlreadyLogged(uint16_t which) {
 // azonnal újraébresztené az eszközt, azaz végtelen boot loop lenne.
 // logIt = false: a beragadt-gomb kör ismétlése, nem kerül újra a naplóba
 // (lásd a setup() spam-védelmét).
+// Melyik gomb van lenyomva ÉPPEN MOST? 0 = reset, 1 = wifireset, -1 = egyik
+// sem. A sorrend számít: ha valahogy mindkettő nyomva van, a reset gombot
+// jelentjük - az kap gombébresztést, tehát az a veszélyesebb boot loop.
+int pressedButtonNow() {
+  if (digitalRead(resetPin) == LOW) return 0;
+  if (digitalRead(wifiresetPin) == LOW) return 1;
+  return -1;
+}
+
 void handleStuckButton(const char* message, uint16_t which, bool logIt) {
   Serial.println(message);
   Serial.print("Alvas ");
@@ -1070,6 +1933,13 @@ void handleStuckButton(const char* message, uint16_t which, bool logIt) {
 
   // A relé itt is LOW (a setup() elején kapcsoltuk), és alvás alatt is az marad.
   holdRelayForSleep();
+  // A LEZÁRÁS A LEGVÉGÉN, ahogy az enterDeepSleep()-ben is. A fenti
+  // Serial.flush() a villogás ELŐTT állt, a holdRelayForSleep() viszont a
+  // villogás UTÁN fut - és az KI TUD ÍRNI egy figyelmeztetést, ha a relé
+  // lábának rögzítése nem sikerült. Flush nélkül épp az a sor veszne el a
+  // deep sleepben, amiért az ember a soros portot nézi. (Mérve: SER7.)
+  Serial.flush();
+  Serial.end();
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
   esp_sleep_enable_timer_wakeup(STUCK_BUTTON_SLEEP_US);
   esp_deep_sleep_start();
@@ -1183,6 +2053,12 @@ bool reset_device() {
       internetFailSleep();
     }
     logEvent(EV_ROUTER_RESET, (uint16_t)testState.resetEvents);
+    // A naplo kiirasa a fajlrendszerre, MIELOTT a relehez nyulnank. Ha a
+    // router ujrainditasa kozben aramszunet jon (nem ritka: epp azert
+    // piszkaljuk a halozatot, mert valami nem stimmel), az RTC naplo elveszne
+    // - a fajl viszont megmarad. A mentes NEM blokkolja a resetet: ha nem
+    // sikerul, csak szolunk rola.
+    saveEventLog("router reset elott");
     Serial.println("Router resetting");
     Serial.print("Powering OFF the router. Instance = ");
     Serial.println(testState.resetEvents);
@@ -1238,9 +2114,24 @@ bool reset_device() {
 // Közös elalvás. timerUs = 0 esetén NINCS időzített ébresztés: az eszköz
 // magától nem tér vissza, csak a reset gombra vagy áramtalanításra.
 void enterDeepSleep(uint64_t timerUs) {
+  // A NAPLO KIIRASA, MINDEN alvas elott. Korabban ez csak a ket idozitett
+  // alvasnal (retrySleep, internetFailSleep) allt, kulon-kulon a hivo
+  // fuggvenyben - az apSleep() es a fatalSleep() kimaradt belole. Pedig a
+  // kriterium mindegyikre all: hosszabb ido kovetkezik, ami alatt egy
+  // aramszunet elviheti az RTC naplot. A vegzetes hibanal ez a
+  // legfontosabb: epp azt akarjuk kesobb kivizsgalni.
+  //
+  // A kozos pontra hozas egyben megszunteti azt, hogy egy uj alvasi ut
+  // eseten el lehessen felejteni. A hivas a zar megszerzese ELOTT van, mert
+  // a saveEventLog() sajat maga szerzi meg es oldja fel a zarat - a
+  // lockConfigBeforeShutdown() viszont mar nem adja vissza.
+  //
+  // Csatolatlan fajlrendszernel (pl. FATAL(1)) a mentes magatol kimarad.
+  saveEventLog("alvas elott");
+
   // Egyetlen torlópont MINDEN alvásra (apSleep, internetFailSleep,
   // retrySleep, fatalSleep): fájlírás közben nem alszunk el.
-  waitForConfigWrite();
+  lockConfigBeforeShutdown();
   digitalWrite(ledPin, LOW);
   digitalWrite(relayPin, LOW);
   digitalWrite(wifiledPin, LOW);
@@ -1251,6 +2142,17 @@ void enterDeepSleep(uint64_t timerUs) {
   server.end();
   Serial.flush();
   Serial.end();
+
+  // A gomb-megszakítások leválasztása MÉG az ébresztőforrások élesítése előtt.
+  //
+  // MIÉRT? Az attachInterrupt() és az esp_deep_sleep_enable_gpio_wakeup()
+  // UGYANAZOKAT a GPIO megszakítás-regisztereket állítja. A futásidejű
+  // "bármelyik él" beállítás és az alváshoz kért "LOW szint" ébresztés
+  // egymásra hatása nem dokumentált - ezért nem hagyatkozunk rá: előbb
+  // leválasztunk, aztán élesítünk. Ugyanaz az elv, mint egy sorral lejjebb a
+  // "tiszta lappal indulunk"-nál. Ébredés után a setup() újra élesíti őket.
+  detachInterrupt(digitalPinToInterrupt(resetPin));
+  detachInterrupt(digitalPinToInterrupt(wifiresetPin));
 
   // Tiszta lappal indulunk, hogy biztosan csak az legyen élesítve, amit akarunk.
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
@@ -1295,7 +2197,7 @@ void internetFailSleep() {
   Serial.print((unsigned long)(SLEEP_DURATION_US / 60000000ULL));
   Serial.println(" percre, utana automatikus ujraprobalkozas.");
   logEvent(EV_SLEEP, 2);
-  enterDeepSleep(SLEEP_DURATION_US);
+  enterDeepSleep(SLEEP_DURATION_US);   // a naplot az enterDeepSleep() menti
 }
 
 // A hálózat nem látszik. Lehet, hogy a router fagyott le - pontosan erre való
@@ -1335,7 +2237,7 @@ void retrySleep() {
   Serial.println(MAX_RETRY_ROUNDS);
   Serial.println("Alvas 1 orara, utana automatikus ujraprobalkozas.");
   logEvent(EV_SLEEP, 1);
-  enterDeepSleep(SLEEP_DURATION_US);
+  enterDeepSleep(SLEEP_DURATION_US);   // a naplot az enterDeepSleep() menti
 }
 
 // Nem sikerult csatlakozni a 3 probaval sem. Itt dol el, hogy tovabb varunk-e
@@ -1438,6 +2340,25 @@ void fatalHalt(const char* reason) {
   fatalSleep();  // időzített ébresztés NÉLKÜL - nem tér vissza
 }
 
+// A gombos újraindítás közös útja - a pollozott és a reteszelt ág is ezt hívja.
+//
+// A zár ATOMIKUS megszerzése: a hívó gyors savingConfig-ellenőrzése és az
+// ESP.restart() között az async_tcp taskban ELINDULHAT egy webes mentés, és a
+// köztük lévő két println() + Serial.flush() nem is elhanyagolható idő. Az
+// újraindítás ilyenkor félbevágná a fájlírást, és csonka konfigurációt hagyna
+// a flashben. A zárral ez kizárt: ha megkaptuk, mentés már nem indulhat; ha
+// nem kaptuk meg, visszatérünk, és a következő 10 ms-os kör újra próbálkozik.
+// Feloldani nem kell - a zár az újraindulással hal el.
+void restartFromButton(const char* reason) {
+  if (!beginConfigWrite()) {
+    return;
+  }
+  Serial.println(reason);
+  Serial.println("RESTART ESP32C3 device.");
+  Serial.flush();
+  ESP.restart();
+}
+
 void resetbutton() {
   // Fájlírás közben SEMMIKÉPP nem indítunk újra: a félbeszakadt mentés sérült
   // konfigurációt hagyna hátra. Ugyanaz a szabály, mint az elalvásnál.
@@ -1446,6 +2367,21 @@ void resetbutton() {
   if (savingConfig) {
     return;
   }
+  // A megszakitas-alapu retesz: egy TELJES ERTEKU (>= BUTTON_DEBOUNCE_MS)
+  // lenyomas, ami egy blokkolo szakasz alatt tortent, es a gombot azota
+  // felengedtek. A debounce-t nem kerulte meg - a hosszat az ISR merte meg.
+  //
+  // A jelzot SZANDEKOSAN NEM toroljuk: a restartFromButton() vagy ujraindit
+  // (es akkor a RAM-mal egyutt a jelzo is eltunik), vagy visszater, mert a
+  // konfigzar epp foglalt - ilyenkor a retesznek MEG KELL MARADNIA. A gomb
+  // ekkor mar fel van engedve, tehat a pollozott ag nem tudna potolni: a
+  // jelzo torlese a felhasznalo gombnyomasat NYOM NELKUL eldobna.
+  if (btnResetLatched) {
+    timing.resetBtnDownSince = 0;
+    restartFromButton("Reset button pressed (latched).");
+    return;  // idaig csak akkor jutunk, ha a zar foglalt volt
+  }
+
   if (digitalRead(resetPin) != LOW) {
     timing.resetBtnDownSince = 0;  // felengedve: debounce újraindul
     return;
@@ -1459,17 +2395,61 @@ void resetbutton() {
   }
   // Csak akkor fogadjuk el, ha végig lenyomva maradt (valódi debounce)
   if (now - timing.resetBtnDownSince >= BUTTON_DEBOUNCE_MS) {
-    Serial.println("Reset button pressed.");
-    Serial.println("RESTART ESP32C3 device.");
-    Serial.flush();
-    ESP.restart();
+    restartFromButton("Reset button pressed.");
   }
+}
+
+// A wifireset közös útja - a pollozott és a reteszelt ág is ezt hívja.
+// A zárat itt is atomikusan szerezzük meg (lásd restartFromButton()).
+void doWifiReset() {
+  if (!beginConfigWrite()) {
+    return;  // épp mentés folyik; a következő kör újra próbálja
+  }
+  Serial.println("WIFIRESET button is pulling down!");
+  Serial.println("RESET saved wifi data!");
+  // FONTOS a sorrend: az SSID megy ELŐSZÖR. A "wifireset" célja, hogy az
+  // eszköz a beállító portálon jöjjön fel, és ezt egyedül a /ssid.txt dönti
+  // el (setup(): ha üres az SSID -> AP mód). Ha a törlés közben elmegy az
+  // áram, így a legvalószínűbb, hogy a kívánt végállapotba kerülünk.
+  // A &= szándékosan nem rövidzáras: mind a négy törlés lefut akkor is, ha
+  // valamelyik elbukik.
+  bool cleared = true;
+  cleared &= clearConfigValue(LittleFS, ssidPath);
+  cleared &= clearConfigValue(LittleFS, passPath);
+  cleared &= clearConfigValue(LittleFS, ipPath);
+  cleared &= clearConfigValue(LittleFS, gatewayPath);
+  if (!cleared) {
+    // Ha a fájlrendszer nem írható, az eszköz NEM működhet tovább: a
+    // konfiguráció mentése ugyanígy elbukna, az újraindítás pedig a régi
+    // adatokkal jönne fel - a gomb a felhasználó szemszögéből "nem csinál
+    // semmit". Ez ugyanaz a hibaosztály, mint a többi LittleFS hiba, tehát
+    // ugyanaz a kezelés: mindkét LED gyorsan villog, 5 perc múlva alvás,
+    // amiből csak a gomb vagy az áramtalanítás hoz vissza.
+    Serial.println("!!! A mentett wifi adatok törlése NEM sikerült !!!");
+    logEvent(EV_FATAL, 4);
+    // A zár oldása még a hibajelzés előtt: a fatalHalt() gombkezelőjét a
+    // beragadt savingConfig némává tenné (a resetbutton() ellenőrzi).
+    savingConfig = false;
+    fatalHalt("A mentett wifi adatok nem torolhetok - serult fajlrendszer.");
+    // fatalHalt() nem tér vissza
+  }
+  Serial.println("RESTART ESP32C3 device.");
+  Serial.flush();
+  ESP.restart();  // a zár az újraindulással hal el
 }
 
 void wifiresetbutton() {
   // Mentés közben a törlés és az újraindítás is végzetes lenne: két task írná
-  // egyszerre ugyanazokat a fájlokat. Lásd resetbutton().
+  // egyszerre ugyanazokat a fájlokat. Ez itt csak a GYORS kapu; az igazi
+  // védelem a doWifiReset()-ben lévő beginConfigWrite().
   if (savingConfig) {
+    return;
+  }
+  // Megszakítás-alapú retesz - lásd a resetbutton() megfelelő ágát, beleértve
+  // azt is, hogy a jelzőt NEM töröljük: ha a zár foglalt, a nyomás megmarad.
+  if (btnWifiResetLatched) {
+    timing.wifiResetBtnDownSince = 0;
+    doWifiReset();
     return;
   }
   if (digitalRead(wifiresetPin) != LOW) {
@@ -1483,45 +2463,7 @@ void wifiresetbutton() {
     return;
   }
   if (now - timing.wifiResetBtnDownSince >= BUTTON_DEBOUNCE_MS) {
-    // A zár ATOMIKUS megszerzése. A fenti gyors savingConfig-ellenőrzés és ez
-    // a pont között az async_tcp taskban elindulhatott egy webes mentés - a
-    // puszta jelző-olvasás után a törlés és a mentés ugyanazokat a fájlokat
-    // írná egyszerre. Ha a zár nem a miénk, a következő 10 ms-os mintavételi
-    // kör újra próbálkozik.
-    if (!beginConfigWrite()) {
-      return;
-    }
-    Serial.println("WIFIRESET button is pulling down!");
-    Serial.println("RESET saved wifi data!");
-    // FONTOS a sorrend: az SSID megy ELŐSZÖR. A "wifireset" célja, hogy az
-    // eszköz a beállító portálon jöjjön fel, és ezt egyedül a /ssid.txt dönti
-    // el (setup(): ha üres az SSID -> AP mód). Ha a törlés közben elmegy az
-    // áram, így a legvalószínűbb, hogy a kívánt végállapotba kerülünk.
-    // A &= szándékosan nem rövidzáras: mind a négy törlés lefut akkor is, ha
-    // valamelyik elbukik.
-    bool cleared = true;
-    cleared &= clearConfigValue(LittleFS, ssidPath);
-    cleared &= clearConfigValue(LittleFS, passPath);
-    cleared &= clearConfigValue(LittleFS, ipPath);
-    cleared &= clearConfigValue(LittleFS, gatewayPath);
-    if (!cleared) {
-      // Ha a fájlrendszer nem írható, az eszköz NEM működhet tovább: a
-      // konfiguráció mentése ugyanígy elbukna, az újraindítás pedig a régi
-      // adatokkal jönne fel - a gomb a felhasználó szemszögéből "nem csinál
-      // semmit". Ez ugyanaz a hibaosztály, mint a többi LittleFS hiba, tehát
-      // ugyanaz a kezelés: mindkét LED gyorsan villog, 5 perc múlva alvás,
-      // amiből csak a gomb vagy az áramtalanítás hoz vissza.
-      Serial.println("!!! A mentett wifi adatok törlése NEM sikerült !!!");
-      logEvent(EV_FATAL, 4);
-      // A zár oldása még a hibajelzés előtt: a fatalHalt() gombkezelőjét a
-      // beragadt savingConfig némává tenné (a resetbutton() ellenőrzi).
-      savingConfig = false;
-      fatalHalt("A mentett wifi adatok nem torolhetok - serult fajlrendszer.");
-      // fatalHalt() nem tér vissza
-    }
-    Serial.println("RESTART ESP32C3 device.");
-    Serial.flush();
-    ESP.restart();  // a zár az újraindulással hal el
+    doWifiReset();
   }
 }
 
@@ -1866,8 +2808,11 @@ void handleFirstStart(uint32_t currentMillis) {
     Serial.println("First start wait end (halozat es internet visszajott).");
     digitalWrite(wifiledPin, HIGH);
   }
-  // Innentől a firstStart lezárult: a timing.startMillis-t senki nem olvassa
-  // többé, ezért nincs értelme frissíteni.
+  // Innentől a firstStart lezárult. A timing.startMillis viszont NEM válik
+  // érdektelenné: a watchdog számláló nullázása is ehhez méri az "1 óra
+  // hibátlan működést" (loop(), WDT_COUNTER_CLEAR_MS). Ezért a mező végig a
+  // BOOT időbélyege marad - frissíteni nemcsak felesleges, hanem hibás is
+  // lenne, mert eltolná a watchdog-ablakot.
   uiFlags.firstStart = false;
 }
 
@@ -1875,6 +2820,12 @@ void startConfigPortal() {
   if (deviceMode == MODE_CONFIG) {
     return;  // már fut
   }
+  // Naplomentes MEG a modvaltas elott. Az AP mod azt jelenti, hogy az eszkoz
+  // feladta a csatlakozast - epp ezt az elozmenyt akarja latni az, aki
+  // odamegy es megnyitja a portalt. A mentes ugyanabban a pillanatban meg
+  // MODE_MONITOR-ban tortenik, tehat a webszerver meg nem fut: a fajlirasnak
+  // nincs versenytarsa a masik taskbol.
+  saveEventLog("AP modba valtas elott");
   deviceMode = MODE_CONFIG;
   touchApDeadline();
   // Jelzés: a Wi-Fi LED villog (a villogtatást a loop() végzi), a státusz LED
@@ -1904,7 +2855,7 @@ void startConfigPortal() {
   // jelszót is.
   server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
     touchApDeadline();
-    request->send(200, "text/html", CONFIG_FORM);
+    sendConfigForm(request);
   });
   // Keep-alive. A nyitva lévő oldal 60 mp-enként meghívja, így az AP mód
   // visszaszámlálása addig tolódik, amíg tényleg ott vagy a lapon. A válasz
@@ -1920,22 +2871,36 @@ void startConfigPortal() {
     touchApDeadline();
     // A stream puffere igény szerint nő (resizeAdd), de akkor soronként
     // újraallokálna. Egy bőséges kezdőmérettel ez egyetlen foglalás lesz:
-    // fejléc + állapot + 32 sor x ~70 bájt + lábléc alatta marad.
-    AsyncResponseStream* r = request->beginResponseStream("text/html", 4096);
+    // fejléc + állapot + 32 sor x ~70 bájt + a ~900 bájtos jelmagyarázat +
+    // lábléc alatta marad.
+    AsyncResponseStream* r = request->beginResponseStream("text/html", 6144);
     r->print(F("<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
                "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
                "<title>Naplo</title></head><body><h2>Diagnosztikai naplo</h2>"));
 
-    r->printf("<p>Utolso indulas oka: %d<br>", (int)esp_reset_reason());
-    r->printf("Watchdog ujraindulasok: %u / %u<br>",
+    const esp_reset_reason_t rr = esp_reset_reason();
+    r->printf("<p><b>Utolso indulas oka:</b> %s (%d)<br>",
+              resetReasonName(rr), (int)rr);
+    r->printf("<b>Watchdog ujraindulasok:</b> %u / %u<br>",
               (unsigned)rtcWdtResets, (unsigned)MAX_WDT_RESETS);
-    r->printf("Ujraprobalkozasi korok: %u / %u<br>",
+    r->printf("<b>Ujraprobalkozasi korok:</b> %u / %u<br>",
               (unsigned)rtcRetryRounds, (unsigned)MAX_RETRY_ROUNDS);
-    r->printf("Uptime: %u mp</p>", (unsigned)(esp_timer_get_time() / 1000000));
+    // Az uptime ugyanabban az alakban, mint a soros porton - a nyers
+    // masodpercbol (pl. "165600 mp") ranezesre semmi nem latszik.
+    {
+      const uint32_t up = (uint32_t)(esp_timer_get_time() / 1000000);
+      r->printf("<b>Uptime:</b> %ud %uh %um %us</p>",
+                (unsigned)(up / 86400), (unsigned)((up % 86400) / 3600),
+                (unsigned)((up % 3600) / 60), (unsigned)(up % 60));
+    }
 
     // Pillanatkép a naplóról a mux alatt: az író (logEvent) a loop taskból
     // fut, ez a kezelő az async_tcp taskból - enélkül félig kiírt bejegyzést
-    // is olvashatnánk. A másolat 264 bájt, a kritikus szakasz egy memcpy.
+    // is olvashatnánk. A kritikus szakasz egy memcpy.
+    //
+    // EGYETLEN puffert hasznalunk mindkét forráshoz (RTC és fájl): az
+    // async_tcp task veremje véges, és 32 bejegyzés már 384 bájt. Előbb
+    // eldöntjük, melyik forrás kell, és csak azt töltjük be.
     uint32_t evTotal;
     EventEntry evCopy[EVLOG_SIZE];
     portENTER_CRITICAL(&evLogMux);
@@ -1943,21 +2908,134 @@ void startConfigPortal() {
     memcpy(evCopy, rtcEvents, sizeof(evCopy));
     portEXIT_CRITICAL(&evLogMux);
 
+    // MELYIK A FRISSEBB? Az RTC naplo vagy a fajlba mentett?
+    //
+    // A fajl mindig az RTC naplo egy KORABBI pillanatkepe. Ebbol kovetkezik a
+    // szabaly:
+    //  - Ha az RTC naplo TULELTE a mentes ota eltelt idot (nem volt
+    //    aramszunet), akkor bovebb is nala: mindent tartalmaz, ami a fajlban
+    //    van, PLUSZ ami azota tortent. Ilyenkor az RTC nyer.
+    //  - Ha az RTC naplot torolte egy aramszunet, a szamlalo nullarol indult,
+    //    tehat a fajl tobb elozmenyt orzott meg. Ilyenkor a fajl nyer - es
+    //    epp ez a mentes ertelme.
+    //  - Ha viszont az RTC ota mar 32 UJ esemeny keletkezett, akkor a
+    //    korpuffer teljesen tele van friss adattal, ami idoben mindenkeppen
+    //    ujabb a fajlnal.
+    //  - Ha MINDKETTONEK van valos ideje (NTP), az dont: a nagyobb idobelyeg
+    //    nyer. Ez a legpontosabb valasz, ezert ez az elso szabaly.
+    //
+    // Ha epp fajliras folyik a masik taskbol, a fajlt NEM olvassuk: az RTC
+    // naplo ilyenkor is ep, es ez az egyszeru kizaras eleg.
+    // A dontes CSAK a fejlecbol tortenik, es a bejegyzeseket utana toltjuk be -
+    // igy egyszerre csak EGY 384 bajtos puffer all a vermen.
+    //
+    // Ha epp fajliras folyik a masik taskbol, a fajlt NEM olvassuk. Ez a
+    // kizaras nem atomi (az iras a kerdes utan is elindulhat), de nem is kell
+    // annak lennie: egy felig kiirt fajlon a fejlec ellenorzese bukik, es a
+    // lap ugyanoda jut - az RTC naplohoz.
+    EvFileHeader fej;
+    bool vanFajl = false;
+    if (!savingConfig && loadEventLogHeader(fej)) {
+      bool rtcNyer;
+      if (evTotal == 0) {
+        rtcNyer = false;                       // nincs mit mutatni az RTC-bol
+      } else {
+        // A fajl sajat idobelyege (mikor mentettuk) a helyes osszehasonlitasi
+        // alap: pontosan azt mondja meg, mikori a tartalma.
+        const uint32_t rtcEpoch = evCopy[(evTotal - 1) % EVLOG_SIZE].epoch;
+        if (rtcEpoch >= NTP_MIN_VALID_EPOCH
+            && fej.savedEpoch >= NTP_MIN_VALID_EPOCH) {
+          rtcNyer = (rtcEpoch >= fej.savedEpoch);   // valos ido dont
+        } else {
+          rtcNyer = (evTotal >= fej.evNextAtSave) || (evTotal >= EVLOG_SIZE);
+        }
+      }
+      if (!rtcNyer) {
+        if (loadEventLogEntries(fej, evCopy)) {
+          // A fajl bejegyzesei mar KIEGYENESITVE vannak (a legregebbitol a
+          // legujabbig), es a puffer elejen allnak; az evTotal a darabszam
+          // lesz, igy a lenti kiiro ciklus mindket forrasra ugyanaz.
+          vanFajl = true;
+          evTotal = fej.count;
+        } else {
+          // A BETOLTES FELUTON BUKOTT. Mivel EGY puffert hasznalunk, az
+          // olvasas addigra mar felulirhatta az RTC pillanatkep elejet -
+          // a puffer most fel fajl, fel RTC adat lenne. Ezert nem eleg
+          // "visszalepni" az RTC-re: UJRA kell venni a pillanatkepet.
+          portENTER_CRITICAL(&evLogMux);
+          evTotal = (rtcEvMagic == EVLOG_MAGIC) ? rtcEvNext : 0;
+          memcpy(evCopy, rtcEvents, sizeof(evCopy));
+          portEXIT_CRITICAL(&evLogMux);
+        }
+      }
+    }
+
     if (evTotal == 0) {
+      // Sem az RTC-ben, sem a fajlban nincs semmi (vagy a fajl nem letezik,
+      // ures, csonka). Ez nem hiba: egyszeruen nincs mit mutatni.
       r->print(F("<p>Nincs rogzitett esemeny.</p>"));
     } else {
-      r->print(F("<table border=1 cellpadding=4><tr><th>Uptime</th>"
+      if (vanFajl) {
+        char mikor[24];
+        r->print(F("<p><b>Forras:</b> a fajlrendszerre mentett naplo"));
+        if (formatEpoch(fej.savedEpoch, mikor, sizeof(mikor))) {
+          r->printf(" (mentve: %s)", mikor);
+        }
+        r->print(F(" - az RTC naplo ennel regebbi vagy ures "
+                   "(pl. aramszunet torolte).</p>"));
+      } else {
+        r->print(F("<p><b>Forras:</b> az RTC memoriaban levo naplo "
+                   "(ez a frissebb).</p>"));
+      }
+      r->print(F("<table border=1 cellpadding=4><tr><th>Ido</th><th>Uptime</th>"
                  "<th>Esemeny</th><th>Param</th></tr>"));
-      // A legregebbi meg meglevo bejegyzestol indulunk
+      // A legregebbi meg meglevo bejegyzestol indulunk. Fajlbol olvasva a
+      // bejegyzesek mar sorban allnak, tehat a "% EVLOG_SIZE" ott is helyes.
       const uint32_t shown = evTotal < EVLOG_SIZE ? evTotal : EVLOG_SIZE;
       for (uint32_t i = evTotal - shown; i < evTotal; i++) {
         const EventEntry& e = evCopy[i % EVLOG_SIZE];
-        r->printf("<tr><td>%u:%02u:%02u</td><td>%s</td><td>%u</td></tr>",
+        char mikor[24];
+        r->print(F("<tr><td>"));
+        if (formatEpoch(e.epoch, mikor, sizeof(mikor))) {
+          r->print(mikor);
+        } else {
+          // Nem volt (meg) oraszinkron ennel a bejegyzesnel. Nem hiba - a
+          // uptime oszlop ilyenkor is elmond mindent.
+          r->print(F("-"));
+        }
+        r->printf("</td><td>%u:%02u:%02u</td><td>%s</td><td>%u</td></tr>",
                   (unsigned)(e.uptimeSec / 3600), (unsigned)((e.uptimeSec % 3600) / 60),
                   (unsigned)(e.uptimeSec % 60), eventName(e.code), (unsigned)e.param);
       }
       r->print(F("</table>"));
     }
+    // Jelmagyarazat: a Param oszlop szamai kulonben csak a forraskodbol
+    // fejthetok meg - epp az az informacio veszne el, amiert az oldal van.
+    // FIGYELEM a jelolesre: az esemenyneveket SZANDEKOSAN nem tesszuk <b> koze.
+    // A tablazat cellai ">NEV<" alaku szoveget adnak, es a naplo tartalmara
+    // pontosan erre a mintara lehet illeszteni (igy teszi az L2 teszt is).
+    // Egy <b>BOOT</b> ugyanezt a mintat allitana elo a jelmagyarazatban, es
+    // elmosna a kulonbseget "a naplóban VAN ilyen esemeny" es "a lap emliti
+    // ezt az esemenyt" kozott.
+    r->print(F("<h3>Param jelentese</h3><ul>"
+               "<li>BOOT: az indulas oka (lasd fent)</li>"
+               "<li>WIFI OK: hanyadik ujraprobalkozasi korben sikerult</li>"
+               "<li>WIFI LOST: a WiFi.status() erteke</li>"
+               "<li>TEST FAIL: a bukott teszt sorszama (1-5)</li>"
+               "<li>ROUTER RESET: hanyadik ujrainditas (1-4)</li>"
+               "<li>AP MODE: 1 = nincs SSID, 2 = rossz jelszo, "
+               "3 = letelt a 2 nap, 4 = a gateway sem erheto el</li>"
+               "<li>GW UNREACH: 1 = a router reset elott, 2 = utana is</li>"
+               "<li>SLEEP: 1 = ujraprobalkozas, 2 = tartos internetkieses, "
+               "3 = AP idotullepes, 4 = vegzetes hiba</li>"
+               "<li>FATAL: 1 = LittleFS, 2 = konfig olvasas, "
+               "3 = watchdog, 4 = wifireset torles, 5 = tartosan keves heap</li>"
+               "<li>WDT RESET: hanyadik rendellenes ujraindulas</li>"
+               "<li>STUCK BUTTON: 0 = reset gomb, 1 = wifireset gomb</li>"
+               "<li>LOW HEAP: a szabad heap KB-ban a kuszob atlepesekor</li>"
+               "<li>HEAP RESTART: a szabad heap KB-ban az onkentes "
+               "ujraindulas elott</li>"
+               "</ul>"));
     r->print(F("<p><i>Az uptime minden indulaskor nullarol indul, ezert a "
                "BOOT sorok jelzik az ujraindulasokat. A naplo az "
                "aramtalanitast nem eli tul.</i></p>"
@@ -2012,8 +3090,10 @@ void startConfigPortal() {
     bool ipSet = false;
     bool gwSet = false;
 
-    const int params = request->params();
-    for (int i = 0; i < params; i++) {
+    // size_t, nem int: a valodi AsyncWebServerRequest::params() ezt adja
+    // vissza, es a szukites -Wconversion mellett figyelmeztetest is kap.
+    const size_t params = request->params();
+    for (size_t i = 0; i < params; i++) {
       const AsyncWebParameter* p = request->getParam(i);
       if (!p->isPost()) {
         continue;
@@ -2245,6 +3325,10 @@ void setup() {
   // körbefordulása itt szándékos és helyes: a különbség akkor is pontosan egy
   // intervallum, ha a millis() még kicsi.
   firstStartProbeLast = timing.startMillis - ONLINE_PROBE_INTERVAL_MS;
+  // Ugyanez a heap allapotsorara: az ELSO kiiras legyen azonnal esedekes, hogy
+  // a bootolas utani heap-szint rogton lathato legyen. (Az "== 0 tehat meg
+  // sosem irtunk" sentinel helyett ugyanaz a minta, mint a probak oraival.)
+  heapLogLast = timing.startMillis - HEAP_LOG_INTERVAL_MS;
 
   pinMode(wifiresetPin, INPUT_PULLUP);
   pinMode(resetPin, INPUT_PULLUP);
@@ -2297,9 +3381,33 @@ void setup() {
   // a kivizsgálandó eseményeket. Ezért csak az ELSŐ kör kerül a naplóba, az
   // ismétlések (a hozzájuk tartozó BOOT-tal együtt) nem - ugyanaz az elv, mint
   // a TEST FAIL sorozatoknál.
-  const int stuckButton = (digitalRead(resetPin) == LOW)     ? 0
-                        : (digitalRead(wifiresetPin) == LOW) ? 1
-                                                             : -1;
+  // Nem pillanatfelvétel: megvárjuk, elengedik-e. A részleteket lásd a
+  // STUCK_BUTTON_CONFIRM_MS-nél - dióhéjban: az ébresztő gombnyomás alatt az
+  // eszköz már bootol, tehát a gomb ilyenkor MINDIG lenyomva találtatik.
+  int stuckButton = pressedButtonNow();
+  if (stuckButton >= 0) {
+    Serial.println("Gomb lenyomva indulaskor - megvarjuk, elengedik-e.");
+    // PATTOGAS. A dontest EGYETLEN beolvasas hozza, nem kettő: ha a ciklus
+    // feltételében olvasnánk, majd utána MÉGEGYSZER a minősítéshez, a két
+    // olvasás közé beeshetne egy elengedéskori pattanás (a mechanikus gomb a
+    // felengedéskor is ad néhány rövid visszaugrást), és a már elengedett
+    // gombot beragadtnak minősítenénk. Így viszont a pattanás legfeljebb egy
+    // további 10 ms-os kört jelent.
+    bool elengedtek = false;
+    const uint32_t vart = millis();
+    while (millis() - vart < STUCK_BUTTON_CONFIRM_MS) {
+      if (pressedButtonNow() < 0) {
+        elengedtek = true;
+        break;
+      }
+      feedWatchdog();
+      delay(BUTTON_POLL_MS);
+    }
+    if (elengedtek) {
+      stuckButton = -1;
+      Serial.println("Elengedtek - ez ebreszto gombnyomas volt, indulunk tovabb.");
+    }
+  }
   const bool stuckRepeat =
     stuckButton >= 0 && stuckCycleAlreadyLogged((uint16_t)stuckButton);
   if (!stuckRepeat) {
@@ -2312,7 +3420,15 @@ void setup() {
     handleStuckButton("Wifireset button got stuck.", 1, !stuckRepeat);
   }
 
+  // A beragadt gomb ellenőrzése lefutott, jöhetnek a megszakítások. Ezek
+  // teszik lehetővé, hogy egy blokkoló HTTP kérés (max. 33 mp) alatti
+  // gombnyomás se vesszen el - a hosszmérés, tehát a debounce, az ISR-ben
+  // történik. Lásd a btnResetLatched leírását.
+  armButtonLatches();
+
   checkWatchdogResets();
+  initHeapState();
+  applyHeapCarry();
 
   Serial.println("Init LittleFS.");
   fsReady = initLittleFS();
@@ -2397,14 +3513,66 @@ void loop() {
   //
   // A türelmi idő alatt (2 mp) ÚJABB mentés is érkezhet - mobilon a dupla
   // koppintás gyakori. Ilyenkor épp fájlírás folyik, és az újraindítás félbe
-  // vágná: előbb megvárjuk, hogy az írás befejeződjön.
+  // vágná: előbb megvárjuk, hogy az írás befejeződjön - ÉS mindjárt meg is
+  // szerezzük a zárat, hogy a várakozás vége és az ESP.restart() közötti
+  // néhány ezredmásodpercben már ne indulhasson újabb mentés.
   if (restartPending && (int32_t)(currentMillis - restartAt) >= 0) {
-    waitForConfigWrite();
+    lockConfigBeforeShutdown();
     restartPending = false;
     Serial.println("RESTART!");
     Serial.flush();
     ESP.restart();
   }
+
+  // Hibátlanul lefutott egy óra: a watchdog számláló nullázható.
+  //
+  // MIÉRT ITT, a mód-elágazás ELŐTT? Mert a "hibátlan működés" nem üzemmód
+  // kérdése. Korábban ez a monitor ág belsejében állt, így AP beállító módban
+  // (és a first start várakozás alatt) sosem futott le: egy órákig nyitva
+  // tartott portál mellett az eszköz régi, elavult watchdog-strike-okat
+  // cipelt volna magával, és egy jóval későbbi, magában ártalmatlan glitch
+  // vitte volna a hármas küszöbre - vagyis feleslegesen MODE_FATAL-ba.
+  // (Mérve: WDT9.)
+  //
+  // A FELTETEL ALAKJA. Ez volt az EGYETLEN abszolut millis() osszehasonlitas a
+  // programban (a masik 23 mind kulonbseg-alaku). Ket okbol lett belole is
+  // kulonbseg:
+  //
+  // 1. KORBEFORDULAS. A millis() 49,7 naponta nullara fordul. Abszolut alakban
+  //    a feltetel a fordulas utan egy oran at hamis lenne. (Ma nem okozna
+  //    hibat, mert a szamlalo addigra ugyis nullazva van - de ez ervelessel
+  //    igazolt biztonsag, nem a kifejezes alakjabol kovetkezo. A kulonbseg
+  //    alak elojel nelkuli aritmetikaval magatol atvesszeli a fordulast.)
+  //
+  // 2. AZ INDULASI PONT KIMONDASA. Az abszolut alak azt a hallgatolagos
+  //    feltevest hordozta, hogy a millis() MINDEN indulaskor nullarol kezd.
+  //    Ez IGAZ - az ESP-IDF kimondja, hogy deep sleepbol ebredve az esp_timer
+  //    (es igy az Arduino millis(), ami ebbol szarmazik) NULLAROL indul ujra;
+  //    a sleep idejevel csak a LIGHT sleep utan lep elore, es csak a
+  //    gettimeofday() az, ami a deep sleepet is atvinne. Igy viszont a
+  //    feltetel maga mondja ki, mihez kepest mer: a setup() kezdetehez.
+  //    (Merve: WDT14.)
+  if (rtcWdtResets != 0 && currentMillis - timing.startMillis >= WDT_COUNTER_CLEAR_MS) {
+    rtcWdtResets = 0;
+    printUptime();
+    Serial.println("1 ora hibatlan mukodes - a watchdog szamlalo nullazva.");
+  }
+  // Ugyanez a heap miatti ujrainditasok szamlalojara: egy ora hibatlan
+  // mukodes utan a korabbi sorozat mar nem szamit. Kulon feltetel, hogy a
+  // sorai kulon-kulon jelenjenek meg a soros porton.
+  if (rtcHeapRestarts != 0 && currentMillis - timing.startMillis >= WDT_COUNTER_CLEAR_MS) {
+    rtcHeapRestarts = 0;
+    printUptime();
+    Serial.println("1 ora hibatlan mukodes - a heap ujrainditas szamlalo nullazva.");
+  }
+
+  // A heap felugyelete MINDEN uzemmodban mer es kiir (a diagnosztika ott is
+  // kell, ahol epp baj van), az ujrainditas viszont csak monitor modban
+  // tortenhet - lasd a checkHeap() kizarasait.
+  checkHeap(currentMillis);
+  // Az oraszinkron gondozasa: minden uzemmodban, mert a valos ido a naplo
+  // ertelmezesehez kell - es AP modban is naplozunk.
+  ensureNtp();
 
   if (deviceMode == MODE_FATAL) {
     // Mindkét LED együtt, gyorsan villog. A program szándékosan nem fut
@@ -2459,20 +3627,26 @@ void loop() {
   resetbutton();
   wifiresetbutton();
 
-  // Hibátlanul lefutott egy óra: a watchdog számláló nullázható.
-  if (rtcWdtResets != 0 && currentMillis >= WDT_COUNTER_CLEAR_MS) {
-    rtcWdtResets = 0;
-    printUptime();
-    Serial.println("1 ora hibatlan mukodes - a watchdog szamlalo nullazva.");
-  }
-
   switch (currentState) {
 
     case TESTING_STATE: {
       if (WiFi.status() != WL_CONNECTED) {
-        printUptime();
-        logEvent(EV_WIFI_LOST, (uint16_t)WiFi.status());
-        Serial.println("WiFi disconnected before test!");
+        // SPAM-VEDELEM. Egy pislákoló kapcsolatnál (a jel a határon van, a
+        // driver állapota másodpercenként többször vált) ez az ág körönként
+        // újra lefutna, és a 32 elemű körpuffer kiszorítaná a kivizsgálandó
+        // eseményeket. A SULYOSSAGROL OSZINTEN: védelem nélkül, REALIS
+        // pislákolási ütemeknél (500 / 1000 / 2000 / 5000 ms) a mérés 4 / 2 /
+        // 1 / 0 bejegyzést adott, tehát a puffert nem söpörte el - a
+        // mechanizmus viszont valós, és a pislákolás gyorsulásával arányosan
+        // romlik. Ugyanaz a szabály, mint a TEST FAIL sorozatoknál: csak a
+        // sorozat ELSŐ tagja kerül a naplóba és a soros portra. Egy közbeeső
+        // másik esemény után újra naplózunk. (Mérve: LOG4.)
+        const bool ismetles = lastEventWas((uint8_t)EV_WIFI_LOST);
+        if (!ismetles) {
+          printUptime();
+          logEvent(EV_WIFI_LOST, (uint16_t)WiFi.status());
+          Serial.println("WiFi disconnected before test!");
+        }
         digitalWrite(wifiledPin, LOW);
 
         // Egységes politika: 3 próba 30 mp szünetekkel.

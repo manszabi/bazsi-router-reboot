@@ -7,7 +7,7 @@ SKETCH   := ../bazsi_router_reboot.ino
 BUILD    := build
 SRC      := $(BUILD)/sketch.cpp stubs/main_stub.cpp test_main.cpp
 
-# A sanitizeres futtatas kulon cel: ugyanaz a 111 forgatokonyv, de ASan+UBSan
+# A sanitizeres futtatas kulon cel: ugyanazok a forgatokonyvek, de ASan+UBSan
 # alatt. Puffertulcsordulast, hasznalat-utani-felszabaditast es definialatlan
 # viselkedest fog meg - olyasmit, amit egy CHECK() sosem latna.
 .PHONY: test san cov clean
