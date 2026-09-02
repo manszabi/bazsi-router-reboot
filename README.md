@@ -408,10 +408,33 @@ bazsi-router-reboot/
 └── LICENSE                   # MIT License
 ```
 
-A Wi-Fi beállító weboldal a sketch `CONFIG_FORM` konstansában él, a flash
-`.rodata` szekciójában – nincs külön feltöltendő `data/` mappa. A LittleFS-re
-így csak a négy konfigurációs fájl és a mentett napló kerül (`/ssid.txt`,
-`/pass.txt`, `/ip.txt`, `/gateway.txt`, `/evlog.bin` – ez utóbbi ~400 bájt).
+A Wi-Fi beállító weboldal a sketchbe van fordítva (`FORM_HEAD` / `FORM_TAIL`
+konstansok + a `sendConfigForm()` generálja a mezőket), a flash `.rodata`
+szekciójában – nincs külön feltöltendő `data/` mappa. A LittleFS-re így csak a
+négy konfigurációs fájl és a mentett napló kerül (`/ssid.txt`, `/pass.txt`,
+`/ip.txt`, `/gateway.txt`, `/evlog.bin` – ez utóbbi ~400 bájt).
+
+### A sketch felépítése
+
+Egyetlen fájl, ~3950 sor, **75 függvény**. A gerinc két üzemmód
+(`MODE_MONITOR` / `MODE_CONFIG` / `MODE_FATAL`) és három állapot
+(`TESTING` → `SUCCESS`, vagy `TESTING` → `FAILURE`); minden más ezt szolgálja
+ki. `MODE_MONITOR`-ból van út a másik kettőbe, **visszaút nincs**.
+
+| # | Réteg | Kulcsfüggvények |
+|---|---|---|
+| 1 | Konfiguráció és állapot | *(csak adat: konstansok, `TestState`, `TimingState`, `UIFlags`, az RTC blokkok)* |
+| 2 | Napló és fájlkezelés | `logEvent()` · `encodeSecret()` / `decodeSecretInPlace()` · `readConfigValue()` / `writeConfigValue()` |
+| 3 | Valós idő, naplómentés, heap | `ensureNtp()` · `saveEventLog()` / `loadEventLogHeader()` · `checkHeap()` |
+| 4 | Watchdog és gombok | `initWatchdog()` · `feedWatchdog()` · `onResetButtonEdge()` / `onWifiResetButtonEdge()` |
+| 5 | Várakozások és zárak | `waitWithButtons()` · `onlineProbe()` · `beginConfigWrite()` / `lockConfigBeforeShutdown()` |
+| 6 | Wi-Fi, relé, alvás, újraindítás | `initWiFi()` · `reset_device()` · `enterDeepSleep()` · `resetbutton()` / `doWifiReset()` |
+| 7 | Internet-tesztek | `testInternetHTTP()` · `testInternetPing()` · `readChunked()` |
+| 8 | AP beállító portál | `startConfigPortal()` · `sendConfigForm()` · `printHtmlEscaped()` |
+| 9 | Belépési pontok | `setup()` · `loop()` · `handleFirstStart()` |
+
+Sorszámokkal, teljes függvénylistával és a fizikai vs. logikai sorrend
+eltéréseivel: [MUKODES.md 16. fejezet](MUKODES.md).
 
 ## 📦 Szükséges könyvtárak
 

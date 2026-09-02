@@ -355,7 +355,7 @@ routernek sem árt.
 | Portál elérhető: `192.168.4.1` | |
 | Jelzés: **Wi-Fi LED villog 1 Hz**, státusz LED végig **be** | azonnal |
 | Az űrlap előkitöltése | SSID, IP, gateway a mentett értékkel (HTML-escape-elve); **a jelszó soha** |
-| A beállító űrlap forrása | a programba fordítva (`CONFIG_FORM`), nincs feltöltendő `data/` mappa – a portál a LittleFS-ről semmit nem szolgál ki |
+| A beállító űrlap forrása | a programba fordítva (`FORM_HEAD` / `FORM_TAIL` + `sendConfigForm()`), nincs feltöltendő `data/` mappa – a portál a LittleFS-ről semmit nem szolgál ki |
 | Tétlenség után deep sleep | **5 perc** (`AP_TIMEOUT_MS`) az utolsó kéréstől |
 | A nyitva lévő lap keep-alive-ja | **60 mp**-enként `GET /ping` (1 bájt válasz) |
 | Elfogadott IP / gateway | **csak IPv4**, nem `0.0.0.0`, és csak együtt |
@@ -1184,3 +1184,104 @@ A `WIFI LOST` szűrése volt a legutolsó hiányzó darab. **Az arányokról
 2000 / 5000 ms) a mérés 4 / 2 / 1 / 0 bejegyzést adott – tehát a 32-es puffert
 nem söpörte el. A mechanizmus viszont valós, és a pislákolás gyorsulásával
 arányosan romlik; a védelem hat sor, és nincs hátránya. (Mérve: `LOG4`.)
+
+---
+
+## 16. A forráskód szerkezete
+
+A program **egyetlen `.ino` fájl, ~3950 sor, 75 függvény**. Nagyjából a felét
+kommentek teszik ki – a legtöbb egy-egy döntés *indoklása*, nem a kód
+újramondása.
+
+### A gerinc: két üzemmód, három állapot
+
+Minden más ezt szolgálja ki:
+
+| | |
+|---|---|
+| **`deviceMode`** | `MODE_MONITOR` (a routert figyeli) · `MODE_CONFIG` (AP portál) · `MODE_FATAL` (megállt, villog) |
+| **`currentState`** | `TESTING_STATE` → `SUCCESS_STATE` → vissza · vagy `TESTING_STATE` → `FAILURE_STATE` (router reset) |
+
+A `MODE_MONITOR`-ból van út a másik kettőbe, **visszaút nincs**. Erre a
+szerkezeti tényre több biztonsági érvelés is épül – például az, hogy a Wi-Fi
+konfigurációs puffereket nem kell zárral védeni (lásd a 13. fejezetet).
+
+### 1. Konfiguráció és állapot (`1–636`)
+
+Nincs benne függvény, csak adat: pinek, időzítési konstansok, a három
+állapot-struct (`TestState`, `TimingState`, `UIFlags`), a három enum (`State`,
+`DeviceMode`, `ConfigStatus`), és az RTC memóriában élő blokkok:
+`EventCode` / `EventEntry`, `EvFileHeader`, valamint a `rtcEv*`, `rtcWdt*`,
+`rtcHeap*`, `rtcCarry*` változók.
+
+### 2. Napló és fájlkezelés (`639–998`)
+
+| Csoport | Függvények |
+|---|---|
+| Napló | `logEvent()` · `resetReasonName()` · `eventName()` · `lastEventWas()` · `stuckCycleAlreadyLogged()` |
+| Jelszó-összekeverés | `secretSeed()` · `xorshift32()` · `encodeSecret()` · `hexVal()` · `decodeSecretInPlace()` |
+| Fájlok | `initLittleFS()` · `fileMatches()` · `readConfigValue()` · `writeConfigValue()` · `clearConfigValue()` |
+| Segédek | `isUsableIPv4()` · `trimInPlace()` · `enterFatal()` |
+
+### 3. Valós idő, naplómentés, heap (`1000–1450`)
+
+| Csoport | Függvények |
+|---|---|
+| NTP | `nowEpoch()` · `startNtp()` · `ensureNtp()` · `formatEpoch()` |
+| Mentés / betöltés | `saveEventLog()` · `loadEventLogHeader()` · `loadEventLogEntries()` |
+| Heap | `initHeapState()` · `applyHeapCarry()` · `checkHeap()` |
+
+### 4. Watchdog és gombok (`1453–1610`)
+
+`checkWatchdogResets()` · `initWatchdog()` · `feedWatchdog()` · a két ISR
+(`onResetButtonEdge()`, `onWifiResetButtonEdge()`) · `armButtonLatches()` ·
+`pressedButtonNow()`
+
+### 5. Várakozások és zárak (`1612–1830`)
+
+`blockingDelay()` · `waitWithButtons()` · `waitWithButtonsUntilOnline()` ·
+`onlineProbe()` · `onlineProbeDue()` · `beginConfigWrite()` ·
+`lockConfigBeforeShutdown()`
+
+### 6. Wi-Fi, relé, alvás, újraindítás (`1980–2540`)
+
+| Csoport | Függvények |
+|---|---|
+| Wi-Fi | `initWiFi()` · `reconnectWifi()` · `wifiAuthFailed()` · `wifiGiveUp()` |
+| Relé | `reset_device()` · `routerResetAndRetry()` · `holdRelayForSleep()` |
+| A négy alvás | `enterDeepSleep()` ← `retrySleep()`, `internetFailSleep()`, `apSleep()`, `fatalSleep()`; külön úton `handleStuckButton()` |
+| Gombok, újraindítás | `resetbutton()` · `wifiresetbutton()` · `restartFromButton()` · `doWifiReset()` · `fatalHalt()` · `printUptime()` |
+
+### 7. Internet-tesztek (`2549–2795`)
+
+`testInternetHTTP()` · `testInternetPing()` · `gatewayUnreachable()` · az
+olvasók: `readByteBounded()`, `readBounded()`, `readChunked()`,
+`hexDigitAnyCase()`
+
+### 8. AP beállító portál (`1834–1880` + `2859–3395`)
+
+`startConfigPortal()` – ebben él a négy HTTP kezelő (`GET /`, `/ping`, `/log`,
+`POST /`) · `sendConfigForm()` · `printHtmlEscaped()` · `touchApDeadline()`
+
+### 9. Belépési pontok (`3399`, `3587`)
+
+`setup()` és `loop()`, plusz a `handleFirstStart()`.
+
+### Amit érdemes tudni olvasás előtt
+
+> **A fizikai sorrend és a logikai csoportosítás nem mindenhol esik egybe.** A
+> `printHtmlEscaped()` és a `sendConfigForm()` a portálhoz tartozik, de a fájl
+> közepén, a zárak után áll – mert a `startConfigPortal()` előtt kell
+> definiálni őket. A `gatewayUnreachable()` logikailag a Wi-Fi-hez tartozik, de
+> a tesztek közé került, mert a `testInternetPing()`-re épül. A fájl elején álló
+> előre-deklarációs blokk (`~600–636`) épp ezért van: feloldja a körkörös
+> hivatkozásokat.
+
+Négy visszatérő minta szövi át az egészet:
+
+| Minta | Hol számít |
+|---|---|
+| **Semmi dinamikus foglalás** | fix méretű pufferek mindenütt – a méret egyben validáció is |
+| **Előjel nélküli különbség minden időzítésnél** | így a `millis()` 49,7 napos körbefordulása sehol nem számít |
+| **„Csak a sorozat első tagja"** | `TEST FAIL`, `WIFI LOST`, `STUCK BUTTON`, `LOW HEAP` – ez védi a 32 elemű naplót és a soros portot |
+| **A zár atomikus megszerzése** | sosem „megnézem, szabad-e, aztán csinálom" – a webszerver taskja közben beléphet |
