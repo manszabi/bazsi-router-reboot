@@ -238,7 +238,13 @@ void gpio_deep_sleep_hold_dis() { g_deepSleepHoldEnabled = false; simLog("deep_s
 // --- FreeRTOS kritikus szakasz ---
 int g_criticalDepth = 0;
 int g_criticalMaxDepth = 0;
+// Hany kritikus szakasz NYILT meg a szamlalo nullazasa ota. A ket task kozotti
+// osztott allapot (restartAt + restartPending) vedelmenek regresszios merese
+// hasznalja: ha valaki visszaveszi a zarat es nyers irasokra cserel, ez a
+// szamlalo nullan marad, es a SYNC1/SYNC2 megbukik.
+int g_criticalEnters = 0;
 void portENTER_CRITICAL(portMUX_TYPE*) {
+  g_criticalEnters++;
   g_criticalDepth++;
   if (g_criticalDepth > g_criticalMaxDepth) g_criticalMaxDepth = g_criticalDepth;
 }

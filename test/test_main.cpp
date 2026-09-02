@@ -76,6 +76,16 @@ extern bool watchdogEnabled;
 extern volatile bool btnResetLatched, btnWifiResetLatched;
 extern volatile uint32_t btnResetDownAt, btnWifiResetDownAt;
 extern int g_criticalMaxDepth;
+extern int g_criticalEnters;
+// A ket task kozotti osztott allapot elerese - lasd a sketchben a
+// beginConfigWrite() alatti blokkot.
+void requestRestart(uint32_t delayMs);
+bool restartRequestDue(uint32_t now);
+bool restartRequested();
+void clearRestartRequest();
+bool configWriteInProgress();
+bool beginConfigWrite();
+void endConfigWrite();
 extern uint32_t resetDelayProbeLast;
 extern uint32_t firstStartProbeLast;
 bool onlineProbeDue(uint32_t& lastProbe, uint32_t now);
@@ -6897,6 +6907,81 @@ static void scEVT1() {
   CHECK(megvan, "az elso bukas EV_TEST_FAIL parametere 1, nem 0");
 }
 
+
+// ---------------------------------------------------------------------------
+// SYNC: a ket task kozotti osztott allapot.
+//
+// MIT MER ES MIT NEM. A restartAt + restartPending par valodi versenyhelyzete
+// KET MAGOT igenyelne; a host harness egyszalu, tehat a versenyt magat nem
+// tudja eloallitani - es ezt oszinten ki kell mondani, mert egy "reprodukaltuk
+// a race-t" allitas itt hamis lenne. Amit ez a harom forgatokonyv mer, az a
+// VEDELEM MEGLETE es a helyes szemantika: hogy a par irasa es olvasasa egyetlen
+// oszthatatlan szakaszban tortenik, es hogy a szakasz nem agyazodik egymasba.
+//
+// Ez pontosan az a regresszio, ami ellen vedeni kell: ha valaki a
+// requestRestart()-ot visszairja ket nyers ertekadasra, a chip egymagos volta
+// miatt MINDEN viselkedesi teszt tovabbra is atmenne - egyedul ez a merés
+// bukna meg. (Mutaciosan ellenorizve.)
+// ---------------------------------------------------------------------------
+
+static void scSYNC1() {
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_millis = 100000;
+
+  // Iras: pontosan EGY kritikus szakasz, es a par utana konzisztens.
+  g_criticalEnters = 0;
+  g_criticalMaxDepth = 0;
+  requestRestart(2000);
+  CHECK(g_criticalEnters == 1,
+        "a requestRestart() a part EGYETLEN kritikus szakaszban irja");
+  CHECK(g_criticalMaxDepth == 1, "es a szakasz nem agyazodik egymasba");
+  CHECK(restartPending, "a keres bejegyzodott");
+  CHECK(restartAt == 102000u, "a hatarido a turelmi idovel kesobb");
+
+  // Olvasas: szinten egyetlen szakasz.
+  g_criticalEnters = 0;
+  const bool due = restartRequestDue(g_millis);
+  CHECK(g_criticalEnters == 1,
+        "a restartRequestDue() a part EGYETLEN kritikus szakaszban olvassa");
+  CHECK(!due, "a turelmi ido meg nem telt le");
+}
+
+static void scSYNC2() {
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_millis = 100000;
+  requestRestart(2000);
+
+  CHECK(!restartRequestDue(101999), "1 ms-mal a hatarido elott meg nem esedekes");
+  CHECK(restartRequestDue(102000), "a hataridon esedekes");
+  CHECK(restartRequestDue(103000), "es azon tul is az marad");
+
+  // A jelzo nelkul a hatarido onmagaban SOSEM eleg. Ez az a hibas allapot,
+  // amit egy tort olvasas eloallitana (jelzo igaz, hatarido meg a regi 0):
+  // a "0" hatarido minden mai idopontnal regebbi, tehat AZONNALI ujraindulast
+  // jelentene - meg mielott a 200-as valasz kiment volna a bongeszonek.
+  clearRestartRequest();
+  CHECK(!restartRequested(), "a keres torolve");
+  CHECK(!restartRequestDue(102000), "torolt keres mellett SOHA nem esedekes");
+}
+
+static void scSYNC3() {
+  // A konfigzar szimmetriaja: a megszerzes es a feloldas ugyanazon az uton
+  // megy, es a feloldas utan ujra megszerezheto.
+  coldBoot(true, "TestNet", "pw", "", "");
+  CHECK(!configWriteInProgress(), "indulaskor szabad a zar");
+  CHECK(beginConfigWrite(), "a zar megszerezheto");
+  CHECK(configWriteInProgress(), "es innentol foglaltnak latszik");
+  CHECK(!beginConfigWrite(), "masodszor mar NEM szerezheto meg");
+  g_criticalEnters = 0;
+  g_criticalMaxDepth = 0;
+  endConfigWrite();
+  CHECK(g_criticalEnters == 1,
+        "a feloldas is a zaron keresztul megy (nem nyers ertekadas)");
+  CHECK(g_criticalMaxDepth == 1, "es nem agyazodik egymasba");
+  CHECK(!configWriteInProgress(), "feloldas utan ujra szabad");
+  CHECK(beginConfigWrite(), "es ujra megszerezheto");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -7198,6 +7283,9 @@ static const Scenario kScenarios[] = {
   { "BNC3: folyamatosan recsego (kopott) gomb nem indit ujra", scBNC3 },
   { "BNC4: a beragadt-gomb ellenorzes pattogasturo", scBNC4 },
   { "EVT1: a /log TEST FAIL paramétere is 1-alapú", scEVT1 },
+  { "SYNC1: a restartAt+restartPending par EGY kritikus szakaszban", scSYNC1 },
+  { "SYNC2: az ujraindulasi hatarido szemantikaja", scSYNC2 },
+  { "SYNC3: a konfigzar megszerzese es feloldasa szimmetrikus", scSYNC3 },
 };
 
 
