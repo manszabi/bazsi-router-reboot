@@ -706,7 +706,21 @@ void checkWatchdogResets() {
     }
   } else if (reason == ESP_RST_POWERON || reason == ESP_RST_EXT
              || reason == ESP_RST_BROWNOUT) {
-    // Áramtalanítás vagy külső reset: emberi beavatkozás, tiszta lap.
+    // TISZTA LAP: a TAPELLATAS szakadt meg, nem a program akadt meg.
+    //
+    // (A korabbi indoklas "emberi beavatkozas"-t mondott, ami a POWERON-ra es
+    // az EXT-re igaz, a BROWNOUT-ra viszont nem: az tapfeszultseg-eses, nem
+    // gombnyomas. A kozos nevezo nem az ember, hanem az, hogy a lapka
+    // AZ ARAMELLATAS miatt indult ujra - ilyenkor a korabbi strike-ok mar egy
+    // masik "eletbol" valok, es az RTC memoria tartalma is ketes.)
+    //
+    // ES AMI SZANDEKOSAN NINCS ITT: az ESP_RST_USB es az ESP_RST_JTAG. Kezenfekvo
+    // volna oket is idesorolni ("uj firmware, tiszta lap"), de az pont a
+    // legrosszabbkor torolne: aki egy lefagyo eszkozhoz odamegy es BEDUGJA a
+    // kabelt, hogy megnezze, mi tortent, azzal a mozdulattal tunteteni el a
+    // bizonyitekot. Ez az eszkoz felugyelet nelkul dolgozik, es a naplo a
+    // diagnozis egyetlen eszkoze - ezert ott a megorzes ER TOBBET.
+    // Normal uzemben ugyis nullaz az "1 ora hibatlan futas" szabaly.
     rtcWdtResets = 0;
   }
 }

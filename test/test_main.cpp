@@ -4455,7 +4455,16 @@ static void scNV15() {
   // AZ INDULAS OKANAK EMBERI NEVE. A /log oldal ezt irja ki szovegesen; ha egy
   // cimke elcsuszna, a naplo felrevezetne. A lefedettseg szerint eddig csak
   // harom ok fordult elo a tesztekben (POWERON, DEEPSLEEP, TASK_WDT), a tobbi
-  // kilenc cimke sora sosem futott le.
+  // cimke sora sosem futott le.
+  //
+  // AZ IDF 5.x TOVABBI OKAI is nevet kaptak. Kettonek KONKRET oka van itt:
+  //   USB        - a XIAO ESP32-C3 nativ USB-t hasznal, tehat egy firmware
+  //                feltoltes vagy egy soros monitor megnyitasa IDE fut be. Ez
+  //                a leggyakoribb "nem magatol indult ujra" eset a fejlesztes
+  //                alatt, es "ismeretlen (11)"-kent zavarba ejto volt.
+  //   PWR GLITCH - tapfeszultseg-tuske. Egy relevel halozati aramot kapcsolgato
+  //                eszkoznel ez a legfontosabb diagnosztikai jelzes: sajat
+  //                magat zavarja-e meg a kapcsolas.
   struct Eset { esp_reset_reason_t ok; const char* resz; };
   const Eset esetek[] = {
     { ESP_RST_POWERON,    "bekapcsolas" },
@@ -4468,6 +4477,11 @@ static void scNV15() {
     { ESP_RST_DEEPSLEEP,  "deep sleep" },
     { ESP_RST_BROWNOUT,   "BROWNOUT" },
     { ESP_RST_CPU_LOCKUP, "CPU lefagyas" },
+    { ESP_RST_SDIO,       "SDIO" },
+    { ESP_RST_USB,        "USB reset" },
+    { ESP_RST_JTAG,       "JTAG reset" },
+    { ESP_RST_EFUSE,      "eFuse" },
+    { ESP_RST_PWR_GLITCH, "TAPFESZULTSEG-TUSKE" },
   };
   bool mind = true;
   for (const Eset& e : esetek) {
@@ -4481,19 +4495,19 @@ static void scNV15() {
       printf("     [info] hianyzik a(z) %d okhoz: '%s'\n", (int)e.ok, e.resz);
     }
   }
-  CHECK(mind, "mind a 10 indulasi ok EMBERI nevet kap a /log oldalon");
+  CHECK(mind, "mind a 15 nevesitett indulasi ok EMBERI nevet kap a /log oldalon");
 
-  // Es a NEM NEVESITETT okok sem dobnak el semmit: "ismeretlen"-t irunk.
+  // Es a NEM NEVESITETT ok sem dob el semmit: "ismeretlen"-t irunk.
   //
-  // Ez nem elmeleti eset: az ESP32-C3-on letezik ESP_RST_USB es ESP_RST_JTAG
-  // is, es a firmware ezeket szandekosan nem nevesiti kulon - a naplo szamara
-  // "ismeretlen indulasi ok, a szam zarojelben" pontosan eleg.
+  // A nevesites utan EGYETLEN ilyen ertek maradt: az ESP_RST_UNKNOWN (0) - a
+  // default ag tehat tovabbra is vedelmi celu, egy JOVOBELI IDF-ben megjeleno
+  // uj ok ellen. Epp ezert kell merni: a lap akkor sem hallgathat el.
   //
   // FONTOS, hogy VALODI enum erteket hasznaljunk: az elso valtozat 99-et irt
   // a valtozoba, ami kivul esik az enum abrazolhato tartomanyan (0..15), es
   // ezzel definialatlan viselkedest okozott. Az UBSan el is kapta.
   coldBoot(false, "", "", "", "");
-  g_resetReason = ESP_RST_USB;
+  g_resetReason = ESP_RST_UNKNOWN;
   setup();
   AsyncWebServerRequest req; g_handlers["/log#1"](&req);
   CHECK(req._body.find("ismeretlen") != std::string::npos,
@@ -7288,7 +7302,7 @@ static const Scenario kScenarios[] = {
   { "NV12: megtelt fajlrendszer a naplo mentese kozben", scNV12 },
   { "NV13: valtozas nelkul nem irunk ujra (flash kimeles)", scNV13 },
   { "NV14: a lap kiirja, MIKOR mentettuk a naplot", scNV14 },
-  { "NV15: mind a 10 indulasi ok emberi nevet kap", scNV15 },
+  { "NV15: mind a 15 nevesitett indulasi ok emberi nevet kap", scNV15 },
   { "NV16: olvashatatlan fajlrendszer a naplo korul", scNV16 },
   { "AP6: mentes csatolatlan fajlrendszerrel -> tiszta 500", scAP6 },
   { "WF11: a router reset utan sem jon vissza a WiFi", scWF11 },
