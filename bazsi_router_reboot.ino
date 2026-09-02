@@ -3771,24 +3771,22 @@ void setup() {
 
 }
 
-void loop() {
-  const uint32_t currentMillis = millis();
+// ---------------------------------------------------------------------------
+// A loop() harom uzemmod-aga es a kozos szamlalo-karbantartas.
+//
+// MIERT KULON? A loop() 362 sor volt, 38 dontesi ponttal es 6-os beagyazasi
+// melyseggel: egyszerre vegzett diszpecselest, allapotgepet, LED-villogtatast
+// es szamlalo-nullazast. Ez a program legkritikusabb fuggvenye - epp ennek
+// kellene a legatlathatobbnak lennie. A szetbontas utan a loop() maga csak
+// azt mondja meg, MI kovetkezik; a HOGYAN mind nevesitett fuggvenyben all.
+//
+// A "currentMillis" mindenhol atadott parameter marad, nem uj millis() hivas:
+// egy kor MINDEN dontese ugyanahhoz az idobelyeghez merjen.
+// ---------------------------------------------------------------------------
 
-  // Az AP-módú beállító oldal kérésére halasztott újraindítás.
-  //
-  // A türelmi idő alatt (2 mp) ÚJABB mentés is érkezhet - mobilon a dupla
-  // koppintás gyakori. Ilyenkor épp fájlírás folyik, és az újraindítás félbe
-  // vágná: előbb megvárjuk, hogy az írás befejeződjön - ÉS mindjárt meg is
-  // szerezzük a zárat, hogy a várakozás vége és az ESP.restart() közötti
-  // néhány ezredmásodpercben már ne indulhasson újabb mentés.
-  if (restartRequestDue(currentMillis)) {
-    lockConfigBeforeShutdown();
-    clearRestartRequest();
-    Serial.println("RESTART!");
-    Serial.flush();
-    ESP.restart();
-  }
-
+// Egy ora hibatlan futas utan a korabbi hibasorozatok mar nem szamitanak.
+// MINDEN uzemmodban fut, a mod-elagazas ELOTT - lasd a benti indoklast.
+void clearHealthyRunCounters(uint32_t currentMillis) {
   // Hibátlanul lefutott egy óra: a watchdog számláló nullázható.
   //
   // MIÉRT ITT, a mód-elágazás ELŐTT? Mert a "hibátlan működés" nem üzemmód
@@ -3830,6 +3828,326 @@ void loop() {
     printUptime();
     Serial.println("1 ora hibatlan mukodes - a heap ujrainditas szamlalo nullazva.");
   }
+}
+
+// MODE_FATAL: vegzetes hiba jelzese. A program szandekosan nem fut tovabb -
+// nem tesztel es nem kapcsolja a relet.
+void handleFatalMode(uint32_t currentMillis) {
+  // Mindkét LED együtt, gyorsan villog. A program szándékosan nem fut
+  // tovább: nem tesztel és nem kapcsolja a relét.
+  if (currentMillis - timing.blinkLast >= FATAL_BLINK_MS) {
+    timing.blinkLast = currentMillis;
+    uiFlags.blinkOn = !uiFlags.blinkOn;
+    digitalWrite(ledPin, uiFlags.blinkOn ? HIGH : LOW);
+    digitalWrite(wifiledPin, uiFlags.blinkOn ? HIGH : LOW);
+  }
+  // A hiba magától nem múlik el: 5 perc jelzés után elalszunk, hogy ne
+  // fogyasszunk és ne villogjunk feleslegesen napokig.
+  if (currentMillis - timing.fatalStart >= FATAL_SLEEP_AFTER_MS) {
+    fatalSleep();
+  }
+  // A gombok élnek, hogy újraindítani vagy resetelni lehessen az eszközt.
+  resetbutton();
+  wifiresetbutton();
+  delay(BUTTON_POLL_MS);
+}
+
+// MODE_CONFIG: az AP beallito portal futasa. Nincs internetteszt.
+void handleConfigMode(uint32_t currentMillis) {
+  // A Wi-Fi LED villog: "beállító módban vagyok, várom a böngészőt". A
+  // státusz LED közben végig világít - a kettő együtt egyértelműen más,
+  // mint a végzetes hiba (mindkettő 5 Hz) vagy a router reset (csak a
+  // státusz LED, 2 Hz).
+  if (currentMillis - timing.blinkLast >= AP_BLINK_MS) {
+    timing.blinkLast = currentMillis;
+    uiFlags.blinkOn = !uiFlags.blinkOn;
+    digitalWrite(wifiledPin, uiFlags.blinkOn ? HIGH : LOW);
+  }
+  // Konfig módban nincs internetteszt. A portál AP_TIMEOUT_MS tétlenségig
+  // él; minden kérés és a folyamatban lévő mentés kitolja a határidőt.
+  resetbutton();
+  wifiresetbutton();
+  // Nem alszunk el, ha épp mentés folyik, vagy ha a sikeres mentés utáni
+  // újraindításra várunk.
+  if (!configWriteInProgress() && !restartRequested() &&
+      (int32_t)(currentMillis - apDeadline) >= 0) {
+    apSleep();
+  }
+  delay(BUTTON_POLL_MS);
+}
+
+// TESTING_STATE: a soron kovetkezo vegpont HTTP tesztje. Elotte megnezi, hogy
+// egyaltalan van-e Wi-Fi kapcsolat.
+void runTestingState() {
+  if (WiFi.status() != WL_CONNECTED) {
+    // SPAM-VEDELEM. Egy pislákoló kapcsolatnál (a jel a határon van, a
+    // driver állapota másodpercenként többször vált) ez az ág körönként
+    // újra lefutna, és a 32 elemű körpuffer kiszorítaná a kivizsgálandó
+    // eseményeket. A SULYOSSAGROL OSZINTEN: védelem nélkül, REALIS
+    // pislákolási ütemeknél (500 / 1000 / 2000 / 5000 ms) a mérés 4 / 2 /
+    // 1 / 0 bejegyzést adott, tehát a puffert nem söpörte el - a
+    // mechanizmus viszont valós, és a pislákolás gyorsulásával arányosan
+    // romlik. Ugyanaz a szabály, mint a TEST FAIL sorozatoknál: csak a
+    // sorozat ELSŐ tagja kerül a naplóba és a soros portra. Egy közbeeső
+    // másik esemény után újra naplózunk. (Mérve: LOG4.)
+    const bool ismetles = lastEventWas((uint8_t)EV_WIFI_LOST);
+    if (!ismetles) {
+      printUptime();
+      logEvent(EV_WIFI_LOST, (uint16_t)WiFi.status());
+      Serial.println("WiFi disconnected before test!");
+    }
+    digitalWrite(wifiledPin, LOW);
+
+    // Egységes politika: 3 próba 30 mp szünetekkel.
+    if (reconnectWifi()) {
+      // Visszajött, a teszt a következő körben fut le.
+      timing.stateStart = millis();
+      return;
+    }
+
+    // Nem jött vissza: azonnal router újraindítás, nem várunk további
+    // teszt ciklusokat. A FAILURE_STATE reset ágát így élesítjük - nincs
+    // hálózat, amin bármelyik végpont elérhető lenne, nincs mit végigpróbálni.
+    printUptime();
+    Serial.println("WiFi nem jott vissza - router ujrainditas kovetkezik.");
+    testState.cycleIndex = RESET_TRIGGER_CYCLE + 1;
+    currentState = FAILURE_STATE;
+    timing.stateStart = millis();
+    return;
+  }
+  // A kapcsolat magától is helyreállhat (auto-reconnect), ilyenkor a LED
+  // korábban hazudott volna.
+  digitalWrite(wifiledPin, HIGH);
+  if (rtcRetryRounds != 0) {
+    rtcRetryRounds = 0;  // működik a hálózat: új 2 napos ablak
+  }
+  printUptime();
+  Serial.println("Beginning Test.");
+  // Csak az indexet írjuk ki ITT: az azt mondja meg, MELYIK végpont jön,
+  // tehát a teszt ELŐTT van értelme. A hibaszámláló viszont a teszt
+  // EREDMÉNYE - ezért az a "Test failed." sorra került. Korábban itt állt,
+  // így a sorozat első tesztjénél mindig "0"-t írt ki.
+  //
+  // A KIÍRÁS 1-alapú (1..5), a belső cycleIndex marad 0-alapú: a 0..4
+  // tartomány a végpontválasztó if-lánc és a RESET_TRIGGER_CYCLE
+  // küszöb miatt kötött. Emberi olvasónak viszont nincs "0-dik teszt".
+  Serial.print("Teszt ciklus index = ");
+  Serial.println(testState.cycleIndex + 1);
+
+  // Mind az ot teszt HTTP, mert az ICMP nem bizonyit sem nevfeloldast, sem
+  // TCP-t: egy befagyott router-DNS mellett a ping tokeletesen megy, kozben
+  // egyetlen eszkoz sem eri el az internetet. Nem veletlen, hogy egyetlen
+  // nagy implementacio sem ICMP-vel validal (NetworkManager, Firefox,
+  // Windows NCSI: mind HTTP). Ot kulonbozo uzemelteto, ket ellenorzesi mod.
+  // Ures elvart valasz = 204-es ellenorzes, lasd testInternetHTTP().
+  bool testResult;
+  if (testState.cycleIndex == 1) {
+    testResult = testInternetHTTP("http://cp.cloudflare.com/generate_204", "");
+  } else if (testState.cycleIndex == 2) {
+    testResult = testInternetHTTP("http://detectportal.firefox.com/success.txt", "success");
+  } else if (testState.cycleIndex == 3) {
+    testResult = testInternetHTTP("http://nmcheck.gnome.org/check_network_status.txt",
+                                  "NetworkManager is online");
+  } else if (testState.cycleIndex == 4) {
+    testResult = testInternetHTTP("http://connectivitycheck.gstatic.com/generate_204", "");
+  } else {
+    testResult = testInternetHTTP("http://www.msftconnecttest.com/connecttest.txt", "Microsoft Connect Test");
+  }
+
+  if (testResult) {
+    testState.cycleIndex = 0;
+    testState.failedCount = 0;
+    testState.resetEvents = 0;
+    currentState = SUCCESS_STATE;
+  } else {
+    testState.failedCount++;
+    // Csak a hibasorozat első tagját naplózzuk: a 12 mp-enként ismétlődő
+    // bejegyzések különben percek alatt kiszorítanák a fontos eseményeket.
+    if (testState.failedCount == 1) {
+      // 1-alapú, hogy a /log oldal ugyanazt a számot mutassa, mint a
+      // soros port "Teszt ciklus index" sora.
+      logEvent(EV_TEST_FAIL, (uint16_t)(testState.cycleIndex + 1));
+    }
+    printUptime();
+    // A már megnövelt számláló: ez a mostani bukással együtt hány
+    // egymás utáni sikertelen teszt van. A nevező az a darabszám, ami
+    // után a router újraindítása következik (mind az öt végpont bukott).
+    Serial.print("Test failed. | Hibák száma = ");
+    Serial.print(testState.failedCount);
+    Serial.print(" / ");
+    Serial.println(MAX_CYCLE_INDEX + 1);
+    currentState = FAILURE_STATE;
+  }
+  // A tesztek percekig futhatnak, ezért friss időbélyeg kell.
+  timing.stateStart = millis();
+  return;
+}
+
+// FAILURE_STATE: vagy a kovetkezo vegpontra lep, vagy - ha mind az ot elbukott -
+// levezenyli a router ujrainditasat es az utana kovetkezo ellenorzeseket.
+void runFailureState(uint32_t currentMillis) {
+  // Mind az ot vegpont elbukott: a 4-es indexen a Google-t is probaltuk,
+  // tehat a 0..4 mind lefutott es mind bukott. Mivel a ket szamlalo egyutt
+  // lep (failedCount == cycleIndex + 1), ez pontosan 5 egymas utani bukas -
+  // de a feltetel szandekosan a VEGPONT-lefedettseget mondja ki, nem az
+  // idot: egyetlen uzemelteto kiesese soha ne latszodjon internetkimaradasnak.
+  // Egy failedCount-alapu kuszob ugyanezt ma szam szerint eltalalna, de nem
+  // ezt garantalna - ezert csak az index kot. A failedCount a naplozashoz es
+  // a soros kimenethez kell (csak a hibasorozat elso tagja kerul a naplóba).
+  if (testState.cycleIndex > RESET_TRIGGER_CYCLE) {
+
+    if (!uiFlags.resetPrinted) {
+      // Statikus IP mellett: ha a saját gateway-ünket sem érjük el, a hiba
+      // helyi, és a router újraindítása nem javíthatja. Egy esélyt azért
+      // adunk neki (hátha tényleg a router akadt meg) - a döntés a reset
+      // UTÁNI ellenőrzésnél születik meg.
+      if (gatewayUnreachable()) {
+        printUptime();
+        Serial.println("A sajat gateway sem elerheto - lehet, hogy rossz a statikus IP.");
+        Serial.println("Kap a router egy esélyt: ujrainditas, aztan ujra ellenorizzuk.");
+        logEvent(EV_GW_UNREACHABLE, 1);
+      }
+      printUptime();
+      Serial.println("Beginning Reset in FAILURE_STATE.");
+      while (!reset_device()) {
+        resetbutton();
+        wifiresetbutton();
+        feedWatchdog();
+        delay(BUTTON_POLL_MS);
+      }
+      printUptime();
+      Serial.println("Reset is done in FAILURE_STATE.");
+      Serial.println("RESET_DELAY start in FAILURE_STATE.");
+      timing.stateStart = millis();
+      uiFlags.resetPrinted = true;
+      resetDelayProbeLast = millis();  // az első próba egy intervallum múlva
+      return;                        // a RESET_DELAY a következő körökben telik
+    }
+
+    // A RESET_DELAY korai lezárása: ha a router hamarabb feláll, és az
+    // internet is megvan, nincs mire várni.
+    const bool earlyOnline = onlineProbeDue(resetDelayProbeLast, millis());
+
+    if (earlyOnline || millis() - timing.stateStart >= RESET_DELAY) {
+      printUptime();
+      if (earlyOnline) {
+        Serial.println("RESET_DELAY korai vege: halozat es internet OK.");
+      } else {
+        Serial.println("RESET_DELAY end in FAILURE_STATE.");
+      }
+
+      // Korai kilépéskor a kapcsolat MÁR él és mérve is van - a
+      // disconnect(true) épp azt bontaná le, amit az imént igazoltunk.
+      if (!earlyOnline) {
+        Serial.println("Reconnect WIFI in FAILURE_STATE.");
+        WiFi.disconnect(true);
+        blockingDelay(100);
+
+        // Egységesen 3 próba 30 mp szünetekkel. A reconnectWifi() minden
+        // próbája teljes initWiFi(), ami újra alkalmazza a statikus IP/DNS
+        // konfigot - a disconnect(true) ugyanis eldobja a netifet.
+        if (!reconnectWifi()) {
+          printUptime();
+          Serial.println("A router reset utan sem jott vissza a WiFi.");
+          digitalWrite(wifiledPin, LOW);
+          wifiGiveUp();
+          // Ez a return a host tesztekben feher marad, de nem azert, mert az
+          // ag nem fut le (a WF11 meri): a wifiGiveUp() vagy elalszik,
+          // vagy AP modba visz, es a harness az elalvast kivetellel
+          // modellezi - a vezerles ide mar nem ter vissza.
+          return;
+        }
+
+        printUptime();
+        Serial.println("WIFI OK in FAILURE_STATE.");
+      }
+      digitalWrite(wifiledPin, HIGH);
+
+      // A router megkapta az esélyét. Ha a gateway még mindig nem
+      // válaszol, a statikus IP a rossz - a routert nincs értelme tovább
+      // áramtalanítani. Beállító módba megyünk, hogy javítani lehessen.
+      if (gatewayUnreachable()) {
+        printUptime();
+        Serial.println("A router ujrainditasa utan sem elerheto a gateway.");
+        Serial.println("Valoszinuleg rossz a statikus IP - AP beallito mod.");
+        logEvent(EV_GW_UNREACHABLE, 2);
+        logEvent(EV_AP_MODE, 4);
+        digitalWrite(wifiledPin, LOW);
+        startConfigPortal();
+        return;
+      }
+
+      testState.cycleIndex = 0;
+      testState.failedCount = 0;
+      uiFlags.resetPrinted = false;
+      currentState = TESTING_STATE;
+    }
+
+  } else {
+    if (currentMillis - timing.stateStart >= PROBE_DELAY) {
+      if (testState.cycleIndex < MAX_CYCLE_INDEX) {
+        testState.cycleIndex++;
+      }
+      currentState = TESTING_STATE;
+    }
+  }
+}
+
+// SUCCESS_STATE: varakozas a kovetkezo teszt-korig.
+void runSuccessState(uint32_t currentMillis) {
+
+  if (!uiFlags.successPrinted) {
+    printUptime();
+    Serial.println("Successful Test");
+    Serial.println();
+    Serial.println("SUCCESS_DELAY delay start.");
+    uiFlags.successPrinted = true;
+  }
+
+  if (currentMillis - timing.stateStart >= SUCCESS_DELAY) {
+    printUptime();
+    Serial.println("SUCCESS_DELAY delay end.");
+    uiFlags.successPrinted = false;
+    timing.stateStart = currentMillis;
+    currentState = TESTING_STATE;
+  }
+}
+
+// MODE_MONITOR: a tenyleges internet-figyelo allapotgep. Ez a fuggveny mar csak
+// diszpecsel - az allapotok viselkedese kulon-kulon olvashato fent.
+void runMonitorStateMachine(uint32_t currentMillis) {
+  switch (currentState) {
+    case TESTING_STATE: runTestingState();             break;
+    case FAILURE_STATE: runFailureState(currentMillis); break;
+    case SUCCESS_STATE: runSuccessState(currentMillis); break;
+  }
+
+  // A várakozó állapotok (SUCCESS 1 perc, FAILURE 12 mp) alatt a loop()-nak
+  // nincs dolga. delay() nélkül 1. prioritáson pörögne 100% CPU-val; a
+  // vTaskDelay viszont ténylegesen felfüggeszti a taskot. Minden időzítés
+  // ezredmásodpercekben mér, tehát a 10 ms-os szemcsézettség nem számít.
+  delay(BUTTON_POLL_MS);
+}
+
+void loop() {
+  const uint32_t currentMillis = millis();
+
+  // Az AP-módú beállító oldal kérésére halasztott újraindítás.
+  //
+  // A türelmi idő alatt (2 mp) ÚJABB mentés is érkezhet - mobilon a dupla
+  // koppintás gyakori. Ilyenkor épp fájlírás folyik, és az újraindítás félbe
+  // vágná: előbb megvárjuk, hogy az írás befejeződjön - ÉS mindjárt meg is
+  // szerezzük a zárat, hogy a várakozás vége és az ESP.restart() közötti
+  // néhány ezredmásodpercben már ne indulhasson újabb mentés.
+  if (restartRequestDue(currentMillis)) {
+    lockConfigBeforeShutdown();
+    clearRestartRequest();
+    Serial.println("RESTART!");
+    Serial.flush();
+    ESP.restart();
+  }
+
+  clearHealthyRunCounters(currentMillis);
 
   // A heap felugyelete MINDEN uzemmodban mer es kiir (a diagnosztika ott is
   // kell, ahol epp baj van), az ujrainditas viszont csak monitor modban
@@ -3840,47 +4158,12 @@ void loop() {
   ensureNtp();
 
   if (deviceMode == MODE_FATAL) {
-    // Mindkét LED együtt, gyorsan villog. A program szándékosan nem fut
-    // tovább: nem tesztel és nem kapcsolja a relét.
-    if (currentMillis - timing.blinkLast >= FATAL_BLINK_MS) {
-      timing.blinkLast = currentMillis;
-      uiFlags.blinkOn = !uiFlags.blinkOn;
-      digitalWrite(ledPin, uiFlags.blinkOn ? HIGH : LOW);
-      digitalWrite(wifiledPin, uiFlags.blinkOn ? HIGH : LOW);
-    }
-    // A hiba magától nem múlik el: 5 perc jelzés után elalszunk, hogy ne
-    // fogyasszunk és ne villogjunk feleslegesen napokig.
-    if (currentMillis - timing.fatalStart >= FATAL_SLEEP_AFTER_MS) {
-      fatalSleep();
-    }
-    // A gombok élnek, hogy újraindítani vagy resetelni lehessen az eszközt.
-    resetbutton();
-    wifiresetbutton();
-    delay(BUTTON_POLL_MS);
+    handleFatalMode(currentMillis);
     return;
   }
 
   if (deviceMode == MODE_CONFIG) {
-    // A Wi-Fi LED villog: "beállító módban vagyok, várom a böngészőt". A
-    // státusz LED közben végig világít - a kettő együtt egyértelműen más,
-    // mint a végzetes hiba (mindkettő 5 Hz) vagy a router reset (csak a
-    // státusz LED, 2 Hz).
-    if (currentMillis - timing.blinkLast >= AP_BLINK_MS) {
-      timing.blinkLast = currentMillis;
-      uiFlags.blinkOn = !uiFlags.blinkOn;
-      digitalWrite(wifiledPin, uiFlags.blinkOn ? HIGH : LOW);
-    }
-    // Konfig módban nincs internetteszt. A portál AP_TIMEOUT_MS tétlenségig
-    // él; minden kérés és a folyamatban lévő mentés kitolja a határidőt.
-    resetbutton();
-    wifiresetbutton();
-    // Nem alszunk el, ha épp mentés folyik, vagy ha a sikeres mentés utáni
-    // újraindításra várunk.
-    if (!configWriteInProgress() && !restartRequested() &&
-        (int32_t)(currentMillis - apDeadline) >= 0) {
-      apSleep();
-    }
-    delay(BUTTON_POLL_MS);
+    handleConfigMode(currentMillis);
     return;
   }
 
@@ -3891,245 +4174,5 @@ void loop() {
 
   resetbutton();
   wifiresetbutton();
-
-  switch (currentState) {
-
-    case TESTING_STATE: {
-      if (WiFi.status() != WL_CONNECTED) {
-        // SPAM-VEDELEM. Egy pislákoló kapcsolatnál (a jel a határon van, a
-        // driver állapota másodpercenként többször vált) ez az ág körönként
-        // újra lefutna, és a 32 elemű körpuffer kiszorítaná a kivizsgálandó
-        // eseményeket. A SULYOSSAGROL OSZINTEN: védelem nélkül, REALIS
-        // pislákolási ütemeknél (500 / 1000 / 2000 / 5000 ms) a mérés 4 / 2 /
-        // 1 / 0 bejegyzést adott, tehát a puffert nem söpörte el - a
-        // mechanizmus viszont valós, és a pislákolás gyorsulásával arányosan
-        // romlik. Ugyanaz a szabály, mint a TEST FAIL sorozatoknál: csak a
-        // sorozat ELSŐ tagja kerül a naplóba és a soros portra. Egy közbeeső
-        // másik esemény után újra naplózunk. (Mérve: LOG4.)
-        const bool ismetles = lastEventWas((uint8_t)EV_WIFI_LOST);
-        if (!ismetles) {
-          printUptime();
-          logEvent(EV_WIFI_LOST, (uint16_t)WiFi.status());
-          Serial.println("WiFi disconnected before test!");
-        }
-        digitalWrite(wifiledPin, LOW);
-
-        // Egységes politika: 3 próba 30 mp szünetekkel.
-        if (reconnectWifi()) {
-          // Visszajött, a teszt a következő körben fut le.
-          timing.stateStart = millis();
-          break;
-        }
-
-        // Nem jött vissza: azonnal router újraindítás, nem várunk további
-        // teszt ciklusokat. A FAILURE_STATE reset ágát így élesítjük - nincs
-        // hálózat, amin bármelyik végpont elérhető lenne, nincs mit végigpróbálni.
-        printUptime();
-        Serial.println("WiFi nem jott vissza - router ujrainditas kovetkezik.");
-        testState.cycleIndex = RESET_TRIGGER_CYCLE + 1;
-        currentState = FAILURE_STATE;
-        timing.stateStart = millis();
-        break;
-      }
-      // A kapcsolat magától is helyreállhat (auto-reconnect), ilyenkor a LED
-      // korábban hazudott volna.
-      digitalWrite(wifiledPin, HIGH);
-      if (rtcRetryRounds != 0) {
-        rtcRetryRounds = 0;  // működik a hálózat: új 2 napos ablak
-      }
-      printUptime();
-      Serial.println("Beginning Test.");
-      // Csak az indexet írjuk ki ITT: az azt mondja meg, MELYIK végpont jön,
-      // tehát a teszt ELŐTT van értelme. A hibaszámláló viszont a teszt
-      // EREDMÉNYE - ezért az a "Test failed." sorra került. Korábban itt állt,
-      // így a sorozat első tesztjénél mindig "0"-t írt ki.
-      //
-      // A KIÍRÁS 1-alapú (1..5), a belső cycleIndex marad 0-alapú: a 0..4
-      // tartomány a végpontválasztó if-lánc és a RESET_TRIGGER_CYCLE
-      // küszöb miatt kötött. Emberi olvasónak viszont nincs "0-dik teszt".
-      Serial.print("Teszt ciklus index = ");
-      Serial.println(testState.cycleIndex + 1);
-
-      // Mind az ot teszt HTTP, mert az ICMP nem bizonyit sem nevfeloldast, sem
-      // TCP-t: egy befagyott router-DNS mellett a ping tokeletesen megy, kozben
-      // egyetlen eszkoz sem eri el az internetet. Nem veletlen, hogy egyetlen
-      // nagy implementacio sem ICMP-vel validal (NetworkManager, Firefox,
-      // Windows NCSI: mind HTTP). Ot kulonbozo uzemelteto, ket ellenorzesi mod.
-      // Ures elvart valasz = 204-es ellenorzes, lasd testInternetHTTP().
-      bool testResult;
-      if (testState.cycleIndex == 1) {
-        testResult = testInternetHTTP("http://cp.cloudflare.com/generate_204", "");
-      } else if (testState.cycleIndex == 2) {
-        testResult = testInternetHTTP("http://detectportal.firefox.com/success.txt", "success");
-      } else if (testState.cycleIndex == 3) {
-        testResult = testInternetHTTP("http://nmcheck.gnome.org/check_network_status.txt",
-                                      "NetworkManager is online");
-      } else if (testState.cycleIndex == 4) {
-        testResult = testInternetHTTP("http://connectivitycheck.gstatic.com/generate_204", "");
-      } else {
-        testResult = testInternetHTTP("http://www.msftconnecttest.com/connecttest.txt", "Microsoft Connect Test");
-      }
-
-      if (testResult) {
-        testState.cycleIndex = 0;
-        testState.failedCount = 0;
-        testState.resetEvents = 0;
-        currentState = SUCCESS_STATE;
-      } else {
-        testState.failedCount++;
-        // Csak a hibasorozat első tagját naplózzuk: a 12 mp-enként ismétlődő
-        // bejegyzések különben percek alatt kiszorítanák a fontos eseményeket.
-        if (testState.failedCount == 1) {
-          // 1-alapú, hogy a /log oldal ugyanazt a számot mutassa, mint a
-          // soros port "Teszt ciklus index" sora.
-          logEvent(EV_TEST_FAIL, (uint16_t)(testState.cycleIndex + 1));
-        }
-        printUptime();
-        // A már megnövelt számláló: ez a mostani bukással együtt hány
-        // egymás utáni sikertelen teszt van. A nevező az a darabszám, ami
-        // után a router újraindítása következik (mind az öt végpont bukott).
-        Serial.print("Test failed. | Hibák száma = ");
-        Serial.print(testState.failedCount);
-        Serial.print(" / ");
-        Serial.println(MAX_CYCLE_INDEX + 1);
-        currentState = FAILURE_STATE;
-      }
-      // A tesztek percekig futhatnak, ezért friss időbélyeg kell.
-      timing.stateStart = millis();
-      break;
-    }
-
-    case FAILURE_STATE:
-      // Mind az ot vegpont elbukott: a 4-es indexen a Google-t is probaltuk,
-      // tehat a 0..4 mind lefutott es mind bukott. Mivel a ket szamlalo egyutt
-      // lep (failedCount == cycleIndex + 1), ez pontosan 5 egymas utani bukas -
-      // de a feltetel szandekosan a VEGPONT-lefedettseget mondja ki, nem az
-      // idot: egyetlen uzemelteto kiesese soha ne latszodjon internetkimaradasnak.
-      // Egy failedCount-alapu kuszob ugyanezt ma szam szerint eltalalna, de nem
-      // ezt garantalna - ezert csak az index kot. A failedCount a naplozashoz es
-      // a soros kimenethez kell (csak a hibasorozat elso tagja kerul a naplóba).
-      if (testState.cycleIndex > RESET_TRIGGER_CYCLE) {
-
-        if (!uiFlags.resetPrinted) {
-          // Statikus IP mellett: ha a saját gateway-ünket sem érjük el, a hiba
-          // helyi, és a router újraindítása nem javíthatja. Egy esélyt azért
-          // adunk neki (hátha tényleg a router akadt meg) - a döntés a reset
-          // UTÁNI ellenőrzésnél születik meg.
-          if (gatewayUnreachable()) {
-            printUptime();
-            Serial.println("A sajat gateway sem elerheto - lehet, hogy rossz a statikus IP.");
-            Serial.println("Kap a router egy esélyt: ujrainditas, aztan ujra ellenorizzuk.");
-            logEvent(EV_GW_UNREACHABLE, 1);
-          }
-          printUptime();
-          Serial.println("Beginning Reset in FAILURE_STATE.");
-          while (!reset_device()) {
-            resetbutton();
-            wifiresetbutton();
-            feedWatchdog();
-            delay(BUTTON_POLL_MS);
-          }
-          printUptime();
-          Serial.println("Reset is done in FAILURE_STATE.");
-          Serial.println("RESET_DELAY start in FAILURE_STATE.");
-          timing.stateStart = millis();
-          uiFlags.resetPrinted = true;
-          resetDelayProbeLast = millis();  // az első próba egy intervallum múlva
-          break;                        // a RESET_DELAY a következő körökben telik
-        }
-
-        // A RESET_DELAY korai lezárása: ha a router hamarabb feláll, és az
-        // internet is megvan, nincs mire várni.
-        const bool earlyOnline = onlineProbeDue(resetDelayProbeLast, millis());
-
-        if (earlyOnline || millis() - timing.stateStart >= RESET_DELAY) {
-          printUptime();
-          if (earlyOnline) {
-            Serial.println("RESET_DELAY korai vege: halozat es internet OK.");
-          } else {
-            Serial.println("RESET_DELAY end in FAILURE_STATE.");
-          }
-
-          // Korai kilépéskor a kapcsolat MÁR él és mérve is van - a
-          // disconnect(true) épp azt bontaná le, amit az imént igazoltunk.
-          if (!earlyOnline) {
-            Serial.println("Reconnect WIFI in FAILURE_STATE.");
-            WiFi.disconnect(true);
-            blockingDelay(100);
-
-            // Egységesen 3 próba 30 mp szünetekkel. A reconnectWifi() minden
-            // próbája teljes initWiFi(), ami újra alkalmazza a statikus IP/DNS
-            // konfigot - a disconnect(true) ugyanis eldobja a netifet.
-            if (!reconnectWifi()) {
-              printUptime();
-              Serial.println("A router reset utan sem jott vissza a WiFi.");
-              digitalWrite(wifiledPin, LOW);
-              wifiGiveUp();
-              // A break a host tesztekben feher marad, de nem azert, mert az
-              // ag nem fut le (a WF11 meri): a wifiGiveUp() vagy elalszik,
-              // vagy AP modba visz, es a harness az elalvast kivetellel
-              // modellezi - a vezerles ide mar nem ter vissza.
-              break;
-            }
-
-            printUptime();
-            Serial.println("WIFI OK in FAILURE_STATE.");
-          }
-          digitalWrite(wifiledPin, HIGH);
-
-          // A router megkapta az esélyét. Ha a gateway még mindig nem
-          // válaszol, a statikus IP a rossz - a routert nincs értelme tovább
-          // áramtalanítani. Beállító módba megyünk, hogy javítani lehessen.
-          if (gatewayUnreachable()) {
-            printUptime();
-            Serial.println("A router ujrainditasa utan sem elerheto a gateway.");
-            Serial.println("Valoszinuleg rossz a statikus IP - AP beallito mod.");
-            logEvent(EV_GW_UNREACHABLE, 2);
-            logEvent(EV_AP_MODE, 4);
-            digitalWrite(wifiledPin, LOW);
-            startConfigPortal();
-            break;
-          }
-
-          testState.cycleIndex = 0;
-          testState.failedCount = 0;
-          uiFlags.resetPrinted = false;
-          currentState = TESTING_STATE;
-        }
-
-      } else {
-        if (currentMillis - timing.stateStart >= PROBE_DELAY) {
-          if (testState.cycleIndex < MAX_CYCLE_INDEX) {
-            testState.cycleIndex++;
-          }
-          currentState = TESTING_STATE;
-        }
-      }
-      break;
-
-    case SUCCESS_STATE:
-
-      if (!uiFlags.successPrinted) {
-        printUptime();
-        Serial.println("Successful Test");
-        Serial.println();
-        Serial.println("SUCCESS_DELAY delay start.");
-        uiFlags.successPrinted = true;
-      }
-
-      if (currentMillis - timing.stateStart >= SUCCESS_DELAY) {
-        printUptime();
-        Serial.println("SUCCESS_DELAY delay end.");
-        uiFlags.successPrinted = false;
-        timing.stateStart = currentMillis;
-        currentState = TESTING_STATE;
-      }
-      break;
-  }
-
-  // A várakozó állapotok (SUCCESS 1 perc, FAILURE 12 mp) alatt a loop()-nak
-  // nincs dolga. delay() nélkül 1. prioritáson pörögne 100% CPU-val; a
-  // vTaskDelay viszont ténylegesen felfüggeszti a taskot. Minden időzítés
-  // ezredmásodpercekben mér, tehát a 10 ms-os szemcsézettség nem számít.
-  delay(BUTTON_POLL_MS);
+  runMonitorStateMachine(currentMillis);
 }
