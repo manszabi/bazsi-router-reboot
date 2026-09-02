@@ -30,7 +30,9 @@ public:
     pingSim.targets.push_back(pingSim.lastTarget);
     auto it = pingSim.perTarget.find(pingSim.lastTarget);
     const bool ok = it != pingSim.perTarget.end() ? it->second : pingSim.ok;
-    g_millis += ok ? pingSim.okMs : pingSim.failMs;   // blokkol, etetes nelkul
+    const uint32_t eltelt = ok ? pingSim.okMs : pingSim.failMs;
+    g_millis += eltelt;                 // blokkol, etetes nelkul
+    wdtAdvanceTime(eltelt);             // ...es ez az ido a meresbe is beleszamit
     return ok;
   }
 };

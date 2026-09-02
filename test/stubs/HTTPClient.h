@@ -41,7 +41,13 @@ public:
   int GET() {
     // Minden 2xx valasz ugyanolyan gyorsan erkezik; a lassu eset a timeout.
     const bool ok = (g_httpCode >= 200 && g_httpCode < 300);
-    g_millis += ok ? g_httpOkMs : g_httpFailMs;
+    const uint32_t eltelt = ok ? g_httpOkMs : g_httpFailMs;
+    g_millis += eltelt;
+    // A valodi http.GET() BLOKKOL es kozben NEM etet: a hivo dolga, hogy a
+    // ket teszt kozott etessen. Ezt az idot tehat be kell jelenteni az
+    // etetes-meresnek, kulonben az epp a legfontosabb blokkolo szakaszra
+    // lenne vak (a stub kozvetlenul lepteti az orat, nem delay()-jel).
+    wdtAdvanceTime(eltelt);
     return g_httpCode;
   }
   // Chunked eseten a valodi HTTPClient _size-a -1 marad (HTTPClient.cpp: a

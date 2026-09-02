@@ -1046,6 +1046,10 @@ void handleStuckButton(const char* message, uint16_t which, bool logIt) {
   // jelzése (ott egyszerre villognak), így ránézésre megkülönböztethető.
   const uint32_t start = millis();
   bool on = false;
+  // WDT-OK: korlatos es rovid. A ciklus pontosan STUCK_BLINK_MS-ig (3000 ms)
+  // fut, ami a 90 000 ms-os WDT_TIMEOUT_MS harmincada. Etetni sem artana, de a
+  // beragadt gomb agan a jelzes a lenyeg, es a rovidsege bizonyithato: a
+  // feltetel maga korlatozza.
   while (millis() - start < STUCK_BLINK_MS) {
     on = !on;
     digitalWrite(ledPin, on ? HIGH : LOW);
@@ -1775,6 +1779,9 @@ void setup() {
 
   Serial.begin(115200);
   const uint32_t serialTimeout = millis();
+  // WDT-OK: itt a watchdog MEG NEM EL - az initWatchdog() csak nehany sorral
+  // lejjebb fut, szandekosan azutan, hogy a soros port hasznalhato (kulonben a
+  // hibauzenete sem menne ki). Ezen felul a ciklus 3000 ms-re korlatos.
   while (!Serial && millis() - serialTimeout < 3000) { delay(BUTTON_POLL_MS); }
   blockingDelay(500);  // USB CDC beállása, hogy az induló logok ne vesszenek el
 
