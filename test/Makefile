@@ -8,7 +8,7 @@ SKETCH   := ../bazsi_router_reboot.ino
 # forditja es linkeli - a host build UGYANIGY, tehat itt derul ki, ha egy
 # deklaracio hianyzik vagy egy szimbolum nem talalhato. Uj modul hozzaadasakor
 # EZT a listat kell bovíteni (a -I.. a headereket teszi elerhetove).
-MODULES  := ../sync.cpp ../configstore.cpp ../eventlog.cpp ../strutil.cpp ../secret.cpp ../netprobe.cpp
+MODULES  := ../sync.cpp ../webportal.cpp ../configstore.cpp ../eventlog.cpp ../strutil.cpp ../secret.cpp ../netprobe.cpp
 BUILD    := build
 SRC      := $(BUILD)/sketch.cpp $(MODULES) stubs/main_stub.cpp test_main.cpp
 DEPS     := $(BUILD)/sketch.cpp $(MODULES) $(wildcard ../*.h) test_main.cpp \
@@ -51,12 +51,7 @@ $(BUILD)/run-cov: $(DEPS)
 cov: $(BUILD)/run-cov
 	@rm -f *.gcov $(BUILD)/*.gcda
 	@$(BUILD)/run-cov > /dev/null 2>&1 || true
-	@gcov -o $(BUILD)/run-cov-sketch $(BUILD)/sketch.cpp 2>/dev/null | grep -A1 "sketch.cpp" | head -2
-	@echo
-	@echo "Egyetlen forgatokonyv altal sem erintett sorok:"
-	@grep -n "#####" sketch.cpp.gcov | sed 's/^ *//' \
-	  | awk -F: '{n=$$3; $$1=$$2=$$3=""; sub(/^ +/,""); print "  " n": " $$0}' \
-	  | grep -v "^ *[0-9]*: }$$" || echo "  (nincs ilyen)"
+	@python3 covreport.py $(BUILD) $(BUILD)/run-cov
 
 # Lefedettsegi kapu a CI-nak. Ugyanazt meri, mint a "cov", de EMBERI OLVASAS
 # helyett kilepesi kodot ad: a kuszob alatt megbukik. A szam nem oncel - azt
@@ -68,13 +63,7 @@ COV_MIN ?= 97.0
 covgate: $(BUILD)/run-cov
 	@rm -f *.gcov $(BUILD)/*.gcda
 	@$(BUILD)/run-cov > /dev/null 2>&1 || true
-	@gcov -o $(BUILD)/run-cov-sketch $(BUILD)/sketch.cpp > $(BUILD)/cov.txt 2>/dev/null || true
-	@pct=$$(grep -m1 -o 'Lines executed:[0-9.]*%' $(BUILD)/cov.txt | tr -dc '0-9.'); \
-	 if [ -z "$$pct" ]; then echo "HIBA: a lefedettseg nem olvashato ki."; exit 1; fi; \
-	 echo "Sorlefedettseg: $$pct% (kuszob: $(COV_MIN)%)"; \
-	 awk -v p="$$pct" -v m="$(COV_MIN)" 'BEGIN { if (p+0 < m+0) { \
-	     print "MEGBUKOTT: a lefedettseg a kuszob ala esett."; exit 1 } \
-	   print "OK"; exit 0 }'
+	@python3 covreport.py $(BUILD) $(BUILD)/run-cov $(COV_MIN)
 
 $(BUILD):
 	@mkdir -p $(BUILD)

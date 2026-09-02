@@ -7,7 +7,9 @@
 //
 // A lista SZANDEKOSAN rovid, es szandekosan itt all kulon: ez a modulok
 // "felfele" mutato fuggosege, es amint tobb lesz nala, az azt jelenti, hogy a
-// hatarokat rosszul huztuk meg. Ma harom fuggveny.
+// hatarokat rosszul huztuk meg. Ma negy fuggveny es egy lekerdezes.
+// (Volt kozottuk egy filesystemReady() is - az azota a configstore modulba
+// kerult, oda, ahova valo. Pontosan ezert hasznos ez a header.)
 #pragma once
 
 #include <stdint.h>
@@ -30,3 +32,20 @@ void waitWithButtons(uint32_t duration);
 // az alakban jelennek meg, mint a fomodulei - egy soros naplot csak igy lehet
 // utolag ertelmezni.
 void printUptime();
+
+// A fomodul allapotabol az, amit a diagnosztikai lap MUTAT.
+//
+// Miert EGY lekerdezes, nem negy kulon getter? Mert ez egy fogalom: "mit lat
+// az, aki most nyitja meg a /log oldalat". Negy kulon fuggveny negy uj
+// fuggoseget jelentene ugyanarra, es a portal negy kulon idopillanatban
+// olvasna ki oket. Igy egyszerre, egy egeszkent kapja meg.
+//
+// A szamlalok maguk a fomodulban maradnak: a watchdog-politika es az
+// ujraprobalkozasi ablak az o dontesei, a portal csak megjeleniti oket.
+struct DiagCounters {
+  uint32_t wdtResets;    // hany rendellenes ujraindulas volt sorozatban
+  uint32_t wdtLimit;     // ...es hanynal megyunk vegzetes hibaba
+  uint32_t retryRounds;  // hany ujraprobalkozasi kor telt el
+  uint32_t retryLimit;   // ...es hanynal megyunk AP modba
+};
+DiagCounters diagCounters();
