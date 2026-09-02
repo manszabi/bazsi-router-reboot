@@ -322,4 +322,4 @@ A **valós idő** (`gettimeofday()`) szintén túléli a deep sleepet – az RTC
 
 *Az ábrák a `bazsi_router_reboot.ino` aktuális állapotát dokumentálják.
 Módosításkor a kóddal együtt frissítendők – a viselkedést a `test/` alatti
-294 forgatókönyves (1103 ellenőrzéses) tesztkészlet rögzíti.*
+295 forgatókönyves (1695 ellenőrzéses) tesztkészlet rögzíti.*
