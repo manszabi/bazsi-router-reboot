@@ -8,7 +8,7 @@ SKETCH   := ../bazsi_router_reboot.ino
 # forditja es linkeli - a host build UGYANIGY, tehat itt derul ki, ha egy
 # deklaracio hianyzik vagy egy szimbolum nem talalhato. Uj modul hozzaadasakor
 # EZT a listat kell bovíteni (a -I.. a headereket teszi elerhetove).
-MODULES  := ../sync.cpp ../strutil.cpp ../secret.cpp ../netprobe.cpp
+MODULES  := ../sync.cpp ../eventlog.cpp ../strutil.cpp ../secret.cpp ../netprobe.cpp
 BUILD    := build
 SRC      := $(BUILD)/sketch.cpp $(MODULES) stubs/main_stub.cpp test_main.cpp
 DEPS     := $(BUILD)/sketch.cpp $(MODULES) $(wildcard ../*.h) test_main.cpp \

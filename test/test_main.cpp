@@ -105,8 +105,9 @@ extern uint32_t heapCheckLast;
 extern uint32_t heapLogLast;
 extern uint8_t  heapCritStreak;
 extern bool     heapWarnActive;
-extern bool     ntpStarted;
-extern bool     ntpAnnounced;
+// Az NTP jelzoi a modulon BELUL vannak (static). Egy bekapcsolast a
+// szerzodesen at modellezunk, ugyanugy, mint a sync modul allapotat.
+void ntpResetForColdBoot();
 constexpr uint8_t EV_TEST_FAIL_C = 4;
 constexpr uint8_t EV_FATAL_C = 9;
 void resetbutton();
@@ -187,7 +188,7 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   // visszaallithassa oket - kulonben egy korabbi forgatokonyv figyelmeztetes-
   // allapota atszivarogna a kovetkezobe.
   heapCheckLast = 0; heapLogLast = 0; heapCritStreak = 0; heapWarnActive = false;
-  ntpStarted = false; ntpAnnounced = false;
+  ntpResetForColdBoot();
   g_epochNow = 0; g_ntpStarts = 0;
   // A soros eletciklus merese is hidegindul (lasd SER6/SER7).
   g_serialOn = false; g_serialBaud = 0; g_serialFirstWriteMs = 0;
@@ -4231,7 +4232,10 @@ static void scNV10() {
 
     wifiSim.willConnect = false;          // elmegy a halozat
     loop();
-    CHECK(!ntpStarted, "a kapcsolat elvesztesevel a jelzo torlodik");
+    // VISELKEDESRE ellenorzunk, nem a belso jelzore: kapcsolat nelkul NEM
+    // indul ujabb szinkron (ez a jelzo torlesenek egyetlen megfigyelheto
+    // kovetkezmenye - a masik a lenti ujraindulas).
+    CHECK(g_ntpStarts == elotte, "kapcsolat nelkul nem indul ujabb szinkron");
     wifiSim.willConnect = true;           // ...es visszajon
     wifiSim.begun = true; wifiSim.beginAt = 0;
     loop();

@@ -25,3 +25,12 @@ void wifiresetbutton();
 // teszt szuneteire kell: delay()-jel a gombnyomas elveszne, busy-loop-pal
 // pedig a CPU porogne.
 void waitWithButtons(uint32_t duration);
+
+// Csatolva van-e a LittleFS? A naplo mentese ezen mulik: ha nincs fajlrendszer,
+// a mentes egyszeruen kimarad (ez nem hiba - az RTC naplo attol meg el).
+bool filesystemReady();
+
+// Az eltelt uzemido kiirasa a soros portra. A modulok uzenetei igy ugyanabban
+// az alakban jelennek meg, mint a fomodulei - egy soros naplot csak igy lehet
+// utolag ertelmezni.
+void printUptime();
