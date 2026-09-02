@@ -93,22 +93,34 @@ jobs:
           arduino-cli lib install --git-url https://github.com/ESP32Async/ESPAsyncWebServer.git#v3.12.0
           arduino-cli lib install ESPping@1.0.5
 
-      # A core a sketch MELLETTI partitions.csv-t hasznalja automatikusan.
-      # Ezzel a forditas azt is meri, hogy a program belefer-e a 3,44 MB-os
-      # factory particioba - ez a "sketch too big" hiba egyetlen korai jelzese.
-      - name: Egyedi particios tabla bemasolasa
-        run: cp partitions_custom.csv partitions.csv
-
-      # A sketch mappajaban levo .cpp modulokat az Arduino KULON forditasi
-      # egysegkent forditja es linkeli - ugyanugy, ahogy a host build teszi a
-      # test/Makefile MODULES listaja alapjan. Uj modulnal MINDKET helyen fel
-      # kell venni (a host build a hianyzo szimbolumot azonnal jelzi).
-      - name: A modulok listaja
-        run: ls -1 *.cpp *.h
+      # A SKETCH OSSZEALLITASA EGY HELYESEN NEVEZETT MAPPABA.
+      #
+      # MIERT KELL? Az Arduino megkoveteli, hogy a fo .ino neve EGYEZZEN a
+      # tartalmazo mappa nevevel. A repo mappaja "bazsi-router-reboot"
+      # (kotojellel), a sketch viszont "bazsi_router_reboot.ino"
+      # (alulvonassal) - igy az arduino-cli a nem letezo
+      # "bazsi-router-reboot.ino"-t keresne, es azonnal elhasal:
+      #   "Can't open sketch: main file missing from sketch"
+      #
+      # Ezert a forditas egy kulon, helyesen nevezett mappabol megy. Ez egyben
+      # azt is ellenorzi, ami a felhasznalonak szamit: hogy a .ino ES a mellette
+      # levo modulok EGYUTT, egy mappaban forditodnak.
+      #
+      # A core a sketch MELLETTI partitions.csv-t hasznalja automatikusan; ezzel
+      # a forditas azt is meri, hogy a program belefer-e a 3,44 MB-os factory
+      # particioba - ez a "sketch too big" hiba egyetlen korai jelzese.
+      - name: A sketch mappa osszeallitasa
+        run: |
+          mkdir -p sketchdir/bazsi_router_reboot
+          cp bazsi_router_reboot.ino sketchdir/bazsi_router_reboot/
+          cp *.h *.cpp sketchdir/bazsi_router_reboot/
+          cp partitions_custom.csv sketchdir/bazsi_router_reboot/partitions.csv
+          echo "A lefordulo forrasok:"
+          ls -1 sketchdir/bazsi_router_reboot/
 
       - name: Forditas
         run: |
           arduino-cli compile \
             --fqbn esp32:esp32:XIAO_ESP32C3 \
             --warnings all \
-            bazsi_router_reboot.ino
+            sketchdir/bazsi_router_reboot

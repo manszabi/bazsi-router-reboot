@@ -481,6 +481,21 @@ Teljes függvénylistával és a határhúzás indoklásával:
    modulokat **ugyanabban a mappában** kell hagyni – az Arduino a sketch mappa
    minden forrását lefordítja és hozzálinkeli (a szerkesztőben külön fülként
    jelennek meg).
+
+   > **A mappanévnek egyeznie kell a `.ino` nevével.** A klónozott repó mappája
+   > `bazsi-router-reboot` (kötőjellel), a sketch viszont
+   > `bazsi_router_reboot.ino` (alulvonással) – ezt az Arduino nem fogadja el
+   > (`main file missing from sketch`). Másold a `.ino`-t, az összes `.h`/`.cpp`
+   > modult és a partíciós táblát egy `bazsi_router_reboot` nevű mappába:
+   >
+   > ```bash
+   > mkdir -p bazsi_router_reboot
+   > cp bazsi_router_reboot.ino *.h *.cpp bazsi_router_reboot/
+   > cp partitions_custom.csv bazsi_router_reboot/partitions.csv
+   > ```
+   >
+   > (Az Arduino IDE 2.x fel is ajánlja a másolást, amikor megnyitod a fájlt.)
+   > A CI ugyanezt teszi a fordítás előtt.
 5. Másold a `partitions_custom.csv`-t a sketch mappájába **`partitions.csv`**
    néven – a core a sketch melletti `partitions.csv`-t automatikusan használja.
    (Ha inkább gyári sémát választanál a `Tools` → `Partition Scheme` menüből,

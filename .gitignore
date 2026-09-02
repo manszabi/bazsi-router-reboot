@@ -3,6 +3,9 @@
 # a forras a partitions_custom.csv, azt kell verziokezelni.
 /partitions.csv
 
+# A CI altal osszeallitott, helyesen nevezett sketch mappa
+/sketchdir/
+
 # arduino-cli forditasi kimenet
 /build/
 *.bin
