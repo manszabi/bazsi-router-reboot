@@ -175,8 +175,11 @@ constexpr uint32_t STUCK_BUTTON_CONFIRM_MS = 3000;
 
 // --- Heap felugyelet -------------------------------------------------------
 //
-// MIERT KELL? A sketch maga semmit nem allokal dinamikusan, az
-// ESPAsyncWebServer / AsyncTCP / a Wi-Fi driver viszont igen. Egy lassu
+// MIERT KELL? A sketch SAJAT KODJA nem allokal dinamikusan (a make lint ezt ki
+// is kenyszeriti), a heapet viszont az ESPAsyncWebServer / AsyncTCP /
+// HTTPClient / Wi-Fi driver erdemben hasznalja. Es a hataron sincs nulla: par
+// konyvtari hivas, amit MI teszunk, String-et ad vissza ertek szerint
+// (http.begin, http.header, WiFi.SSID) - rovid eletu, de valos foglalasok. Egy lassu
 // szivargas vagy elaprozodas honapokig eszrevetlen marad, aztan egy nap az
 // eszkoz "csak ugy" nem mukodik - allokacios hiba eseten a legtobb konyvtar
 // csendben elbukik, nem panikol. Ezert merunk, kiirunk, es vegso esetben

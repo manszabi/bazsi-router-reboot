@@ -672,8 +672,21 @@ pedig mindkettőt, gyorsabban – az egyik együtt, a másik ellenfázisban.
 
 ## 12. Heap felügyelet
 
-A sketch maga **semmit nem allokál dinamikusan** – az ESPAsyncWebServer, az
-AsyncTCP és a Wi-Fi driver viszont igen. Egy lassú szivárgás vagy elaprózódás
+A sketch **saját kódja** nem allokál dinamikusan – ezt a `make lint` fordítási
+idő előtt ki is kényszeríti (tilos a `malloc`, a `new`, a dinamikusan foglaló
+STL tároló és az érték szerinti `String`).
+
+> **Pontosítás, mert a korábbi „semmit nem allokál" túlzás volt.** Néhány
+> *könyvtári* hívás, amit a program tesz, `String`-et ad vissza érték szerint,
+> és az Arduino `String` mindig a heapről dolgozik:
+> `http.begin(client, url)` (a `const char*`-ból ideiglenes `String` lesz),
+> `http.header("Transfer-Encoding")` és `WiFi.SSID()`. Ezek rövid életű,
+> teszt-ciklusonként néhány tíz bájtos foglalások – de attól még foglalások,
+> és a töredezettséghez hozzátesznek. A saját pufferek fix méretűek; a heapet
+> az `ESPAsyncWebServer`, az `AsyncTCP`, a `HTTPClient` és a Wi-Fi driver
+> használja érdemben.
+
+Egy lassú szivárgás vagy elaprózódás
 hónapokig észrevétlen marad, aztán egy nap az eszköz „csak úgy" nem működik: egy
 allokációs hiba esetén a legtöbb könyvtár **csendben elbukik**, nem panikol,
 tehát a watchdog sem fogja meg. Ezért mérünk, kiírunk, és végső esetben magunktól

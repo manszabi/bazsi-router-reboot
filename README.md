@@ -616,8 +616,12 @@ ismétlődő események szűrése tartja fenn (`TEST FAIL`, `WIFI LOST`,
 
 ## 🧠 Heap felügyelet
 
-A sketch maga semmit nem allokál dinamikusan, de az ESPAsyncWebServer, az
-AsyncTCP és a Wi-Fi driver igen. Egy lassú szivárgás hónapokig észrevétlen
+A sketch **saját kódja** nem allokál dinamikusan – ezt a `make lint` ki is
+kényszeríti. (Néhány *könyvtári* hívás azonban `String`-et ad vissza érték
+szerint, és az heapről dolgozik: `http.begin()`, `http.header()`, `WiFi.SSID()`.
+Rövid életű foglalások, de foglalások.) A heapet érdemben az
+ESPAsyncWebServer, az AsyncTCP, a HTTPClient és a Wi-Fi driver használja.
+Egy lassú szivárgás hónapokig észrevétlen
 marad, aztán az eszköz „csak úgy" nem működik – **allokációs hibánál a legtöbb
 könyvtár csendben elbukik, nem panikol, tehát a watchdog sem fogja meg.**
 
