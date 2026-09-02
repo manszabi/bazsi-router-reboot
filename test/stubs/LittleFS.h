@@ -112,7 +112,9 @@ public:
   // watchdogot. A firmware epp erre meretezte a WDT_TIMEOUT_MS-t (a 512 KiB-os
   // particio 128 szektora), tehat a harnessnek modelleznie kell az idot is -
   // kulonben a "watchdog a setup() elejen" dontes tesztelhetetlen maradna.
-  bool begin(bool) { g_millis += g_fsMountMs; return g_fsMountOk; }
+  // A csatolas/formazas BLOKKOL es nem etet - eppen ezert kellett a watchdogot
+  // a setup() elejere hozni. Az idot bejelentjuk az etetes-meresnek is.
+  bool begin(bool) { g_millis += g_fsMountMs; wdtAdvanceTime(g_fsMountMs); return g_fsMountOk; }
   bool exists(const char* p) { return g_fs.count(p) > 0; }
   bool exists(const String& p) { return g_fs.count(p.c_str()) > 0; }
 };

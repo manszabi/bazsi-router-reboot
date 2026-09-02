@@ -17,7 +17,7 @@ DEPS     := $(BUILD)/sketch.cpp $(MODULES) $(wildcard ../*.h) test_main.cpp \
 # A sanitizeres futtatas kulon cel: ugyanazok a forgatokonyvek, de ASan+UBSan
 # alatt. Puffertulcsordulast, hasznalat-utani-felszabaditast es definialatlan
 # viselkedest fog meg - olyasmit, amit egy CHECK() sosem latna.
-.PHONY: test san cov covgate clean
+.PHONY: test san cov covgate blocking clean
 test: $(BUILD)/run-idf5 $(BUILD)/run-idf6
 	@echo "=== IDF 5 (ESP32 Arduino 3.3.11) ==="
 	@$(BUILD)/run-idf5
@@ -64,6 +64,12 @@ covgate: $(BUILD)/run-cov
 	@rm -f *.gcov $(BUILD)/*.gcda
 	@$(BUILD)/run-cov > /dev/null 2>&1 || true
 	@python3 covreport.py $(BUILD) $(BUILD)/run-cov $(COV_MIN)
+
+# Statikus ellenorzes: minden blokkolo ciklus etesse a watchdogot. Ez a
+# futasideju res-invarianst egesziti ki: az csak a bejart utakat meri, ez
+# viszont a FORRAST nezi, tehat a meg teszteletlen uj agakat is elkapja.
+blocking:
+	@python3 ../tools_check_blocking.py
 
 $(BUILD):
 	@mkdir -p $(BUILD)

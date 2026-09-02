@@ -41,6 +41,12 @@ jobs:
 
       # A teljes keszlet MINDKET IDF agon (a gomb-ebresztes API-ja IDF 6-ban
       # atnevezodott; a sketch #if-fel valaszt, tehat mindkettot fordulni kell).
+      # Statikus ellenorzes a forditas elott: minden blokkolo ciklusnak etetnie
+      # kell a watchdogot. Gyors, es a meg teszteletlen uj agakat is elkapja.
+      - name: make blocking
+        working-directory: test
+        run: make blocking
+
       - name: make test
         working-directory: test
         run: make test

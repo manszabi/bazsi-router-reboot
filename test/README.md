@@ -86,7 +86,50 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 
 ## Lefedett esetek
 
-**294 forgatókönyv, 1103 ellenőrzés. Sorlefedettség: 98,70%.**
+**294 forgatókönyv, 1396 ellenőrzés. Sorlefedettség: 98,70%.**
+
+### A watchdog-etetés globális invariánsa
+
+A program fő állapotgépe nem blokkoló, de a hálózati műveletek **percekig
+futhatnak egyetlen `loop()` iteráción belül** – és ez csak azért biztonságos,
+mert azokban a ciklusokban kézzel etetünk. Ezt korábban semmi nem kényszerítette
+ki, csak a fegyelem: egy új blokkoló ág, amiből kimarad a `feedWatchdog()`,
+watchdog-resetet ad, és a hiba csak az eszközön derülne ki.
+
+Ezért **minden forgatókönyv** méri a leghosszabb etetés nélküli szakaszt, és a
+harness a végén ellenőrzi. Küszöb: **45 000 ms** – a 90 000 ms-os watchdog fele.
+A mérhető legrosszabb valós eset a halott DNS: **33 010 ms** (`WD13`, `R7`,
+`BTN2`).
+
+A mérés három dolgot csinál másképp, mint a naiv változat – mindhárom
+számított hiba volt benne:
+
+| | Miért |
+|---|---|
+| Az **idő múlásakor** mér, nem etetéskor | különben az az út, amelyik *véglegesen* abbahagyja az etetést, sosem regisztrálódna |
+| Csak a **ténylegesen eltelt** időt számolja | a tesztek időnként előreugratják az órát (`g_millis = …`); az nem etetetlen szakasz |
+| Csak a **`setup()`/`loop()` belsejét** nézi | néhány forgatókönyv szándékosan hív belső függvényt saját ciklusból – az a teszt állványzata, nem a firmware útja |
+| A blokkoló stubok (`http.GET()`, `Ping.ping()`, `LittleFS.begin()`) **bejelentik** az idejüket | ezek közvetlenül léptetik az órát, tehát a mérés épp a legfontosabb blokkolásokra volt vak |
+
+Felmentés egyetlen helyen van (`g_wdtGapWaiver`), **indoklással**, és a harness
+ki is írja: a `WDT8b` szándékosan modellez kórosan lassú flash-formázást
+(51,5 s). A helyes válasz ilyenkor nem a küszöb lazítása – az az összes többi
+forgatókönyv védelmét gyengítené.
+
+Mutációval igazolva: a `FAILURE_STATE` reset-ciklusából kivett `feedWatchdog()`
+**31**, a `routerResetAndRetry()`-ből kivett **8** forgatókönyvet buktat meg.
+Az `initWiFi()` 20 s-es várakozásából kivéve *nem* bukik – és ez helyes:
+20 s < 90 s, az nem watchdog-reset.
+
+### Statikus ellenőrzés: `make blocking`
+
+A futásidejű invariáns csak a **bejárt** utakat méri. Egy új, még teszteletlen
+blokkoló ág ott észrevétlen maradna – ezért a `tools_check_blocking.py` a
+**forrást** nézi: minden `delay()`-t tartalmazó `while`/`for`/`do` ciklusnak
+etetnie kell, vagy vissza kell térnie a `loop()`-ba, vagy `// WDT-OK: <indok>`
+jelölést kell kapnia. Ma két ilyen jelölés van (a 3 s-es beragadt-gomb villogás
+és a soros port bevárása, ahol a watchdog még nem is él) – **mindkettő
+indoklással a forrásban**.
 
 | | |
 |---|---|

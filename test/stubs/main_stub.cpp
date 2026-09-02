@@ -108,15 +108,58 @@ esp_err_t esp_task_wdt_status(void*) {
   if (!g_wdtInited) return ESP_ERR_INVALID_STATE;
   return g_wdtEnabled ? ESP_OK : ESP_ERR_NOT_FOUND;
 }
+// A leghosszabb ETETES NELKUL ELTELT szakasz merese.
+//
+// KET FONTOS DONTES VAN BENNE.
+//
+// 1. NEM ETETESKOR MERUNK, HANEM AZ IDO MULASAKOR. Ha csak etetesnel neznenk a
+//    ket etetes kozotti kulonbseget, akkor az az ut, amelyik egy hosszu
+//    blokkolo szakaszban VEGLEG abbahagyja az etetest (aztan elalszik vagy
+//    ujraindul), sosem regisztralodna - pedig epp az a veszelyes.
+//
+// 2. CSAK A TENYLEGESEN ELTELT IDOT SZAMOLJUK, nem a g_millis kulonbseget. A
+//    tesztek ugyanis idonkent ELOREUGRATJAK az orat (g_millis = ...), hogy egy
+//    ora hibatlan futast vagy a 49,7 napos korbefordulast modellezzek. Az az
+//    ugras NEM egy etetetlen szakasz: a valo eletben a program azalatt
+//    tobbezerszer lefutott es etetett. Ezert az akkumulator csak a delay() es
+//    a yield() lepteteseibol no - vagyis abbol az idobol, amit a program
+//    TENYLEGESEN eltoltott a vezerlesi agan.
+//
+// A kettobol egyutt egy olyan szam jon ki, ami tenyleg azt meri, amit a valodi
+// watchdog latna: hany ezredmasodpercig nem kapott etetest, mikozben futott.
+//
+// 3. CSAK A PROGRAM SAJAT VEZERLESI AGAN MERUNK. A forgatokonyvek egy resze
+//    szandekosan KOZVETLENUL hiv belso fuggvenyeket - a RL1 peldaul sajat
+//    ciklusban hajtja a reset_device()-t, csak yield()-del. Ez legitim
+//    egysegteszt, de NEM a program viselkedese: a valodi hivo
+//    (runFailureState) minden korben etet. Ha az ilyen szakaszokat is
+//    beleszamolnank, a meres a TESZTET merne, nem a programot - es a
+//    kuszobot addig kellene lazitani, amig ertelmet veszti.
+//
+//    Ezert a merest a harness a setup() es a loop() koré armolja: ami ezeken
+//    kivul tortenik, az a tesztkeszlet allvanyzata, nem a firmware utja.
+static uint32_t g_wdtUnfedMs = 0;
+bool g_wdtInProgram = false;   // a setup()/loop() belsejeben vagyunk?
+
+void wdtAdvanceTime(uint32_t ms) {
+  if (!g_wdtEnabled || !g_wdtInProgram) {
+    // A watchdog meg nem el (vagy szandekosan nincs feliratkozas), vagy epp nem
+    // a program vezerlesi agan vagyunk: ilyenkor egy hosszu szakasz nem hiba.
+    g_wdtUnfedMs = 0;
+    return;
+  }
+  g_wdtUnfedMs += ms;
+  if (g_wdtUnfedMs > g_wdtMaxFeedGap) g_wdtMaxFeedGap = g_wdtUnfedMs;
+}
+
+void wdtNoteTime() { wdtAdvanceTime(0); }
+
 void feedLoopWDT() {
   // Feliratkozas nelkul az esp_task_wdt_reset() ESP_ERR_NOT_FOUND-ot ad,
   // amire a core log_e()-t hiv - ez lenne az elarasztott soros port.
   if (!g_wdtEnabled) g_wdtFeedNotSubscribed++;
   if (!g_wdtEnabled) g_wdtFeedBeforeEnable++;
-  if (g_wdtTrack) {
-    const uint32_t gap = g_millis - g_wdtLastFeed;
-    if (gap > g_wdtMaxFeedGap) g_wdtMaxFeedGap = gap;
-  }
+  g_wdtUnfedMs = 0;
   g_wdtLastFeed = g_millis;
   simLog("wdt_feed");
 }
@@ -124,7 +167,7 @@ void feedLoopWDT() {
 // kozben vegez valamit - pl. befejezi a fajlirast. Egyszalu szimulatorban ez az
 // egyetlen mod a konkurencia hu abrazolasara.
 void (*g_onDelay)() = nullptr;
-void delay(uint32_t ms) { g_millis += ms ? ms : 1; if (g_onDelay) g_onDelay(); }
+void delay(uint32_t ms) { const uint32_t d = ms ? ms : 1; g_millis += d; wdtAdvanceTime(d); if (g_onDelay) g_onDelay(); }
 
 HardwareSerial Serial;
 EspClass ESP;
@@ -201,7 +244,7 @@ int digitalRead(uint8_t p) {
   }
   auto it = g_pinRead.find(p); return it == g_pinRead.end() ? HIGH : it->second;
 }
-void yield() { g_millis += 10; }   // szimulált idő telik minden yield()-nél
+void yield() { g_millis += 10; wdtAdvanceTime(10); }   // szimulált idő telik minden yield()-nél
 int64_t esp_timer_get_time() { return (int64_t)g_millis * 1000; }
 void esp_sleep_enable_timer_wakeup(uint64_t us) { g_wakeupUs = us; simLog("timer_wakeup(" + std::to_string(us) + ")"); }
 int g_gpioWakeResult = 0;

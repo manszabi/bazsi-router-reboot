@@ -13,12 +13,54 @@ extern std::map<std::string, ArRequestHandlerFunction> g_handlers;
 #include <cassert>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <cstdlib>
 #ifdef COVERAGE_BUILD
 extern "C" void __gcov_dump(void);
 #endif
 
 // --- a sketch globális állapota ---
 void setup(); void loop();
+
+// A VALODI loopTask MODELLEZESE.
+//
+// Az arduino-esp32 loopTask()-ja (main.cpp) igy nez ki:
+//
+//     for (;;) {
+//       if (loopTaskWDTEnabled) { esp_task_wdt_reset(); }
+//       loop();
+//     }
+//
+// vagyis a core MINDEN iteracio elott etet, ha a loop task fel van iratkozva.
+// Enelkul a harness sokkal rosszabbnak mutatna a programot, mint amilyen: egy
+// oraknyi szimulalt futas egyetlen ORIASI "etetes nelkuli" szakasznak latszana,
+// holott a valosagban minden korben van etetes.
+//
+// A makro miatt a forgatokonyvek valtozatlanul "loop()"-ot irhatnak, es
+// mindegyik ezen az uton megy at. A sketch sajat loop()-jat a fuggvenymutato
+// orzi meg - azt a makro mar nem irja at.
+// A merest a program vezerlesi agara szukitjuk (lasd a stub wdtAdvanceTime()
+// magyarazatat): a setup() es a loop() belseje szamit, a forgatokonyvek sajat
+// allvanyzata nem.
+static void (*const sketchLoop)() = &loop;
+static void (*const sketchSetup)() = &setup;
+
+// RAII: a kivetellel kilepo utak (deep sleep, ESP.restart) is helyesen zarjak.
+struct ProgramScope {
+  ProgramScope()  { g_wdtInProgram = true;  }
+  ~ProgramScope() { g_wdtInProgram = false; }
+};
+
+static void coreLoopStep() {
+  if (g_wdtEnabled) feedLoopWDT();
+  ProgramScope sc;
+  sketchLoop();
+}
+static void coreSetupStep() {
+  ProgramScope sc;
+  sketchSetup();
+}
+#define loop() coreLoopStep()
+#define setup() coreSetupStep()
 extern char ssid[]; extern char pass[]; extern char ipStr[]; extern char gatewayStr[];
 enum State : uint8_t;
 enum DeviceMode : uint8_t;
@@ -136,6 +178,20 @@ static const int PIN_WIFIBTN  = 2;  // D0  - wifireset gomb
 #define LED_LOW    "pin6=LOW"
 
 static int failures = 0, checks = 0;
+// A globalis watchdog-invarians kuszobe. Lasd az indoklast a
+// runIsolated()-ben; roviden: a 90 000 ms-os watchdog fele.
+static constexpr uint32_t WDT_FEED_GAP_LIMIT_MS = 45000;
+
+// FELMENTES a globalis watchdog-invarians alol. Egy forgatokonyv beallithatja,
+// ha SZANDEKOSAN modellez olyan szelsoseget, amit a kuszob nem enged - de csak
+// INDOKKAL, es a harness ki is irja. Igy a felmentes lathato marad, nem tud
+// csendben elszaporodni. Ma egyetlen hasznaloja van: a WDT8b, ami a korosan
+// lassu (400 ms/szektor) flash formazasat modellezi.
+//
+// A helyes valasz ilyenkor NEM a kuszob lazitasa: az az OSSZES tobbi
+// forgatokonyv vedelmet gyengitene egyetlen kivetel kedveert.
+static const char* g_wdtGapWaiver = nullptr;
+
 #define CHECK(cond, msg) do { checks++; if(!(cond)) { printf("  \033[31mFAIL\033[0m %s\n", msg); failures++; } \
                               else printf("  ok   %s\n", msg); } while(0)
 
@@ -179,6 +235,11 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
                      const char* ip, const char* gw, uint32_t latency = 500,
                      bool deepSleepWake = false) {
   g_millis = 1; g_log.clear(); g_serialLog.clear(); g_pinState.clear(); g_pinRead.clear();
+  // A watchdog-etetes oraja is hidegindul. Enelkul egy tobbszor bootolo
+  // forgatokonyvben a g_wdtLastFeed a REGI, nagyobb g_millis erteket orizne, es
+  // a kulonbseg elojel nelkul alulcsordulna (~4,29 milliard) - vagyis a globalis
+  // res-invarians hamisan bukna. (A merest ez a ket sor teszi ertelmezhetove.)
+  g_wdtLastFeed = 0; g_wdtMaxFeedGap = 0;
   // A heap modellje is hidegindul: egy valodi bekapcsolas tiszta heappel
   // indul. Enelkul egy korabbi forgatokonyv alacsony heapje atszivarogna a
   // kovetkezobe, es ott VARATLAN onkentes ujraindulast okozna.
@@ -3337,7 +3398,9 @@ static void scMW3() {
 // A valodi loopTask (main.cpp:79-82) MINDEN loop() elott etet, ha a loop task
 // fel van iratkozva - ezt modellezzuk. A stub ping/HTTP mostmar a valodi
 // timeoutig "blokkol", kulonben ez a meres semmit nem erne.
-static void wdLepes() { if (g_wdtEnabled) feedLoopWDT(); loop(); }
+// (A korabbi wdLepes() helyet a fenti coreLoopStep() vette at: mar MINDEN
+// forgatokonyv a valodi loopTask utjan megy.)
+static void wdLepes() { loop(); }
 static uint32_t wdMeres(uint32_t futasMs) {
   g_wdtTrack = true; g_wdtLastFeed = g_millis; g_wdtMaxFeedGap = 0;
   const uint32_t t0 = g_millis;
@@ -6557,6 +6620,12 @@ static void scWDT8b() {
   // A regi, ~1,5 MB-os semanal ugyanez rossz esetben ~153 mp lett volna: a
   // timeout FOLOTT. Ez a teszt azt rogziti, miert volt szabad a watchdogot
   // elore hozni.
+  // Ez a forgatokonyv SZANDEKOSAN lepi tul a globalis res-kuszobot: a
+  // szelsosegesen lassu flash formazasa 51,5 mp, ami a 45 mp-es kuszob folott
+  // van - de a 90 mp-es watchdog ALATT, es epp ezt bizonyitja a ket CHECK lent.
+  // Nem programhiba, hanem hardveres szelsoseg modellje.
+  g_wdtGapWaiver = "WDT8b: szandekosan korosan lassu flash formazas (51,5 mp)";
+
   const uint32_t esetek[] = { 7000, 51000 };   // tipikus, illetve rossz eset
   for (uint32_t formazas : esetek) {
     coldBoot(true, "TestNet", "pw", "", "");
@@ -7315,6 +7384,37 @@ static Result runIsolated(const Scenario& sc) {
     try { sc.fn(); }
     catch (RestartSignal&)   { printf("  \033[31mFAIL\033[0m váratlan ESP.restart()\n"); failures++; checks++; }
     catch (DeepSleepSignal&) { printf("  \033[31mFAIL\033[0m váratlan deep sleep\n");    failures++; checks++; }
+    // ------------------------------------------------------------------
+    // GLOBALIS INVARIANS: a leghosszabb etetes nelkuli szakasz.
+    //
+    // MIERT ITT, MINDEN FORGATOKONYVRE? Mert a program fo allapotgepe nem
+    // blokkolo (millis()-alapu), de a halozati muveletek IGENIS percekig
+    // futhatnak egyetlen loop() iteracion belul - es ez ma csak azert
+    // biztonsagos, mert azokban a ciklusokban KEZZEL etetunk es KEZZEL
+    // pollozunk gombot. Ezt eddig semmi nem kenyszeritette ki, csak a
+    // fegyelem: egy uj blokkolo ag, amibol kimarad a feedWatchdog(),
+    // azonnali watchdog-resetet adna, es a hiba csak az eszkozon derulne ki.
+    //
+    // Innentol MINDEN forgatokonyv meri. Uj blokkolo utat mar nem lehet ugy
+    // behozni, hogy a mulasztas eszrevetlen maradjon: ha barmelyik meglevo
+    // eset atmegy rajta, ez a sor megbukik.
+    //
+    // A KUSZOB. A watchdog 90 000 ms. A merheto legrosszabb valos eset a
+    // halott DNS: 33 010 ms egyetlen keres alatt (WD13, R7, BTN2). A kuszob
+    // a timeout FELE - eleg tag ahhoz, hogy egy jogos valtozas ne bukjon el
+    // rajta, es eleg szoros ahhoz, hogy a veszelyzonat el se erjuk.
+    //
+    // A meres reszletei (mit szamolunk es mit nem) a stub wdtAdvanceTime()
+    // magyarazataban allnak. A WDTGAP=1 kornyezeti valtozoval a forgatokonyvek
+    // mert erteke kiirhato - igy lehet megkeresni, MELYIK ut a leghosszabb.
+    // ------------------------------------------------------------------
+    if (getenv("WDTGAP")) fprintf(stderr, "WDTGAP %s | %u\n", sc.name, (unsigned)g_wdtMaxFeedGap);
+    if (g_wdtGapWaiver != nullptr) {
+      printf("     [info] a watchdog-res invarians alol felmentve: %s\n", g_wdtGapWaiver);
+    } else {
+      CHECK(g_wdtMaxFeedGap <= WDT_FEED_GAP_LIMIT_MS,
+            "a leghosszabb etetes nelkuli szakasz a kuszob alatt maradt");
+    }
     Result r{checks, failures};
     ssize_t n = write(fds[1], &r, sizeof(r));
     (void)n;
