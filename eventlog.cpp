@@ -29,6 +29,16 @@ static bool ntpStarted = false;
 // Bejelentettuk-e mar a soros porton ebben a bootban? (Lasd startNtp().)
 static bool ntpAnnounced = false;
 
+// Mit jelent ennek a modulnak egy BEKAPCSOLAS? A RAM-beli jelzoi alaphelyzetbe
+// kerulnek (az RTC memoriaban levo naplo viszont NEM - epp az a lenyege, hogy
+// tulelje). Valodi eszkozon ezt a C futtatokornyezet vegzi el, ezert a program
+// maga sosem hivja; a host tesztek viszont EGY processzen belul tobb
+// bekapcsolast is modelleznek. Lasd a header reszletesebb indoklasat.
+void ntpResetForColdBoot() {
+  ntpStarted = false;
+  ntpAnnounced = false;
+}
+
 // Az SNTP kliens elinditasa. CSAK elinditja: a valasz a hatterben erkezik, a
 // hivas nem var ra. Tobbszor is hivhato (ujracsatlakozasnal), a kliens
 // ujraindul. A rendszeroraval egyutt a nyari idoszamitas kezelese is beall.
@@ -37,11 +47,6 @@ static bool ntpAnnounced = false;
 // ebredeskor nullarol indul, a gettimeofday() alapu rendszerora viszont az RTC
 // orabol jon, tehat egy 1 oras alvas utan is jo idot mutat - epp ezert
 // hasznalhato a naplo bejegyzesek rendezesere bootolasokon at.
-void ntpResetForColdBoot() {
-  ntpStarted = false;
-  ntpAnnounced = false;
-}
-
 static void startNtp() {
   configTzTime(NTP_TZ, NTP_SERVER);
   // A KIIRAS CSAK AZ ELSO ALKALOMMAL. Az SNTP klienst minden
@@ -365,7 +370,7 @@ bool saveEventLog(const char* reason) {
 //
 // MIERT KULON A FEJLEC ES A TARTALOM? Az async_tcp task verme veges, es 32
 // bejegyzes mar 384 bajt. Ha itt is puffert kernenk, a /log kezelo EGYSZERRE
-// ket ilyet tartana (az RTC pillanatkepet es a fajlet). Igy viszont eloszb
+// ket ilyet tartana (az RTC pillanatkepet es a fajlet). Igy viszont eloszor
 // eldontjuk a fejlecbol, melyik forras kell - es csak azt toltjuk be, EGY
 // pufferbe.
 bool loadEventLogHeader(EvFileHeader& fej) {

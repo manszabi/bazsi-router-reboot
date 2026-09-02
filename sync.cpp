@@ -1,56 +1,10 @@
 #include "sync.h"
 
-#include "app_hooks.h"
-
 // A kozos spinlock. Miert EGY zar mindenre? Mert ket kulon zarnal a
 // megszerzesi sorrend kerdesse valna, es a rossz sorrend holtpont. Egy zarral
 // ez a hibaosztaly nem letezik. Az ar elhanyagolhato: minden szakasz nehany
 // utasitas, es a mux csak a ket task kozott versenyzik.
 portMUX_TYPE evLogMux = portMUX_INITIALIZER_UNLOCKED;
-
-// ---------------------------------------------------------------------------
-// HAROM ESETET KELL MEGKULONBOZTETNI, es NEM ugyanaz a szabaly vonatkozik rajuk:
-//
-// 1. EGYETLEN SZO, ONALLO JELENTESSEL - apDeadline.
-//    Egy igazitott 32 bites olvasas/iras oszthatatlan, es ennek a valtozonak
-//    nincs masik valtozoval kozos invariansa: barmelyik erteket latja is az
-//    olvaso (a regit vagy az ujat), az onmagaban ervenyes hatarido. Itt a
-//    volatile eleg - az a dolga, hogy a fordito tenylegesen olvassa ki, ne
-//    tartsa regiszterben. Nem kell zar, ezert ez az egyetlen valtozo, ami
-//    kozvetlenul is elerheto marad (extern a headerben).
-//
-// 2. EGY JELZO, AMIN ZAR MULIK - savingConfig.
-//    Itt nem az olvasas oszthatatlansaga a kerdes, hanem hogy a "megnezem,
-//    aztan beallitom" ket lepese kozott a masik task ne ferhessen be. Ezt
-//    teszi atomikussa a beginConfigWrite() / endConfigWrite() par.
-//
-// 3. KET VALTOZO, KOZOS INVARIANSSAL - restartAt + restartPending.
-//    EZ AZ EGYETLEN VALODI VESZELY a programban, es ez a modul miatta all itt.
-//
-//    Az async_tcp task ket KULON irast vegezne:
-//        restartAt = millis() + RESTART_GRACE_MS;
-//        restartPending = true;
-//    a loop task pedig a kettot EGYUTT olvasna ki es egyben dontene beloluk:
-//        if (restartPending && (int32_t)(now - restartAt) >= 0) ...
-//
-//    Ha az olvaso a jelzot mar igaznak latja, de a hataridot meg a REGI
-//    ertekevel, akkor ervenytelen paron dont. A restartAt kezdoerteke 0, tehat
-//    a "now - 0 >= 0" gyakorlatilag mindig igaz: az eszkoz AZONNAL ujraindulna,
-//    meg mielott a 200-as valasz kiment volna a bongeszonek. A felhasznalo azt
-//    latna, hogy a mentes "nem valaszolt" - kozben tokeletesen elmentette.
-//
-//    OSZINTEN A SULYOSSAGROL: ESP32-C3-on ez ma NEM fordul elo. A chip
-//    EGYMAGOS, tehat a ket task ugyanazon a magon, egymast valtva fut (nincs
-//    egyideju iras es olvasas), a volatile-volatile irasokat pedig a fordito
-//    sem rendezheti at egymashoz kepest. A helyesseg tehat ADOTT volt - csak
-//    nem a kodbol kovetkezett, hanem a hardver egy tulajdonsagabol, amit a
-//    nyelv nem garantal es amit a program sehol nem mondott ki. Egy ketmagos
-//    ESP32-re (S3) portolva a vedelem SZO NELKUL eltunt volna, es a hiba ritka,
-//    nem reprodukalhato ujraindulaskent jelentkezne - a legrosszabb fajta.
-//
-//    Ezert a part ugyanaz a spinlock vedi: a ket iras es a ket olvasas egy-egy
-//    oszthatatlan szakaszba kerul. Merve: SYNC1-SYNC3 (mutaciosan igazolva).
-// ---------------------------------------------------------------------------
 
 // A ket task kozott osztott allapot. STATIC: a modulon kivulrol nem elerheto,
 // csak az alabbi fuggvenyeken at - ezt mar a linker kenyszeriti ki.

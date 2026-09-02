@@ -33,8 +33,6 @@
 #include "netprobe.h"
 
 
-
-
 // Az IPAddress a core 3.x-ben ~28 bájt (16 bájtos unió + típus + zóna + vptr),
 // ezért egyik sem globális: mind ott jön létre, ahol használjuk.
 
@@ -87,8 +85,8 @@ constexpr uint8_t maxfailureEvents = 5;
 // Egységes Wi-Fi újrapróbálkozási politika MINDEN ágon: 3 próba, köztük 30 mp.
 constexpr uint8_t wifi_maxRetries = 3;
 constexpr uint32_t wifiInterval = 30 * 1000;
-// Az AP beállító mód ennyi tétlenség után elalszik (mentés nélkül). Minden
-// beérkező kérés újraindítja a visszaszámlálást.
+// (Az AP beallito mod tetlensegi ideje - AP_TIMEOUT_MS - a webportal.h-ban
+// all, a portal tobbi parameterevel egyutt.)
 
 // Meddig próbálkozzunk, ha a hálózat egyszerűen nincs ott? Egy kör:
 //    10,0 perc  firstStartDelay várakozás
@@ -358,8 +356,6 @@ DiagCounters diagCounters() {
   return DiagCounters{ rtcWdtResets, MAX_WDT_RESETS, rtcRetryRounds, MAX_RETRY_ROUNDS };
 }
 
-// --- Diagnosztikai eseménynapló ---------------------------------------------
-
 // --- A heap miatti ujraindulas atvitele ------------------------------------
 //
 // MIT KELL ATVINNI? Egy ESP.restart() a RAM-ot torli, tehat minden sima
@@ -396,8 +392,54 @@ RTC_NOINIT_ATTR uint8_t  rtcCarryResetEvents;  // atvitt resetEvents (CARRY_NONE
 // kapna eselyt a konfiguracio javitasara. Ezert ezt is atvisszuk.
 RTC_NOINIT_ATTR uint32_t rtcCarryRetryRounds;
 
-// A ket task kozott osztott allapot (restartPending, restartAt, apDeadline,
-// savingConfig) es az elereset vegzo fuggvenyek a sync.h / sync.cpp-ben allnak.
+// ---------------------------------------------------------------------------
+// KET TASK, EGY MEMORIA - mi vedi a kozos allapotot?
+//
+// A programban ket task fut: a loop task es az AsyncTCP webszerver
+// "async_tcp" taskja. Az alabbi globalisokhoz mindketto hozzafer.
+//
+//   restartPending / restartAt   SPINLOCK, a sync modulon at (requestRestart,
+//   savingConfig                 restartRequestDue, beginConfigWrite, ...).
+//                                Ez a harom valtozo a sync.cpp-ben STATIC:
+//                                kozvetlenul mar nem is elerheto. Az indoklas
+//                                (miert nem eleg a volatile a hatarido-jelzo
+//                                parhoz) ott all, a definiciojuknal.
+//   apDeadline                   volatile, zar nelkul: onallo jelentesu
+//                                egyetlen igazitott szo, nincs masik
+//                                valtozoval kozos invariansa.
+//   rtcEvents / rtcEvNext        evLogMux kritikus szakasz mindket iranyban
+//                                (eventlog modul).
+//   rtcWdtResets                 az async task CSAK OLVASSA (a /log lapon, a
+//   rtcRetryRounds               diagCounters()-en at), a loop irja. Igazitott
+//                                szo, tehat nem szakadhat kette; a lapon
+//                                legfeljebb egy pillanattal regi ertek all -
+//                                diagnosztikai kijelzon ez nem szamit.
+//   ssid/pass/ipStr/gatewayStr   lasd alabb: SZERKEZETI invarians vedi.
+//
+// A NEGY KONFIGURACIOS PUFFERT az async task IRJA (a POST kezelo 2. fazisa),
+// a loop task pedig OLVASSA - a WiFi.begin() hivasaiban. Ezt NEM zar vedi,
+// hanem egy szerkezeti invarians:
+//
+//   Az initWiFi() es az onlineProbe() CSAK olyan helyekrol fut, ahol a
+//   beallito portal nem letezik.
+//
+// Miert all ez? A portalt egyedul a startConfigPortal() inditja, az pedig
+// deviceMode = MODE_CONFIG-ot allit, es a startWebPortal() az UTOLSO sora. A
+// loop() a MODE_CONFIG (es a MODE_FATAL) againak elejen visszater - egyik ag
+// sem er el sem initWiFi()-ig, sem onlineProbe()-ig. Visszafele ut nincs:
+// MODE_CONFIG-bol csak ujraindulassal vagy MODE_FATAL-ba lehet kilepni, es
+// MODE_MONITOR-ba egyik sem vezet vissza. A setup() ket MODE_MONITOR
+// ertekadasa a portal letrejotte ELOTT van.
+//
+// Ket kezelo egymassal sem versenyez: az ESPAsyncWebServer MINDEN kezelot
+// ugyanazon az async_tcp taskon, sorosan hiv - tehat a GET urlap (ami olvassa
+// az ssid-t) es a POST (ami irja) sem futhat egyszerre.
+//
+// HA EZ VALAHA MEGVALTOZNA - barmi, ami a portal futasa kozben hivna
+// initWiFi()-t vagy onlineProbe()-ot -, a negy puffert zar ala kell tenni.
+// (Merve: CC1, CC2.)
+// ---------------------------------------------------------------------------
+
 
 // Forward declarations (a .ino auto-prototípusok helyett explicit módon)
 void printUptime();
@@ -434,8 +476,6 @@ bool reconnectWifi();
 bool gatewayUnreachable();
 
 
-
-
 // Végzetes hiba: a konfiguráció nem tölthető be. Ilyenkor a program nem fut
 // tovább (nincs teszt, nincs relé kapcsolás, nincs elalvás), csak jelez.
 void enterFatal(const char* reason) {
@@ -451,7 +491,6 @@ void enterFatal(const char* reason) {
   Serial.print(FATAL_SLEEP_AFTER_MS / 60000);
   Serial.println(" perc mulva az eszkoz elalszik (magatol nem ebred fel).");
 }
-
 
 
 // A heap allapot RTC blokkjanak felelesztese. Ugyanaz a minta, mint a
@@ -840,45 +879,6 @@ void waitWithButtons(uint32_t duration) {
 // FLASH: ez a függvény semmit nem ír a fájlrendszerre, és a WiFi.begin() sem
 // ír NVS-be, mert a setup() WiFi.persistent(false)-t hívott. Az esemény-napló
 // RTC RAM-ban van. Tehát tetszőleges gyakorisággal ismételhető.
-// KET TASK, EGY MEMORIA. A programban ket task fut: a loop task es az
-// AsyncTCP webszerver "async_tcp" taskja. Az alabbi globalisokhoz mindketto
-// hozzafer - ezert erdemes egy helyen kimondani, mi vedi oket:
-//
-//   apDeadline              az async task irja (touchApDeadline, mind a 4
-//                           kezelo), a loop olvassa. volatile, 32 bites
-//                           igazitott szo - a C3-on egyetlen utasitas, nem
-//                           szakadhat ketté.
-//   restartPending/restartAt  ugyanez, volatile.
-//   savingConfig            spinlock (beginConfigWrite) - ez a KONFIGZAR.
-//   rtcEvents/rtcEvNext     evLogMux kritikus szakasz mindket iranyban.
-//   rtcWdtResets            az async task CSAK OLVASSA (a /log lapon), a loop
-//   rtcRetryRounds          irja. Igazitott szo, tehat nem szakadhat ketté; a
-//                           lapon legfeljebb egy pillanattal regi ertek all -
-//                           diagnosztikai kijelzon ez nem szamit.
-//   ssid/pass/ipStr/gatewayStr   lasd alább.
-//
-// A NEGY KONFIGURACIOS PUFFERT az async task IRJA (a POST kezelo 2. fazisa),
-// a loop task pedig OLVASSA - a WiFi.begin() hivasaiban. Ezt NEM zar vedi,
-// hanem egy szerkezeti invarians:
-//
-//   Az initWiFi() es az onlineProbe() CSAK olyan helyekrol fut, ahol a
-//   beallito portal nem letezik.
-//
-// Miert all ez? A portalt egyedul a startConfigPortal() inditja, az pedig
-// deviceMode = MODE_CONFIG-ot allit, es a server.begin() az UTOLSO sora. A
-// loop() a MODE_CONFIG (es a MODE_FATAL) againak elejen visszater - egyik ag
-// sem er el sem initWiFi()-ig, sem onlineProbe()-ig. Visszafele ut nincs:
-// MODE_CONFIG-bol csak ujraindulassal vagy MODE_FATAL-ba lehet kilepni, es
-// MODE_MONITOR-ba egyik sem vezet vissza. A setup() ket MODE_MONITOR
-// ertekadasa a portal letrejotte ELOTT van.
-//
-// Ket kezelo egymassal sem versenyez: az ESPAsyncWebServer MINDEN kezelot
-// ugyanazon az async_tcp taskon, sorosan hiv - tehat a GET urlap (ami olvassa
-// az ssid-t) es a POST (ami irja) sem futhat egyszerre.
-//
-// HA EZ VALAHA MEGVALTOZNA - barmi, ami a portal futasa kozben hivna
-// initWiFi()-t vagy onlineProbe()-ot -, a negy puffert zar ala kell tenni.
-// (Merve: CC1, CC2.)
 bool onlineProbe() {
   // 1. LÉPÉS - Wi-Fi. Ez NEM teszt, hanem CSATLAKOZÁSI KÍSÉRLET, és nincs
   // következménye: ha nem sikerül, semmilyen számláló nem nő, semmilyen
@@ -998,7 +998,6 @@ void lockConfigBeforeShutdown() {
 }
 
 
-
 // A relé lábának rögzítése az alvás idejére. Deep sleep alatt a digitális
 // padek (GPIO6-21) alapból nagyimpedanciásak; a gpio_hold_en() a pad
 // pillanatnyi (LOW) kimenetét rögzíti, a gpio_deep_sleep_hold_en() pedig
@@ -1018,11 +1017,6 @@ void holdRelayForSleep() {
 }
 
 
-// Szándékosan nem az enterDeepSleep()-et hívja: itt a Wi-Fi és a webszerver
-// még el sem indult, és gombébresztést sem szabad armolni - a beragadt gomb
-// azonnal újraébresztené az eszközt, azaz végtelen boot loop lenne.
-// logIt = false: a beragadt-gomb kör ismétlése, nem kerül újra a naplóba
-// (lásd a setup() spam-védelmét).
 // Melyik gomb van lenyomva ÉPPEN MOST? 0 = reset, 1 = wifireset, -1 = egyik
 // sem. A sorrend számít: ha valahogy mindkettő nyomva van, a reset gombot
 // jelentjük - az kap gombébresztést, tehát az a veszélyesebb boot loop.
@@ -1032,6 +1026,13 @@ int pressedButtonNow() {
   return -1;
 }
 
+// Beragadt gomb: jelzes, majd rovid alvas.
+//
+// Szándékosan nem az enterDeepSleep()-et hívja: itt a Wi-Fi és a webszerver
+// még el sem indult, és gombébresztést sem szabad armolni - a beragadt gomb
+// azonnal újraébresztené az eszközt, azaz végtelen boot loop lenne.
+// logIt = false: a beragadt-gomb kör ismétlése, nem kerül újra a naplóba
+// (lásd a setup() spam-védelmét).
 void handleStuckButton(const char* message, uint16_t which, bool logIt) {
   Serial.println(message);
   Serial.print("Alvas ");
@@ -1315,7 +1316,10 @@ void enterDeepSleep(uint64_t timerUs) {
 
 // Az internet tartósan nem jön vissza a router újraindításai után sem.
 // A Wi-Fi ilyenkor működik, csak a kapcsolat rossz a szolgáltató felé, ezért
-// van értelme később magától újrapróbálni - ez az EGYETLEN időzített alvás.
+// van értelme később magától újrapróbálni: egy óra múlva magától felébred.
+// (Idozitett alvasbol ez a MASODIK - a masik a retrySleep(), ott a halozat
+// maga sincs meg. Az apSleep() es a fatalSleep() SZANDEKOSAN idozito nelkul
+// alszik el, mert azok a hibak maguktol nem mulnak el.)
 void internetFailSleep() {
   printUptime();
   Serial.print("A router ujrainditasa ");
@@ -1720,10 +1724,6 @@ void handleFirstStart(uint32_t currentMillis) {
   // lenne, mert eltolná a watchdog-ablakot.
   uiFlags.firstStart = false;
 }
-
-
-
-
 
 
 void startConfigPortal() {

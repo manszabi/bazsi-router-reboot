@@ -55,7 +55,6 @@ struct ConfigDraft {
   bool gwSet        = false;
 };
 
-// Create AsyncWebServer object on port 80
 // A webszerver. STATIC: a modulon kivul senki nem nyulhat hozza - az
 // inditasa es a leallitasa a ket publikus fuggvenyen at megy.
 static AsyncWebServer server(80);
@@ -170,10 +169,11 @@ void touchApDeadline() {
 // Igaz, ha MINDEN mezo ervenyes. Hamis eseten a failReason az ELSO hiba oka.
 // Ez a fuggveny sem fajlt nem ir, sem globalist nem modosit.
 static bool parseConfigPost(AsyncWebServerRequest* request, ConfigDraft& d,
-                     const char*& failReason) {
+                            const char*& failReason) {
   bool saveOk = true;
   failReason = nullptr;
 
+  // KOZOS jelolt-puffer mind a negy mezohoz, a legnagyobbhoz (jelszo)
   // meretezve, es a mezo hatarnal BOVEBBRE: igy a masolas-beillesztes
   // szokozeit le tudjuk vagni MIELOTT a hosszat merjuk. Egy puffer, mert az
   // async_tcp task verme veges, es igy a negy ag nem rakodik egymasra.
@@ -695,7 +695,8 @@ void startWebPortal() {
     handleConfigPost(request);
   });
 
-  server.begin();}
+  server.begin();
+}
 
 void stopWebPortal() {
   server.end();

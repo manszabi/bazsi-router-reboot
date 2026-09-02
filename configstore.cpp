@@ -36,8 +36,8 @@ bool isUsableIPv4(const IPAddress& addr) {
   return (uint32_t)addr != 0;
 }
 
-// Whitespace levágása helyben, allokáció nélkül
-// Initialize LittleFS
+// A fajlrendszer csatolasa. formatOnFail = true: az ELSO indulaskor magatol
+// megformazza a particiot, tehat nem kell kulon adatfeltoltes.
 bool initLittleFS() {
   if (!LittleFS.begin(true)) {
     // A begin() csak ESP_FAIL esetén próbál formázni. Ha a partíció egyáltalán
