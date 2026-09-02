@@ -1,0 +1,108 @@
+# Folyamatos integracio.
+#
+# MIERT KELL? A projekt legnagyobb erteke a test/ alatti keszlet (291
+# forgatokonyv, 1083 ellenorzes, 98%+ sorlefedettseg). Enelkul a workflow
+# nelkul ez csak akkor fut le, ha valakinek eszebe jut lefuttatni - vagyis a
+# vedelem pontosan akkor hianyzik, amikor a legjobban kellene: egy sietos
+# javitas utan.
+#
+# Ket, egymastol fuggetlen job:
+#   host-tests    - a viselkedes ellenorzese host gcc-vel, stub API-k felett.
+#                   Ez a "gyors" ag: percek alatt lefut, es ez fogja meg a
+#                   logikai regressziokat.
+#   firmware-build - a valodi ESP32 forditas. Ez az EGYETLEN ellenorzes, ami
+#                   a stubok es a valodi Arduino/ESP-IDF API kozti elteresre
+#                   ravilagit (mas szignatura, atnevezett makro, hianyzo
+#                   konyvtar), es egyben azt is meri, hogy a binaris BELEFER-e
+#                   a partitions_custom.csv 3,44 MB-os app particiojaba.
+
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+# Egy branchen egyszerre csak a legfrissebb futas erdekes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-tests:
+    name: Host tesztek (IDF 5 + IDF 6, ASan/UBSan, lefedettseg)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fordito es gcov verzio
+        run: g++ --version && gcov --version | head -1
+
+      # A teljes keszlet MINDKET IDF agon (a gomb-ebresztes API-ja IDF 6-ban
+      # atnevezodott; a sketch #if-fel valaszt, tehat mindkettot fordulni kell).
+      - name: make test
+        working-directory: test
+        run: make test
+
+      # Ugyanazok a forgatokonyvek ASan+UBSan alatt: puffertulcsordulas,
+      # hasznalat-utani-felszabaditas, definialatlan viselkedes. Egy CHECK()
+      # ezeket sosem latna.
+      - name: make san
+        working-directory: test
+        run: make san
+
+      # Lefedettsegi kuszob. Nem azert, hogy a szam szep legyen, hanem hogy egy
+      # uj, teszteletlen ag ne csusszon be eszrevetlenul.
+      - name: make covgate
+        working-directory: test
+        run: make covgate
+
+  firmware-build:
+    name: ESP32-C3 firmware forditas (XIAO)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: arduino/setup-arduino-cli@v2
+
+      # A verziok pontosan azok, amiket a README "Tesztelt kornyezet" tablazata
+      # rogzit. Pinelve: egy konyvtar-frissites ne tudja eltorni a buildet ugy,
+      # hogy kozben egy sor sem valtozott a repoban.
+      - name: ESP32 core telepitese (3.3.11)
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls \
+            https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@3.3.11
+
+      # A ket aszinkron konyvtar az ESP32Async FORKJA (a regi me-no-dev valtozat
+      # elhagyott, es mas a viselkedese). Git-url-lel telepitjuk, tagre pinelve,
+      # hogy biztosan a fork jojjon, ne egy azonos nevu index-bejegyzes.
+      - name: Konyvtarak telepitese (pinelt verziok)
+        run: |
+          arduino-cli config set library.enable_unsafe_install true
+          arduino-cli lib install --git-url https://github.com/ESP32Async/AsyncTCP.git#v3.5.0
+          arduino-cli lib install --git-url https://github.com/ESP32Async/ESPAsyncWebServer.git#v3.12.0
+          arduino-cli lib install ESPping@1.0.5
+
+      # A core a sketch MELLETTI partitions.csv-t hasznalja automatikusan.
+      # Ezzel a forditas azt is meri, hogy a program belefer-e a 3,44 MB-os
+      # factory particioba - ez a "sketch too big" hiba egyetlen korai jelzese.
+      - name: Egyedi particios tabla bemasolasa
+        run: cp partitions_custom.csv partitions.csv
+
+      # A sketch mappajaban levo .cpp modulokat az Arduino KULON forditasi
+      # egysegkent forditja es linkeli - ugyanugy, ahogy a host build teszi a
+      # test/Makefile MODULES listaja alapjan. Uj modulnal MINDKET helyen fel
+      # kell venni (a host build a hianyzo szimbolumot azonnal jelzi).
+      - name: A modulok listaja
+        run: ls -1 *.cpp *.h
+
+      - name: Forditas
+        run: |
+          arduino-cli compile \
+            --fqbn esp32:esp32:XIAO_ESP32C3 \
+            --warnings all \
+            bazsi_router_reboot.ino

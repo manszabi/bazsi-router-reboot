@@ -355,7 +355,7 @@ routernek sem árt.
 | Portál elérhető: `192.168.4.1` | |
 | Jelzés: **Wi-Fi LED villog 1 Hz**, státusz LED végig **be** | azonnal |
 | Az űrlap előkitöltése | SSID, IP, gateway a mentett értékkel (HTML-escape-elve); **a jelszó soha** |
-| A beállító űrlap forrása | a programba fordítva (`CONFIG_FORM`), nincs feltöltendő `data/` mappa – a portál a LittleFS-ről semmit nem szolgál ki |
+| A beállító űrlap forrása | a programba fordítva (`FORM_HEAD` / `FORM_TAIL` + `sendConfigForm()`), nincs feltöltendő `data/` mappa – a portál a LittleFS-ről semmit nem szolgál ki |
 | Tétlenség után deep sleep | **5 perc** (`AP_TIMEOUT_MS`) az utolsó kéréstől |
 | A nyitva lévő lap keep-alive-ja | **60 mp**-enként `GET /ping` (1 bájt válasz) |
 | Elfogadott IP / gateway | **csak IPv4**, nem `0.0.0.0`, és csak együtt |
@@ -1038,7 +1038,10 @@ szabály:
 | Az RTC-ben már 32 új esemény van | **RTC** | a körpuffer tele van friss adattal, ami időben mindenképp újabb |
 
 A lap **kiírja, melyik forrásból** dolgozik, és ha a fájlé, azt is, mikor
-mentettük. (Mérve: `NV5`.)
+mentettük: valós idővel dátumot, **anélkül pedig a mentés akkori uptime-ját**
+(„mentve a bootolás után 3:12:45-kor"). Így a „melyik eseménysor mikori?"
+kérdésre óra nélkül is van válasz, és nem találunk ki egy dátumot.
+(Mérve: `NV5`, `NV11`.)
 
 **Ha a fájl hiányzik, üres, csonka, rossz a magic-je vagy a fejléce többet ígér,
 mint amennyi ott van** – mind az öt eset ugyanoda vezet: a lap az RTC naplót
@@ -1089,7 +1092,7 @@ elérhetetlen vagy a névfeloldás bukik, az a mi `loop()`-unkat nem érinti.
 > A mérés: az `NV11` végigjátssza a teljes eszkalációt (tesztek bukása → router
 > reset → mentés → alvás), majd egy áramszünet utáni `/log` oldalt is –
 > **végig óraszinkron nélkül**. Mellékesen az **egész tesztkészlet** így fut: a
-> `coldBoot()` `g_epochNow = 0`-t állít, tehát mind a 278 forgatókönyv a
+> `coldBoot()` `g_epochNow = 0`-t állít, tehát mind a 294 forgatókönyv a
 > „nincs óraszinkron" állapotot játssza.
 
 > A valós idő a **deep sleepet túléli**. Az `esp_timer` (és így a `millis()`)
@@ -1181,3 +1184,88 @@ A `WIFI LOST` szűrése volt a legutolsó hiányzó darab. **Az arányokról
 2000 / 5000 ms) a mérés 4 / 2 / 1 / 0 bejegyzést adott – tehát a 32-es puffert
 nem söpörte el. A mechanizmus viszont valós, és a pislákolás gyorsulásával
 arányosan romlik; a védelem hat sor, és nincs hátránya. (Mérve: `LOG4`.)
+
+---
+
+## 16. A forráskód szerkezete
+
+A program **nyolc fordítási egység**: a `bazsi_router_reboot.ino` és hét modul
+a sketch mappájában. Összesen ~4643 sor, 98 függvény; **43%-a komment** – a
+legtöbb egy-egy döntés *indoklása*, nem a kód újramondása.
+
+> Miért nem egy fájl? Mert egy 4100 soros `.ino`-ban nincs fordító által
+> kikényszerített láthatóság: bármely függvény hozzáérhet bármely globálishoz.
+> Külön fordítási egységekben viszont amit a header nem hirdet meg, azt a
+> **linker sem találja meg**. Ez nem elmélet: a `netprobe` kiemelésekor a
+> fordító azonnal jelzett két függőséget (`trimInPlace`, `waitWithButtons`),
+> amit a kézi átvizsgálás nem vett észre.
+
+### A gerinc: három üzemmód, három állapot
+
+| | |
+|---|---|
+| **`deviceMode`** | `MODE_MONITOR` (a routert figyeli) · `MODE_CONFIG` (AP portál) · `MODE_FATAL` (megállt, villog) |
+| **`currentState`** | `TESTING_STATE` → `SUCCESS_STATE` → vissza · vagy `TESTING_STATE` → `FAILURE_STATE` (router reset) |
+
+A `MODE_MONITOR`-ból van út a másik kettőbe, **visszaút nincs**.
+
+### A modulok
+
+Fentről lefelé: minden modul csak a nála lentebb állóktól függ. A `configstore`
+és az `eventlog` közti egyetlen közös pont a fájlrendszer állapota.
+
+| Modul | Sor | Mit birtokol | Mit exportál |
+|---|---:|---|---|
+| **`limits_config.h`** | 16 | a konfig mezők méretkorlátai | 3 konstans, se állapot, se függvény |
+| **`strutil`** | 34 | `trimInPlace()` | 1 függvény |
+| **`secret`** | 123 | a jelszó összekeverése a flashben | `encodeSecret()`, `decodeSecretInPlace()` – a `secretSeed()`, `xorshift32()`, `hexVal()` **belső** |
+| **`sync`** | 252 | a két task közti osztott állapot | 7 függvény + `evLogMux` – a `savingConfig`, `restartPending`, `restartAt` **belső** |
+| **`configstore`** | 243 | a négy mentett érték, a fájljaik, a LittleFS | a négy puffer, `readConfigValue()`, `writeConfigValue()`, `clearConfigValue()`, `initLittleFS()`, `filesystemReady()` |
+| **`eventlog`** | 574 | a diagnosztikai napló **és** a valós idő (NTP) | `logEvent()`, `saveEventLog()`, `load*()`, `eventName()`, `formatEpoch()`, `ensureNtp()` – a `startNtp()`, `nowEpoch()` **belső** |
+| **`netprobe`** | 277 | HTTP végpont-tesztek és ICMP ping | `testInternetHTTP()`, `testInternetPing()` – a négy korlátozott olvasó **belső** |
+| **`webportal`** | 733 | az AP beállító portál HTTP felülete | **mindössze 3**: `startWebPortal()`, `stopWebPortal()`, `touchApDeadline()` |
+| **`app_hooks.h`** | 49 | amit a főmodul ad a moduloknak | `feedWatchdog()`, `resetbutton()`, `wifiresetbutton()`, `waitWithButtons()`, `printUptime()`, `diagCounters()` |
+
+> A `webportal` kapta a legszorosabb határt, mert ez a program
+> **biztonságkritikus felülete**: ezen megy be a Wi-Fi jelszó. A POST-kezelő,
+> a `/log` oldal, az űrlap, a `ConfigDraft` típus és maga a `server` objektum is
+> a modulon belül van – a `ConfigDraft` a headerbe be sem került.
+>
+> Az `app_hooks.h` szándékosan rövid, és ez maga a mérőeszköz: **ha nőni kezd,
+> az a rossz határhúzás első jele.** Egyszer már meg is történt – a
+> `filesystemReady()` átmenetileg ide került, majd oda, ahová való (`configstore`).
+
+### A főmodul (`bazsi_router_reboot.ino`, 2337 sor, 49 függvény)
+
+Ami maradt: a **döntéshozatal**. A modulok mérnek és tárolnak, a főmodul
+eldönti, mi következik.
+
+| Csoport | Függvények |
+|---|---|
+| Belépési pontok | `setup()` · `loop()` |
+| A `loop()` ágai | `clearHealthyRunCounters()` · `handleFatalMode()` · `handleConfigMode()` · `runMonitorStateMachine()` |
+| Az állapotgép | `runTestingState()` · `runFailureState()` · `runSuccessState()` · `handleFirstStart()` |
+| Wi-Fi | `initWiFi()` · `reconnectWifi()` · `wifiAuthFailed()` · `wifiGiveUp()` · `gatewayUnreachable()` |
+| Relé | `reset_device()` · `routerResetAndRetry()` · `holdRelayForSleep()` |
+| A négy alvás | `enterDeepSleep()` ← `retrySleep()`, `internetFailSleep()`, `apSleep()`, `fatalSleep()`; külön úton `handleStuckButton()` |
+| Gombok | a két ISR (`onResetButtonEdge()`, `onWifiResetButtonEdge()`) · `armButtonLatches()` · `resetbutton()` · `wifiresetbutton()` · `pressedButtonNow()` · `doWifiReset()` |
+| Watchdog és heap | `initWatchdog()` · `checkWatchdogResets()` · `feedWatchdog()` · `checkHeap()` · `initHeapState()` · `applyHeapCarry()` |
+| Várakozások | `blockingDelay()` · `waitWithButtons()` · `waitWithButtonsUntilOnline()` · `onlineProbe()` · `onlineProbeDue()` |
+| Leállás | `lockConfigBeforeShutdown()` · `restartFromButton()` · `enterFatal()` · `fatalHalt()` |
+| Üzemmódváltás | `startConfigPortal()` – a naplómentés, a `deviceMode` és a LED-ek; a HTTP részt a `webportal` végzi |
+
+### Amit érdemes tudni olvasás előtt
+
+> **A fizikai sorrend és a logikai csoportosítás nem mindenhol esik egybe.** A
+> `gatewayUnreachable()` logikailag a Wi-Fi-hez tartozik, de a `testInternetPing()`
+> után áll, mert arra épül. A főmodul elején álló előre-deklarációs blokk épp
+> ezért van: feloldja a körkörös hivatkozásokat egy fordítási egységen belül.
+
+Négy visszatérő minta szövi át az egészet:
+
+| Minta | Hol számít |
+|---|---|
+| **Semmi dinamikus foglalás** | fix méretű pufferek mindenütt – a méret egyben validáció is |
+| **Előjel nélküli különbség minden időzítésnél** | így a `millis()` 49,7 napos körbefordulása sehol nem számít |
+| **„Csak a sorozat első tagja"** | `TEST FAIL`, `WIFI LOST`, `STUCK BUTTON`, `LOW HEAP` – ez védi a 32 elemű naplót és a soros portot |
+| **A zár atomikus megszerzése** | sosem „megnézem, szabad-e, aztán csinálom" – a webszerver taskja közben beléphet |

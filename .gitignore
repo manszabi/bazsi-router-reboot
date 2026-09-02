@@ -1,0 +1,10 @@
+# Az arduino-cli / Arduino IDE a sketch MELLETTI partitions.csv-t hasznalja,
+# ezert a partitions_custom.csv-t oda kell masolni. A masolat generalt fajl -
+# a forras a partitions_custom.csv, azt kell verziokezelni.
+/partitions.csv
+
+# arduino-cli forditasi kimenet
+/build/
+*.bin
+*.elf
+*.map

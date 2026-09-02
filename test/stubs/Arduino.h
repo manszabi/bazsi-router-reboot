@@ -144,6 +144,7 @@ void portENTER_CRITICAL(portMUX_TYPE*);
 void portEXIT_CRITICAL(portMUX_TYPE*);
 extern int g_criticalDepth;     // aktualis beagyazottsag (0 = nincs nyitva)
 extern int g_criticalMaxDepth;
+extern int g_criticalEnters;  // megnyitott kritikus szakaszok szama
 extern bool     g_wdtEnabled;
 extern uint32_t g_wdtTimeoutMs;
 extern uint32_t g_wdtIdleMask;

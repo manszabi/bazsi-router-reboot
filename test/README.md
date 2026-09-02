@@ -1,13 +1,24 @@
 # Tesztek
 
-Ezek a tesztek a **tényleges `bazsi_router_reboot.ino` fájlt** fordítják le
-host gcc-vel, stub Arduino/ESP32 API-k felett. Nem kell hozzájuk ESP32
-hardver, sem Arduino toolchain – csak egy C++17-es fordító.
+Ezek a tesztek a **tényleges programot** fordítják le host gcc-vel, stub
+Arduino/ESP32 API-k felett. Nem kell hozzájuk ESP32 hardver, sem Arduino
+toolchain – csak egy C++17-es fordító.
 
 ```bash
 cd test
 make test
 ```
+
+**A fordítási modell megegyezik az Arduinóéval**: a `bazsi_router_reboot.ino`
+és a hét modul (`secret.cpp`, `strutil.cpp`, `netprobe.cpp`, `sync.cpp`,
+`eventlog.cpp`, `configstore.cpp`, `webportal.cpp`) **külön fordítási
+egységek**, amiket a linker fűz össze – pontosan úgy, ahogy az Arduino teszi a
+sketch mappa `.cpp` fájljaival. Így egy hiányzó deklaráció vagy egy nem
+található szimbólum már itt kiderül, nem csak az eszközön.
+
+> Új modul hozzáadásakor a `Makefile` **`MODULES`** listáját kell bővíteni. Ha
+> kimarad, a link azonnal `undefined reference`-szel bukik – a felejtés nem
+> tud csendben maradni.
 
 A suite **kétszer** fut: az ESP32 Arduino 3.3.11 által használt **IDF 5**-ös
 ágon, és az **IDF 6**-os ágon is – a deep sleep gomb-ébresztés API-ját ugyanis
@@ -21,11 +32,17 @@ make san
 ```
 
 A sorlefedettség megmutatja, mely ágakat **nem futtatja egyetlen forgatókönyv
-sem** – oda ugyanis semmi nem néz rá:
+sem** – oda ugyanis semmi nem néz rá. Fájlonként **és** összesítve mér, tehát
+a leggyengébb modul is látszik:
 
 ```bash
-make cov
+make cov        # a lefedettség + a nem érintett sorok listája
+make covgate    # ugyanaz, de kilépési kóddal (a CI ezt futtatja)
 ```
+
+A `covgate` küszöbe a `COV_MIN` (alapértelmezés 97,0%). A mérést a
+`covreport.py` végzi: a gcov fájlonként számol, tehát a „legelső százalék"
+több modul mellett már nem a program lefedettsége lenne.
 
 Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` után áll elő):
 
@@ -55,13 +72,21 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
   időzítések ezredmásodpercek alatt tesztelhetők.
 - `ESP.restart()` és `esp_deep_sleep_start()` C++ kivételt dob, így a
   visszatérés nélküli útvonalak is ellenőrizhetők.
-- **Minden forgatókönyv külön processzben fut** (`fork()`), mert a sketch
+- **Minden forgatókönyv külön processzben fut** (`fork()`), mert a program
   globális állapota (`testState`, `timing`, `uiFlags`) egyébként átszivárogna
   az esetek között. Ez egyben hű is a valósághoz: minden eset hidegindítás.
+- **A tesztek a modulok szerződésén át dolgoznak**, nem az implementációjukon.
+  A `sync` és a `configstore` állapota `static` a saját fordítási egységében,
+  tehát a tesztek nem is érnék el – `restartRequested()`,
+  `configWriteInProgress()`, `filesystemReady()` stb. az útjuk. Ez nem csak
+  kényszer: így a tesztek a **viselkedést** rögzítik. Ahol egy belső jelzőre
+  fogadtak, azt megfigyelhető következményre cseréltük (pl. „a kapcsolat
+  elvesztésével törlődik a jelző" helyett „kapcsolat nélkül nem indul újabb
+  szinkron").
 
 ## Lefedett esetek
 
-**291 forgatókönyv, 1082 ellenőrzés. Sorlefedettség: 98,64%.**
+**294 forgatókönyv, 1103 ellenőrzés. Sorlefedettség: 98,70%.**
 
 | | |
 |---|---|

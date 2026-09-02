@@ -1,11 +1,10 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include <ESPAsyncWebServer.h>
-#include <AsyncTCP.h>
-#include <HTTPClient.h>
-#include <ESPping.h>
+// A HTTP kliens, az ICMP ping es a webszerver mar a moduloke (netprobe,
+// webportal) - a fomodul nem hivja oket kozvetlenul. Az Arduino a KONYVTARAKAT
+// tovabbra is megtalalja: a sketch mappa MINDEN fajljanak includejait vegignezi,
+// es ezek a modulokban ott allnak.
 #include <string.h>
-#include <ctype.h>
 #include "LittleFS.h"
 #include "esp_sleep.h"
 #include "esp_idf_version.h"
@@ -21,71 +20,20 @@
 // ez a paros tartja meg alvas alatt (driver/gpio.h, a gpio_hold_en 3. megj.).
 #include "driver/gpio.h"
 
-// Create AsyncWebServer object on port 80
-AsyncWebServer server(80);
+// A sajat modulok. Amit ezek a headerek nem hirdetnek meg, az a modulokon
+// kivulrol nem elerheto - ezt mar a fordito kenyszeriti ki, nem a fegyelem.
+#include "limits_config.h"
+#include "sync.h"
+#include "eventlog.h"
+#include "configstore.h"
+#include "webportal.h"
+#include "strutil.h"
+#include "secret.h"
+#include "app_hooks.h"
+#include "netprobe.h"
 
-// Search for parameter in HTTP POST request
-const char PARAM_SSID[]    = "ssid";
-const char PARAM_PASS[]    = "pass";
-const char PARAM_IP[]      = "ip";
-const char PARAM_GATEWAY[] = "gateway";
 
-// Keep-alive: amíg a lap NYITVA van, 60 mp-enként jelez. Enélkül az AP mód
-// "tétlenség" órája a lap betöltésétől ketyegne, nem az utolsó interakciótól -
-// és egy lassan begépelt jelszó közben elaludna az eszköz (mérve: 6 perc
-// gépelés után a Submit már nem érné el).
-// A visibilitychange azért kell, hogy app-váltás után visszatérve azonnal
-// frissüljön a határidő, ne csak a következő 60 mp-es ütemnél.
-// Mindkét űrlapon és a naplóoldalon ugyanez a szöveg szerepel; a const char[]
-// a flash .rodata szekciójába kerül (drom0_0_seg), RAM-ot nem foglal.
-// Egyetlen forrás: a fordító fűzi össze a literálokat, futásidőben nem másolunk.
-#define KEEPALIVE_JS_LIT \
-  "<script>f=()=>fetch('/ping?'+Date.now());setInterval(f,6e4);" \
-  "document.onvisibilitychange=()=>document.hidden||f()</script>"
-const char KEEPALIVE_JS[] = KEEPALIVE_JS_LIT;
 
-// A beállító űrlap FEJLÉCE és LÁBLÉCE. A középső, mezőket tartalmazó rész
-// futásidőben generálódik, mert a mentett SSID-t, IP-t és gateway-t
-// ELŐKITÖLTVE mutatjuk - lásd sendConfigForm().
-const char FORM_HEAD[] =
-  "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
-  "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-  "<title>ESP Wi-Fi Manager</title></head><body>"
-  "<h2>ESP Wi-Fi Manager</h2>"
-  "<form action=\"/\" method=\"POST\">";
-const char FORM_TAIL[] =
-  "<small>Statikus IP-hez mindket cimmezot toltsd ki, csak IPv4. "
-  "DHCP-hez hagyd mindkettot uresen.</small><br>"
-  "<input type=\"submit\" value=\"Submit\"></form>"
-  "<p><a href=\"/log\">Diagnosztikai naplo</a></p>"
-  KEEPALIVE_JS_LIT
-  "</body></html>";
-
-// AP password (WPA2: min. 8, max. 63 karakter)
-const char AP_PASSWORD[] = "12345678";
-// A WiFi.softAP() visszateresi erteket nem nezzuk, a core pedig rovid jelszonal
-// csak annyit tesz, hogy "passphrase too short!" es return false (AP.cpp) - az
-// AP letre sem jonne, az eszkoz elerhetetlen lenne, es 5 perc mulva elaludna.
-// Ezt fordítási idoben fogjuk meg, hogy egy kesobbi atiras ne tudja elrontani.
-static_assert(sizeof(AP_PASSWORD) - 1 >= 8, "AP jelszo: legalabb 8 karakter (WPA2)");
-static_assert(sizeof(AP_PASSWORD) - 1 <= 63, "AP jelszo: legfeljebb 63 karakter (WPA2)");
-
-// A HTML űrlapról érkező értékek. Fix méretű bufferek: nincs heap-töredezettség,
-// és a szabvány szerinti maximumok egyben validációt is jelentenek.
-constexpr size_t SSID_MAX_LEN  = 32;  // IEEE 802.11 SSID
-constexpr size_t PASS_MAX_LEN  = 63;  // WPA2-PSK passphrase
-constexpr size_t IPSTR_MAX_LEN = 15;  // "255.255.255.255"
-
-char ssid[SSID_MAX_LEN + 1]        = { 0 };
-char pass[PASS_MAX_LEN + 1]        = { 0 };
-char ipStr[IPSTR_MAX_LEN + 1]      = { 0 };
-char gatewayStr[IPSTR_MAX_LEN + 1] = { 0 };
-
-// File paths to save input values permanently
-const char ssidPath[] = "/ssid.txt";
-const char passPath[] = "/pass.txt";
-const char ipPath[] = "/ip.txt";
-const char gatewayPath[] = "/gateway.txt";
 
 // Az IPAddress a core 3.x-ben ~28 bájt (16 bájtos unió + típus + zóna + vptr),
 // ezért egyik sem globális: mind ott jön létre, ahol használjuk.
@@ -141,7 +89,6 @@ constexpr uint8_t wifi_maxRetries = 3;
 constexpr uint32_t wifiInterval = 30 * 1000;
 // Az AP beállító mód ennyi tétlenség után elalszik (mentés nélkül). Minden
 // beérkező kérés újraindítja a visszaszámlálást.
-constexpr uint32_t AP_TIMEOUT_MS = 5 * 60 * 1000;
 
 // Meddig próbálkozzunk, ha a hálózat egyszerűen nincs ott? Egy kör:
 //    10,0 perc  firstStartDelay várakozás
@@ -199,7 +146,6 @@ constexpr uint32_t WDT_TIMEOUT_MS = 90 * 1000;
 constexpr uint32_t MAX_WDT_RESETS = 3;
 // Ennyi ideig tartó hibátlan működés után a számláló nullázódik.
 constexpr uint32_t WDT_COUNTER_CLEAR_MS = 60 * 60 * 1000;
-constexpr uint32_t RESTART_GRACE_MS = 2000;  // válasz kiküldése újraindítás előtt
 
 constexpr uint64_t SLEEP_DURATION_US = 3600ULL * 1000000ULL;      // 1 óra
 constexpr uint64_t STUCK_BUTTON_SLEEP_US = 60ULL * 1000000ULL;    // 60 másodperc
@@ -224,22 +170,6 @@ constexpr uint64_t STUCK_BUTTON_SLEEP_US = 60ULL * 1000000ULL;    // 60 másodpe
 // tehát a 3 mp csak annyit késleltet, ami után úgyis a 60 mp-es alvás jön.
 constexpr uint32_t STUCK_BUTTON_CONFIRM_MS = 3000;
 
-// --- Valos ido (NTP) -------------------------------------------------------
-//
-// MIERT KELL? A naplo eddig csak uptime belyeget hordozott, ami minden
-// indulaskor nullarol kezd - ket bootolas esemenyei igy nem rendezhetok
-// egymashoz. A LittleFS-re mentett naplo ertelmezesehez viszont epp ez kell:
-// melyik a frissebb, a fajlban levo vagy az RTC-ben levo?
-//
-// A szinkronizalas NEM BLOKKOL: a configTzTime() csak elinditja az SNTP
-// klienst, a valasz a hatterben erkezik. Amig nem erkezett meg, az epoch mezo
-// 0 marad - a naplo attol meg mukodik, csak uptime-ot mutat.
-constexpr char NTP_SERVER[] = "hu.pool.ntp.org";
-// Magyarorszag: CET/CEST, a nyari idoszamitas valtasaival egyutt (POSIX TZ).
-constexpr char NTP_TZ[] = "CET-1CEST,M3.5.0,M10.5.0/3";
-// Ennel korabbi ertek nem lehet valodi szinkron (2025-01-01). A rendszerora
-// szinkron nelkul 1970-bol indul, tehat egy egyszeru also korlat elegendo.
-constexpr uint32_t NTP_MIN_VALID_EPOCH = 1735689600UL;
 
 // --- Heap felugyelet -------------------------------------------------------
 //
@@ -294,19 +224,8 @@ constexpr uint32_t ONLINE_PROBE_INTERVAL_MS = 60 * 1000;
 // jön létre.
 constexpr uint8_t PROBE_PING_IP[4] = { 1, 1, 1, 1 };
 
-// Teszt paraméterek
-constexpr uint8_t PING_ATTEMPTS = 4;
-constexpr uint8_t PING_MIN_SUCCESS = 2;
-constexpr uint32_t PING_GAP_MS = 1000;
-constexpr size_t HTTP_MAX_PAYLOAD = 96;  // a várt válaszok < 32 bájt
-constexpr uint32_t HTTP_CONNECT_TIMEOUT_MS = 5000;
-constexpr uint32_t HTTP_RESPONSE_TIMEOUT_MS = 10000;
-constexpr uint32_t HTTP_READ_TIMEOUT_MS = 1500;
-// Chunked valasznal hany darabot vagyunk hajlandok vegigolvasni. Minden nem
-// lezaro darab legalabb 1 bajtot ad, es a puffer hataran ugyis megallunk, tehat
-// ennyi kort elmeletileg sem lehet tullepni - ez csak egy vegso kapaszkodo,
-// nehogy egy szabalytalan keretezes vegtelen ciklusba vigyen.
-constexpr uint16_t HTTP_MAX_CHUNKS = HTTP_MAX_PAYLOAD + 2;
+// A teszt parameterek (PING_*, HTTP_*) a netprobe.h-ban allnak, a
+// mereseikkel egy helyen.
 // A legmagasabb letezo ciklus index: ot vegpont van, 0..4. A FAILURE_STATE
 // mar 4-nel resetel, tehat a plafon a gyakorlatban nem is kot - de ez az a
 // szam, ameddig az indexnek egyaltalan ertelme van, es a leptetes ezt mondja ki.
@@ -359,19 +278,10 @@ enum DeviceMode : uint8_t {
   MODE_FATAL = 2  // a konfiguráció nem tölthető be: a program nem fut tovább
 };
 
-// A konfiguráció betöltésének háromféle kimenetele. A hiányzó fájl NEM hiba:
-// ez az állapot az első indításnál és a wifireset gomb után is normális.
-enum ConfigStatus : uint8_t {
-  CONFIG_OK = 0,       // beolvasva (az érték lehet üres is)
-  CONFIG_MISSING = 1,  // a fájl nem létezik -> nincs még konfiguráció
-  CONFIG_ERROR = 2     // a fájl létezik, de nem olvasható -> végzetes hiba
-};
 
 State currentState = TESTING_STATE;
 DeviceMode deviceMode = MODE_MONITOR;
 
-// Sikerült-e a LittleFS csatolása. Ha nem, a beállítások nem menthetők.
-bool fsReady = false;
 
 // Statikus IP konfigurációval megyünk-e? Csak akkor igaz, ha a WiFi.config()
 // ténylegesen sikerült. DHCP-nél a gateway magától a routertől jött, tehát
@@ -441,92 +351,14 @@ RTC_NOINIT_ATTR uint32_t rtcWdtResets;
 // felhasználói beavatkozás tiszta 2 napos ablakkal indít.
 RTC_DATA_ATTR uint32_t rtcRetryRounds = 0;
 
+// A diagnosztikai lap szamlaloi egy egeszkent (app_hooks.h). A szamlalok itt
+// maradnak, mert a watchdog-politika es az ujraprobalkozasi ablak a fomodul
+// dontesei - a portal csak megjeleniti oket.
+DiagCounters diagCounters() {
+  return DiagCounters{ rtcWdtResets, MAX_WDT_RESETS, rtcRetryRounds, MAX_RETRY_ROUNDS };
+}
+
 // --- Diagnosztikai eseménynapló ---------------------------------------------
-// RTC_NOINIT_ATTR: túléli a deep sleepet, a watchdog resetet ÉS a reset gombot
-// is - vagyis pont azokat a hibákat, amiket ki akarunk vizsgálni. Csak az
-// áramtalanítás törli. Az ESP32-C3-on ~8 KB RTC memória van; ez a napló
-// 392 bájt (2 x 4 bájt fejléc + 32 x 12 bájt bejegyzés), a program összes RTC
-// állapota együtt is ~420 bájt.
-enum EventCode : uint8_t {
-  EV_BOOT = 1,          // param: reset ok (esp_reset_reason_t)
-  EV_WIFI_OK = 2,       // param: kör sorszám, amiben sikerült
-  EV_WIFI_LOST = 3,     // param: WiFi.status()
-  EV_TEST_FAIL = 4,     // param: teszt ciklus index, 1-alapú (1..5)
-  EV_ROUTER_RESET = 5,  // param: hányadik reset esemény
-  EV_AP_MODE = 6,       // param: ok (1=nincs SSID 2=auth hiba 3=2 nap letelt
-                        //           4=statikus IP rossz: a gateway sem elerheto)
-  EV_CONFIG_SAVED = 7,  // param: 0
-  EV_SLEEP = 8,         // param: ok (1=retry 2=internet 3=AP timeout 4=fatal)
-  EV_FATAL = 9,         // param: ok (1=FS mount 2=konfig olvasás 3=watchdog
-                        //           4=wifireset törlés sikertelen
-                        //           5=tartósan kevés a szabad heap)
-  EV_WDT_RESET = 10,    // param: hányadik watchdog reset
-  EV_STUCK_BUTTON = 11, // param: 0 = reset gomb, 1 = wifireset gomb
-  EV_GW_UNREACHABLE = 12, // param: 1 = reset elott, 2 = a reset utan is
-  EV_LOW_HEAP = 13,     // param: a szabad heap KiB-ban, a kuszob atlepesekor
-  EV_HEAP_RESTART = 14  // param: a szabad heap KiB-ban az ujrainditas elott
-};
-
-// Pontosan 12 bájt. A kitöltő mező explicit, hogy a RTC memóriában tárolt
-// elrendezés akkor se változzon, ha a fordító igazítási szabályai eltérnek -
-// és ez most már nem csak az RTC-re igaz: ez a struktúra megy ki bájtról
-// bájtra a LittleFS-re mentett naplófájlba is (lásd saveEventLog()), tehát a
-// méret és a sorrend a FÁJLFORMÁTUM része. Ha valaha változik, a fájl
-// verziószámát (EVFILE_VERSION) is emelni kell.
-struct EventEntry {
-  uint32_t uptimeSec;
-  uint32_t epoch;     // valos ido (unix), 0 ha az NTP meg nem szinkronizalt
-  uint16_t param;
-  uint8_t code;
-  uint8_t reserved;
-};
-
-constexpr uint8_t EVLOG_SIZE = 32;
-// A magic EGYBEN VERZIOJELZO is. Az RTC NOINIT terulet a szoftveres resetet -
-// tehat egy SOROS PORTON KERESZTULI FIRMWARE FRISSITEST is - tulel: az uj
-// firmware a regi tartalmat talalja ott. Ha kozben az EventEntry elrendezese
-// valtozott (mint amikor 8-rol 12 bajtra nott az epoch mezovel), a regi
-// bejegyzesek UJ elrendezeskent ertelmezve szemetet adnanak - es a
-// saveEventLog() ezt a szemetet meg ki is irna a fajlrendszerre.
-//
-// Ezert: HA AZ EventEntry VAGY AZ EVLOG_SIZE VALTOZIK, EZT A MAGIC-ET IS
-// EMELNI KELL. Az uj firmware igy ervenytelennek latja a regi naplot, es
-// tiszta lappal indul - egyetlen bootnyi naplo elvesztese az ara, cserebe
-// nincs hamis diagnosztika.
-constexpr uint32_t EVLOG_MAGIC = 0x42415A4DUL;  // "BAZM" (v2: 12 bajtos bejegyzes)
-RTC_NOINIT_ATTR uint32_t rtcEvMagic;
-RTC_NOINIT_ATTR uint32_t rtcEvNext;   // következő írási pozíció (monoton nő)
-RTC_NOINIT_ATTR EventEntry rtcEvents[EVLOG_SIZE];
-
-// --- A naplo mentese LittleFS-re -------------------------------------------
-//
-// MIERT? Az RTC naplo az aramszunetet NEM eli tul - epp azt a hibat nem, ami
-// utan a leginkabb tudni akarnank, mi tortent elotte. Ezert a program a
-// FONTOS pillanatokban kiirja a naplot a fajlrendszerre is: router reset
-// elott, AP modba valtas elott, es az 1 oras alvas elott. Ezek azok a
-// pontok, ahol vagy hosszabb ido kovetkezik, vagy az eszkoz beavatkozik -
-// mindketto olyan, amit egy kesobbi vizsgalat latni akar.
-//
-// A fajl a teljes korpuffer pillanatkepe, tehat mindig "az utolso 32 esemeny,
-// ahogy a legutobbi fontos pillanatban allt".
-constexpr char evLogPath[] = "/evlog.bin";
-constexpr uint32_t EVFILE_MAGIC = 0x42415A46UL;   // "BAZF"
-constexpr uint16_t EVFILE_VERSION = 1;
-
-// A fajl fejlece. Fix meretu, es a struktura elrendezese a formatum resze.
-struct EvFileHeader {
-  uint32_t magic;
-  uint16_t version;
-  uint16_t count;        // hany bejegyzes kovetkezik (0..EVLOG_SIZE)
-  uint32_t evNextAtSave; // az rtcEvNext erteke a mentes pillanataban
-  uint32_t savedEpoch;   // mikor mentettuk (0 ha nem volt NTP)
-  uint32_t savedUptime;  // uptime a mentes pillanataban
-};
-
-// Az rtcEvNext erteke a legutobbi SIKERES mentesnel. Ket dolgot ad:
-//  - nem irunk feleslegesen (ha azota nem tortent esemeny, nincs mit menteni),
-//  - es igy a flash kopasa a tenyleges esemenyekhez igazodik.
-RTC_NOINIT_ATTR uint32_t rtcSavedEvNext;
 
 // --- A heap miatti ujraindulas atvitele ------------------------------------
 //
@@ -564,16 +396,8 @@ RTC_NOINIT_ATTR uint8_t  rtcCarryResetEvents;  // atvitt resetEvents (CARRY_NONE
 // kapna eselyt a konfiguracio javitasara. Ezert ezt is atvisszuk.
 RTC_NOINIT_ATTR uint32_t rtcCarryRetryRounds;
 
-// Az aszinkron webszerver callbackjéből nem szabad blokkolni/újraindítani,
-// ezért csak jelzünk, az újraindítást a loop() végzi el.
-volatile bool restartPending = false;
-volatile uint32_t restartAt = 0;
-
-// AP beállító mód: mikor aludjon el, ha nem érkezik mentés. Minden HTTP kérés
-// kitolja. A savingConfig azt jelzi, hogy épp fájlírás folyik - ilyenkor
-// semmiképp nem alszunk el.
-volatile uint32_t apDeadline = 0;
-volatile bool savingConfig = false;
+// A ket task kozott osztott allapot (restartPending, restartAt, apDeadline,
+// savingConfig) es az elereset vegzo fuggvenyek a sync.h / sync.cpp-ben allnak.
 
 // Forward declarations (a .ino auto-prototípusok helyett explicit módon)
 void printUptime();
@@ -591,393 +415,26 @@ void lockConfigBeforeShutdown();
 void internetFailSleep();
 void fatalSleep();
 void apSleep();
-void touchApDeadline();
 void feedWatchdog();
 void wifiGiveUp();
 bool routerResetAndRetry();
 bool wifiAuthFailed();
 bool reset_device();
-void logEvent(EventCode code, uint16_t param);
-bool beginConfigWrite();
 void startConfigPortal();
-const char* resetReasonName(esp_reset_reason_t r);
-void sendConfigForm(AsyncWebServerRequest* request);
-void printHtmlEscaped(AsyncResponseStream* r, const char* s);
 void enterFatal(const char* reason);
 void fatalHalt(const char* reason);
 void enterDeepSleep(uint64_t timerUs);
 void holdRelayForSleep();
-bool stuckCycleAlreadyLogged(uint16_t which);
-bool lastEventWas(uint8_t code);
 int pressedButtonNow();
 void checkHeap(uint32_t now);
-bool saveEventLog(const char* reason);
-bool loadEventLogHeader(EvFileHeader& fej);
-bool loadEventLogEntries(const EvFileHeader& fej, EventEntry* ki);
-uint32_t nowEpoch();
-void startNtp();
-void ensureNtp();
 void initHeapState();
 void applyHeapCarry();
 bool initWiFi();
 bool reconnectWifi();
-bool writeConfigValue(fs::FS& fs, const char* path, const char* message);
-bool isUsableIPv4(const IPAddress& addr);
 bool gatewayUnreachable();
-bool testInternetPing(const IPAddress& target, const char* targetName);
-bool encodeSecret(const char* plain, char* out, size_t outSize);
-void decodeSecretInPlace(char* buf);
 
-// Esemény rögzítése a körpufferbe. Nem allokál, nem blokkol.
-//
-// Két task is hív: a loop task mellett az async_tcp task is (a POST kezelő
-// CONFIG_SAVED bejegyzése). A pozíció léptetése és a slot írása együtt nem
-// atomi, ezért kritikus szakasz védi - enélkül két egyidejű hívás ugyanabba
-// a slotba írhatna, vagy egy bejegyzés elveszne. A szakasz rövid (a memset
-// csak a legelső híváskor fut), a megszakítás-tiltás belefér.
-portMUX_TYPE evLogMux = portMUX_INITIALIZER_UNLOCKED;
-void logEvent(EventCode code, uint16_t param) {
-  // A KET IDOBELYEGET A KRITIKUS SZAKASZON KIVUL keszitjuk el.
-  //
-  // MIERT? A portENTER_CRITICAL a C3-on letiltja a megszakitasokat, tehat
-  // odabent minden extra munka kozvetlen koltseg. Az uptime egy 64 bites
-  // osztas, a nowEpoch() pedig time()-ot hiv - az ESP-IDF-ben ez a
-  // rendszerora sajat zarjat is megfoghatja. Idegen zarat felvenni letiltott
-  // megszakitasok mellett nem az a minta, amit egy naplozo fuggvenytol
-  // varunk; a struktura sajat kommentje is azt allitja, hogy a szakasz
-  // "rovid". Igy viszont odabent tenyleg csak ertekadasok maradnak.
-  //
-  // Az idobelyegek nehany mikromasodperccel korabbrol szarmaznak - ez a
-  // masodperces felbontas mellett nem szamit.
-  const uint32_t uptimeSec = (uint32_t)(esp_timer_get_time() / 1000000);
-  // Ha az NTP mar szinkronizalt, a valos idot is eltesszuk. Enelkul csak
-  // uptime van, ami minden indulaskor nullarol kezd - ket bootolas esemenyei
-  // igy nem rendezhetok egymashoz.
-  const uint32_t epoch = nowEpoch();
 
-  portENTER_CRITICAL(&evLogMux);
-  if (rtcEvMagic != EVLOG_MAGIC) {
-    rtcEvMagic = EVLOG_MAGIC;
-    rtcEvNext = 0;
-    rtcSavedEvNext = 0;
-    memset(rtcEvents, 0, sizeof(rtcEvents));
-  }
-  EventEntry& e = rtcEvents[rtcEvNext % EVLOG_SIZE];
-  e.uptimeSec = uptimeSec;
-  e.epoch = epoch;
-  e.code = (uint8_t)code;
-  e.param = param;
-  e.reserved = 0;
-  rtcEvNext++;
-  portEXIT_CRITICAL(&evLogMux);
-}
 
-// Az indulás okának EMBERI neve. A /log oldalon eddig a nyers enum-szám
-// szerepelt ("Utolso indulas oka: 8"), amihez a felhasználónak az ESP-IDF
-// fejlécét kellett volna kikeresnie - épp azt a diagnózist nehezítve, amiért
-// az oldal egyáltalán van. A számot zárójelben megtartjuk, hogy egy
-// hibajelentés továbbra is egyértelmű legyen.
-const char* resetReasonName(esp_reset_reason_t r) {
-  switch (r) {
-    case ESP_RST_POWERON:    return "bekapcsolas / aramtalanitas";
-    case ESP_RST_EXT:        return "kulso reset lab";
-    case ESP_RST_SW:         return "szoftveres ujrainditas (ESP.restart)";
-    case ESP_RST_PANIC:      return "PANIC - a program osszeomlott";
-    case ESP_RST_INT_WDT:    return "megszakitas-watchdog";
-    case ESP_RST_TASK_WDT:   return "TASK WATCHDOG - a loop megallt";
-    case ESP_RST_WDT:        return "egyeb watchdog";
-    case ESP_RST_DEEPSLEEP:  return "ebredes deep sleepbol";
-    case ESP_RST_BROWNOUT:   return "BROWNOUT - leesett a tapfeszultseg";
-    case ESP_RST_CPU_LOCKUP: return "CPU lefagyas";
-    default:                 return "ismeretlen";
-  }
-}
-
-const char* eventName(uint8_t code) {
-  switch (code) {
-    // A default ag vedelmi celu: az L6 minden letezo kodot ellenoriz, tehat a
-    // "?" a host tesztekben sosem all elo. Egy JOVOBELI kod viszont igy nem
-    // tud olvashatatlan lapot csinalni, csak egy kerdojelet.
-    case EV_BOOT: return "BOOT";
-    case EV_WIFI_OK: return "WIFI OK";
-    case EV_WIFI_LOST: return "WIFI LOST";
-    case EV_TEST_FAIL: return "TEST FAIL";
-    case EV_ROUTER_RESET: return "ROUTER RESET";
-    case EV_AP_MODE: return "AP MODE";
-    case EV_CONFIG_SAVED: return "CONFIG SAVED";
-    case EV_SLEEP: return "SLEEP";
-    case EV_FATAL: return "FATAL";
-    case EV_WDT_RESET: return "WDT RESET";
-    case EV_STUCK_BUTTON: return "STUCK BUTTON";
-    case EV_GW_UNREACHABLE: return "GW UNREACH";
-    case EV_LOW_HEAP: return "LOW HEAP";
-    case EV_HEAP_RESTART: return "HEAP RESTART";
-    default: return "?";
-  }
-}
-
-// --- A mentett jelszó összekeverése ----------------------------------------
-//
-// Cél, pontosan körülhatárolva: egy flash dumpon futtatott `strings` NE adjon
-// használható jelszót, és egy kimásolt /pass.txt más lapkán se működjön.
-//
-// Amit NEM ad: ez nem titkosítás. Aki kódot tud futtatni az eszközön (a C3-ban
-// beépített USB Serial/JTAG-gel vagy saját sketch-csel), az a visszafejtett
-// jelszót kiolvassa a RAM-ból - a művelet ugyanis magán az eszközön történik.
-// Az egyetlen valódi védelem a flash titkosítás (eFuse-ban tárolt kulccsal).
-//
-// Formátum: "v1:" + kisbetűs hexa. Az előtag nélküli fájl régi, sima szöveges
-// mentés; azt továbbra is elfogadjuk, különben egy frissítés használhatatlanná
-// tenné a már beállított eszközöket.
-//
-// A kulcsfolyam magjában ott van az eFuse MAC is (esp_efuse_mac_get_default(),
-// Esp.cpp). Az eFuse NEM a flashben van, tehát egy önmagában kimásolt
-// flash-tartalom kevés hozzá, és a nyilvános forráskódból írt általános
-// dekóder sem elég: az adott chip is kell.
-constexpr uint32_t SECRET_SALT = 0x42415A53UL;  // "BAZS"
-constexpr char SECRET_PREFIX[] = "v1:";
-constexpr size_t SECRET_PREFIX_LEN = sizeof(SECRET_PREFIX) - 1;
-// "v1:" + 2 hexa jegy jelszó-bájtonként
-constexpr size_t SECRET_ENC_MAX = SECRET_PREFIX_LEN + 2 * PASS_MAX_LEN;
-
-uint32_t secretSeed() {
-  const uint64_t mac = ESP.getEfuseMac();  // 6 bájt, a felső 2 nulla
-  const uint32_t seed = SECRET_SALT ^ (uint32_t)mac ^ (uint32_t)(mac >> 32);
-  // A xorshift a 0 állapotból soha nem lép ki - ezt ki kell zárni.
-  return seed != 0 ? seed : SECRET_SALT;
-}
-
-// Determinisztikus kulcsfolyam. Pozíciófüggő, tehát az ismétlődő karakterek
-// sem adnak ismétlődő bájtokat a fájlban.
-uint32_t xorshift32(uint32_t& x) {
-  x ^= x << 13;
-  x ^= x >> 17;
-  x ^= x << 5;
-  return x;
-}
-
-bool encodeSecret(const char* plain, char* out, size_t outSize) {
-  const size_t len = strlen(plain);
-  if (outSize < SECRET_PREFIX_LEN + 2 * len + 1) {
-    return false;
-  }
-  memcpy(out, SECRET_PREFIX, SECRET_PREFIX_LEN);
-  uint32_t state = secretSeed();
-  // NEM "HEX": a Print.h-ban az egy makro (#define HEX 16), tehat abbol
-  // "static const char 16[]" lenne. A core makrói (HEX, DEC, OCT, BIN) minden
-  // sketchre ravonatkoznak - a lokalis nevek nem utkozhetnek veluk.
-  static const char kHexDigits[] = "0123456789abcdef";
-  for (size_t i = 0; i < len; i++) {
-    const uint8_t b = (uint8_t)plain[i] ^ (uint8_t)(xorshift32(state) & 0xFF);
-    out[SECRET_PREFIX_LEN + 2 * i]     = kHexDigits[b >> 4];
-    out[SECRET_PREFIX_LEN + 2 * i + 1] = kHexDigits[b & 0x0F];
-  }
-  out[SECRET_PREFIX_LEN + 2 * len] = '\0';
-  return true;
-}
-
-int hexVal(char c) {
-  if (c >= '0' && c <= '9') return c - '0';
-  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-  return -1;  // szándékosan csak kisbetűs: ezt írjuk ki
-}
-
-// Helyben dekódol. Ha a tartalom nem a mi formátumunk, VÁLTOZATLANUL hagyja -
-// így a régi, sima szöveges mentések is működnek, és az sem baj, ha valakinek
-// történetesen "v1:" a jelszava.
-//
-// Szándékosan NEM végzetes hiba a hibás tartalom: rossz jelszóval a Wi-Fi
-// egyszerűen nem jön össze, és az eszköz a szokásos úton AP módba kerül, ahol
-// újra beállítható. Ez öngyógyul, a villogó LED nem.
-void decodeSecretInPlace(char* buf) {
-  if (strncmp(buf, SECRET_PREFIX, SECRET_PREFIX_LEN) != 0) {
-    return;  // régi, sima szöveges mentés
-  }
-  const char* hex = buf + SECRET_PREFIX_LEN;
-  const size_t hexLen = strlen(hex);
-  if (hexLen % 2 != 0) {
-    return;
-  }
-  for (size_t i = 0; i < hexLen; i++) {
-    if (hexVal(hex[i]) < 0) {
-      return;
-    }
-  }
-  // A kiírási index (i) mindig kisebb az olvasásinál (3 + 2i), ezért a helyben
-  // dekódolás előrefelé haladva biztonságos.
-  uint32_t state = secretSeed();
-  const size_t n = hexLen / 2;
-  for (size_t i = 0; i < n; i++) {
-    const uint8_t b = (uint8_t)((hexVal(hex[2 * i]) << 4) | hexVal(hex[2 * i + 1]));
-    buf[i] = (char)(b ^ (uint8_t)(xorshift32(state) & 0xFF));
-  }
-  buf[n] = '\0';
-}
-
-// Használható-e ez a cím statikus IPv4 konfigurációnak?
-//
-// Az IPAddress::fromString() az IPv4 után IPv6-ot is megpróbál (IPAddress.cpp),
-// ezért a "::1" vagy a "fe80::1" is érvényesnek látszik - és mindkettő befér a
-// 15 karakteres mezőbe. Az eszköz viszont végig IPv4-en dolgozik (a gateway
-// pingje, a HTTP tesztek, az 1.1.1.1-es tartalék DNS, a /24-es maszk), a
-// WiFi.config() pedig az IPAddress uint32_t konverzióját használja
-// (NetworkInterface.cpp:390), ami IPv6-ra 0-t ad
-// (IPAddress.h:83). Vagyis egy IPv6 cím csendben DHCP-t vagy - ami rosszabb -
-// egy 0.0.0.0-s gateway-t és DNS-t eredményezne. A 0.0.0.0 ugyanezt jelenti,
-// ezért az sem fogadható el.
-bool isUsableIPv4(const IPAddress& addr) {
-  return (uint32_t)addr != 0;
-}
-
-// Whitespace levágása helyben, allokáció nélkül
-void trimInPlace(char* s) {
-  size_t len = strlen(s);
-  while (len > 0 && isspace((unsigned char)s[len - 1])) {
-    s[--len] = '\0';
-  }
-  size_t start = 0;
-  while (s[start] != '\0' && isspace((unsigned char)s[start])) {
-    start++;
-  }
-  if (start > 0) {
-    memmove(s, s + start, len - start + 1);
-  }
-}
-
-// Initialize LittleFS
-bool initLittleFS() {
-  if (!LittleFS.begin(true)) {
-    // A begin() csak ESP_FAIL esetén próbál formázni. Ha a partíció egyáltalán
-    // nincs meg, ESP_ERR_NOT_FOUND jön, és formázás nélkül elbukik.
-    Serial.println("LittleFS mount FAILED (a formázási kísérlet után is).");
-    Serial.println("Valószínű ok: a használt partíciós séma nem tartalmaz");
-    Serial.println("'spiffs' cimkéju partíciót. Használd a partitions_custom.csv-t,");
-    Serial.println("vagy az Arduino IDE-ben egy SPIFFS-et tartalmazó sémát");
-    Serial.println("(Tools > Partition Scheme).");
-    return false;
-  }
-  Serial.print("LittleFS mounted, used ");
-  Serial.print(LittleFS.usedBytes());
-  Serial.print(" / ");
-  Serial.print(LittleFS.totalBytes());
-  Serial.println(" bytes");
-  return true;
-}
-
-// A kiírt tartalom ellenőrzése visszaolvasással. Erre azért van szükség, mert
-// a File::close() és a File::flush() is void: a lezáráskor jelentkező hibát
-// (pl. megtelt fájlrendszer) másképp nem lehetne észrevenni.
-bool fileMatches(fs::FS& fs, const char* path, const char* value, size_t len) {
-  File file = fs.open(path);
-  if (!file) {
-    return false;
-  }
-  if (file.size() != len) {
-    file.close();
-    return false;
-  }
-  char chunk[32];
-  size_t off = 0;
-  while (off < len) {
-    const size_t want = (len - off > sizeof(chunk)) ? sizeof(chunk) : (len - off);
-    const size_t got = file.read((uint8_t*)chunk, want);
-    if (got != want || memcmp(chunk, value + off, got) != 0) {
-      file.close();
-      return false;
-    }
-    off += got;
-  }
-  file.close();
-  return true;
-}
-
-// Egy konfigurációs érték beolvasása fix méretű bufferbe (String allokáció nélkül)
-ConfigStatus readConfigValue(fs::FS& fs, const char* path, char* out, size_t outSize) {
-  out[0] = '\0';
-
-  // A hiányzó fájl nem hiba: első indításkor és wifireset után is ez a helyzet.
-  if (!fs.exists(path)) {
-    Serial.printf("- %s missing (no config yet)\r\n", path);
-    return CONFIG_MISSING;
-  }
-
-  File file = fs.open(path);
-  if (!file || file.isDirectory()) {
-    Serial.printf("- failed to open %s for reading\r\n", path);
-    if (file) {
-      file.close();
-    }
-    return CONFIG_ERROR;
-  }
-  // Méret szerint olvasunk: a Stream::readBytesUntil() EOF-nál kivárná a teljes
-  // 1 másodperces stream-timeoutot, fájlonként (indulásnál ez 4 mp veszteség).
-  const size_t fileSize = file.size();
-  const size_t toRead = (fileSize < outSize - 1) ? fileSize : outSize - 1;
-  const size_t n = file.read((uint8_t*)out, toRead);
-  file.close();
-  if (n != toRead) {
-    Serial.printf("- short read on %s (%u / %u)\r\n", path, (unsigned)n, (unsigned)toRead);
-    out[0] = '\0';
-    return CONFIG_ERROR;
-  }
-  out[n] = '\0';
-
-  char* nl = strchr(out, '\n');  // csak az első sor érdekel
-  if (nl != nullptr) {
-    *nl = '\0';
-  }
-  trimInPlace(out);
-  // Az üres tartalom is érvényes eredmény: a wifireset csonkolt fájlt hagy hátra.
-  return CONFIG_OK;
-}
-
-// Írás ellenőrzéssel. true csak akkor, ha a tartalom vissza is olvasható.
-bool writeConfigValue(fs::FS& fs, const char* path, const char* message) {
-  Serial.printf("Writing file: %s\r\n", path);
-  const size_t len = strlen(message);
-
-  File file = fs.open(path, FILE_WRITE);
-  if (!file) {
-    Serial.println("- failed to open file for writing");
-    return false;
-  }
-  // Üres értéknél a print() jogosan ad 0-t; ez nem hiba, csak csonkolás.
-  const size_t written = (len > 0) ? file.print(message) : 0;
-  file.flush();
-  file.close();
-
-  if (written != len) {
-    Serial.print("- short write: ");
-    Serial.print((unsigned)written);
-    Serial.print(" / ");
-    Serial.print((unsigned)len);
-    Serial.println(" bájt (megtelt a fájlrendszer?)");
-    return false;
-  }
-  if (!fileMatches(fs, path, message, len)) {
-    Serial.println("- verify FAILED: a visszaolvasott tartalom nem egyezik");
-    return false;
-  }
-  Serial.println("- file written");
-  return true;
-}
-
-// Érték törlése. Először csonkolással próbáljuk; ha az nem megy, a fájlt
-// magát töröljük - a readConfigValue() a hiányzó fájlt is "nincs érték"-ként
-// kezeli, tehát a végeredmény ugyanaz.
-bool clearConfigValue(fs::FS& fs, const char* path) {
-  Serial.printf("Clearing file: %s\r\n", path);
-  if (writeConfigValue(fs, path, "")) {
-    Serial.println("- file cleared");
-    return true;
-  }
-  if (fs.remove(path)) {
-    Serial.println("- file removed instead");
-    return true;
-  }
-  Serial.println("- FAILED to clear file!");
-  return false;
-}
 
 // Végzetes hiba: a konfiguráció nem tölthető be. Ilyenkor a program nem fut
 // tovább (nincs teszt, nincs relé kapcsolás, nincs elalvás), csak jelez.
@@ -995,275 +452,7 @@ void enterFatal(const char* reason) {
   Serial.println(" perc mulva az eszkoz elalszik (magatol nem ebred fel).");
 }
 
-// A rendszerora aktualis erteke, ha az NTP mar szinkronizalt - kulonben 0.
-// Nem blokkol, nem allokal, es szinkron nelkul is biztonsagos.
-uint32_t nowEpoch() {
-  const time_t t = time(nullptr);
-  if (t < (time_t)NTP_MIN_VALID_EPOCH) {
-    return 0;
-  }
-  return (uint32_t)t;
-}
 
-// Elindult-e mar az oraszinkron a MOSTANI kapcsolaton?
-bool ntpStarted = false;
-// Bejelentettuk-e mar a soros porton ebben a bootban? (Lasd startNtp().)
-bool ntpAnnounced = false;
-
-// Az SNTP kliens elinditasa. CSAK elinditja: a valasz a hatterben erkezik, a
-// hivas nem var ra. Tobbszor is hivhato (ujracsatlakozasnal), a kliens
-// ujraindul. A rendszeroraval egyutt a nyari idoszamitas kezelese is beall.
-//
-// FONTOS: a valos ido a DEEP SLEEPET TULELI. Az esp_timer (es igy a millis())
-// ebredeskor nullarol indul, a gettimeofday() alapu rendszerora viszont az RTC
-// orabol jon, tehat egy 1 oras alvas utan is jo idot mutat - epp ezert
-// hasznalhato a naplo bejegyzesek rendezesere bootolasokon at.
-void startNtp() {
-  configTzTime(NTP_TZ, NTP_SERVER);
-  // A KIIRAS CSAK AZ ELSO ALKALOMMAL. Az SNTP klienst minden
-  // ujracsatlakozasnal ujra kell inditani (a disconnect a netifet is
-  // lebontja), egy PISLAKOLO kapcsolat viszont masodpercenkent tobbszor is
-  // ad ilyen atmenetet - a kiirast tehat ugyanaz a spam-vedelmi szabaly koti,
-  // mint a WIFI LOST sorokat: csak a sorozat elso tagja beszel.
-  // (Merve: LOG4, ami a soros sor/perc erteket is meri.)
-  //
-  // A jelzo FAJL-SZINTU, nem fuggveny-szintu static - ugyanaz a szabaly, mint
-  // a heap felugyelet orainal: a sketch per-boot allapota egy helyen legyen
-  // visszaallithato (a teszt-harness hidegindulasa igy tudja nullazni).
-  if (ntpAnnounced) {
-    return;
-  }
-  ntpAnnounced = true;
-  printUptime();
-  Serial.print("NTP inditva: ");
-  Serial.println(NTP_SERVER);
-}
-
-// Az oraszinkron gondozasa: elinditja, AMINT van halozat - barmelyik uton is
-// jott letre a kapcsolat.
-//
-// MIERT NEM AZ initWiFi()-BOL? Mert nem minden kapcsolat rajta keresztul jon
-// letre. Harom ag kerulte volna meg:
-//   - az initWiFi() "mar csatlakozva vagyunk" korai visszaterese,
-//   - a handleFirstStart() korai kilepese (a proba igazolta a kapcsolatot,
-//     tehat nincs mit ujracsatlakoztatni) - ez a LEGGYAKORIBB helyreallasi
-//     ut aramszunet utan,
-//   - es a FAILURE_STATE RESET_DELAY korai kilepese.
-// Mindharomban elmaradt volna a szinkron, es a naplo epoch mezoje vegig 0
-// maradt volna. Ezert a gondozas a loop()-bol fut, egyetlen helyrol: egy uj
-// kapcsolati ut sem tudja elfelejteni. (Merve: NV10.)
-//
-// A jelzot a kapcsolat elvesztesekor toroljuk, mert a WiFi.disconnect(true) a
-// netifet is lebontja - ujracsatlakozas utan az SNTP klienst ujra kell
-// inditani.
-void ensureNtp() {
-  if (WiFi.status() != WL_CONNECTED) {
-    ntpStarted = false;
-    return;
-  }
-  if (ntpStarted) {
-    return;
-  }
-  ntpStarted = true;
-  startNtp();
-}
-
-// Egy idopont ember altal olvashato alakja. Ha nincs valos ido, a hivo
-// dontse el, mit ir helyette - ez a fuggveny csak akkor ad true-t, ha tenyleg
-// van mit formazni.
-bool formatEpoch(uint32_t epoch, char* out, size_t outSize) {
-  if (epoch < NTP_MIN_VALID_EPOCH || outSize < 20) {
-    return false;
-  }
-  const time_t t = (time_t)epoch;
-  struct tm tmv;
-  if (localtime_r(&t, &tmv) == nullptr) {
-    return false;
-  }
-  strftime(out, outSize, "%Y-%m-%d %H:%M:%S", &tmv);
-  return true;
-}
-
-// A napló kiírása a fájlrendszerre.
-//
-// A ZAR. A muvelet ATOMIKUSAN szerzi meg a konfiguraciós zárat, ugyanazt,
-// amit a webes mentés és a wifireset gomb használ. Amíg a zár a miénk:
-//   - nem alszik el az eszköz és nem indul újra (a leállási út megvárja),
-//   - a gombok nem szólnak közbe,
-//   - és másik fájlírás sem indulhat.
-// Ha a zár épp foglalt, NEM várunk rá: a mentés kimarad. Ez helyes döntés -
-// a napló diagnosztika, nem szabad miatta blokkolni egy fontos műveletet
-// (router reset, alvás), és a következő fontos pillanatban úgyis próbáljuk.
-//
-// A zárat a végén FELOLDJUK - eltérően a leállási úttól, ami már nem tér vissza.
-bool saveEventLog(const char* reason) {
-  if (!fsReady) {
-    return false;   // nincs hova irni; ez nem hiba, csak nincs mentes
-  }
-
-  // Nincs mit menteni? Akkor a flasht sem koptatjuk. Ez nem optimalizacio,
-  // hanem a kopas es a tenyleges esemenyek osszehangolasa.
-  uint32_t evTotal;
-  portENTER_CRITICAL(&evLogMux);
-  evTotal = (rtcEvMagic == EVLOG_MAGIC) ? rtcEvNext : 0;
-  portEXIT_CRITICAL(&evLogMux);
-  if (evTotal == 0 || evTotal == rtcSavedEvNext) {
-    return false;
-  }
-
-  if (!beginConfigWrite()) {
-    printUptime();
-    Serial.println("A naplo mentese kimarad: eppen mas fajliras folyik.");
-    return false;
-  }
-
-  // Pillanatkep a mux alatt, ugyanugy, mint a /log oldalon: a naploba az
-  // async_tcp task is ir, tehat a pozicio es a tartalom egyutt nem olvashato
-  // atomian.
-  EvFileHeader fej;
-  EventEntry masolat[EVLOG_SIZE];
-  portENTER_CRITICAL(&evLogMux);
-  fej.evNextAtSave = rtcEvNext;
-  memcpy(masolat, rtcEvents, sizeof(masolat));
-  portEXIT_CRITICAL(&evLogMux);
-
-  fej.magic = EVFILE_MAGIC;
-  fej.version = EVFILE_VERSION;
-  fej.count = (uint16_t)(fej.evNextAtSave < EVLOG_SIZE ? fej.evNextAtSave : EVLOG_SIZE);
-  fej.savedEpoch = nowEpoch();
-  fej.savedUptime = (uint32_t)(esp_timer_get_time() / 1000000);
-
-  // A bejegyzeseket a LEGREGEBBITOL a legujabbig irjuk ki, kiegyenesitve -
-  // igy az olvasonak nem kell tudnia, hol tartott a korpuffer. Ehhez NEM
-  // masolunk egy ujabb 384 bajtos verempuffert: a korpuffer legfeljebb ket
-  // OSSZEFUGGO szakaszra bomlik (a kezdoponttol a tomb vegeig, majd a tomb
-  // elejetol), es ezt a kettot irjuk ki egymas utan. A loop task verme igy
-  // 384 bajttal kevesebbet visz.
-  const uint32_t elso = fej.evNextAtSave - fej.count;
-  const uint16_t kezdet = (uint16_t)(elso % EVLOG_SIZE);
-  const uint16_t elsoDb = (uint16_t)((kezdet + fej.count <= EVLOG_SIZE)
-                                     ? fej.count : (EVLOG_SIZE - kezdet));
-  const uint16_t masodikDb = (uint16_t)(fej.count - elsoDb);
-
-  printUptime();
-  Serial.print("Naplo mentese a fajlrendszerre (");
-  Serial.print(reason);
-  Serial.println(")...");
-
-  bool ok = false;
-  File f = LittleFS.open(evLogPath, FILE_WRITE);
-  if (!f) {
-    Serial.println("- a naplofajl nem nyithato irasra");
-  } else {
-    const size_t fejBytes = f.write((const uint8_t*)&fej, sizeof(fej));
-    size_t adatBytes = 0;
-    if (elsoDb) {
-      adatBytes += f.write((const uint8_t*)&masolat[kezdet],
-                           sizeof(EventEntry) * elsoDb);
-    }
-    if (masodikDb) {
-      adatBytes += f.write((const uint8_t*)&masolat[0],
-                           sizeof(EventEntry) * masodikDb);
-    }
-    f.flush();
-    f.close();
-    const size_t vart = sizeof(fej) + sizeof(EventEntry) * fej.count;
-    if (fejBytes + adatBytes != vart) {
-      Serial.print("- rovid iras: ");
-      Serial.print((unsigned)(fejBytes + adatBytes));
-      Serial.print(" / ");
-      Serial.print((unsigned)vart);
-      Serial.println(" bajt (megtelt a fajlrendszer?)");
-    } else {
-      // VISSZAOLVASAS. Ugyanaz az elv, mint a writeConfigValue()-nal: a siker
-      // nem az, hogy az iras nem panaszkodott, hanem hogy a tartalom tenyleg
-      // ott van. Csak a fejlecet olvassuk vissza - ha az ep, a fajlmeret
-      // pedig egyezik, a tartalom is kiirodott.
-      File v = LittleFS.open(evLogPath, "r");
-      if (!v) {
-        Serial.println("- verify: a fajl nem nyithato olvasasra");
-      } else {
-        EvFileHeader vissza;
-        const size_t olvasott = v.read((uint8_t*)&vissza, sizeof(vissza));
-        const size_t meret = v.size();
-        v.close();
-        if (olvasott != sizeof(vissza) || meret != vart
-            || vissza.magic != EVFILE_MAGIC || vissza.count != fej.count
-            || vissza.evNextAtSave != fej.evNextAtSave) {
-          Serial.println("- verify FAILED: a visszaolvasott fejlec nem egyezik");
-        } else {
-          ok = true;
-        }
-      }
-    }
-  }
-
-  if (ok) {
-    rtcSavedEvNext = fej.evNextAtSave;
-    Serial.print("- naplo mentve, ");
-    Serial.print((unsigned)fej.count);
-    Serial.println(" bejegyzes");
-  } else {
-    // A SIKERTELENSEG NEM VEGZETES. A naplo diagnosztika: ha nem sikerul
-    // kiirni, az RTC-ben tovabbra is ott van, es a program dolga (router
-    // reset, alvas) fontosabb. Csak szolunk rola.
-    Serial.println("- a naplo mentese NEM sikerult, az RTC naplo ettol meg el");
-  }
-  savingConfig = false;   // a zar feloldasa - itt meg VISSZATERUNK
-  return ok;
-}
-
-// A mentett naplo FEJLECENEK beolvasasa es ellenorzese. Igaz, ha a fajl
-// letezik, ep, es van benne legalabb egy bejegyzes. Minden mas esetben (nincs
-// fajl, ures fajl, rossz magic, csonka tartalom, ismeretlen verzio, a
-// fejlecben igert darabszamnal rovidebb fajl) hamis - a hivo ilyenkor az RTC
-// naplot hasznalja, kulon hibauzenet nelkul.
-//
-// MIERT KULON A FEJLEC ES A TARTALOM? Az async_tcp task verme veges, es 32
-// bejegyzes mar 384 bajt. Ha itt is puffert kernenk, a /log kezelo EGYSZERRE
-// ket ilyet tartana (az RTC pillanatkepet es a fajlet). Igy viszont eloszb
-// eldontjuk a fejlecbol, melyik forras kell - es csak azt toltjuk be, EGY
-// pufferbe.
-bool loadEventLogHeader(EvFileHeader& fej) {
-  if (!fsReady || !LittleFS.exists(evLogPath)) {
-    return false;
-  }
-  File f = LittleFS.open(evLogPath, "r");
-  if (!f) {
-    return false;
-  }
-  const size_t meret = f.size();
-  if (meret < sizeof(EvFileHeader)
-      || f.read((uint8_t*)&fej, sizeof(fej)) != sizeof(fej)) {
-    f.close();   // ures vagy csonka fajl
-    return false;
-  }
-  f.close();
-  if (fej.magic != EVFILE_MAGIC || fej.version != EVFILE_VERSION
-      || fej.count == 0 || fej.count > EVLOG_SIZE) {
-    return false;
-  }
-  // A fejlec tobbet igerhet, mint amennyi tenyleg ott van (megtelt fajlrendszer,
-  // felbeszakadt iras). Ezt MOST ellenorizzuk, hogy a betoltes mar biztos legyen.
-  return meret >= sizeof(EvFileHeader) + sizeof(EventEntry) * fej.count;
-}
-
-// A bejegyzesek betoltese - csak akkor, ha a fejlec mar rendben volt.
-bool loadEventLogEntries(const EvFileHeader& fej, EventEntry* ki) {
-  File f = LittleFS.open(evLogPath, "r");
-  if (!f) {
-    return false;
-  }
-  EvFileHeader eldobando;    // a fejlecet atugorjuk (a stream nem kereshet)
-  if (f.read((uint8_t*)&eldobando, sizeof(eldobando)) != sizeof(eldobando)) {
-    f.close();
-    return false;
-  }
-  const size_t kell = sizeof(EventEntry) * fej.count;
-  const size_t olvasott = f.read((uint8_t*)ki, kell);
-  f.close();
-  return olvasott == kell;
-}
 
 // A heap allapot RTC blokkjanak felelesztese. Ugyanaz a minta, mint a
 // watchdog szamlalonal: bekapcsolas utan a NOINIT terulet tartalma szemet.
@@ -1413,7 +602,7 @@ void checkHeap(uint32_t now) {
   //    (Merve: GW1, GW2.)
   const bool resetEllenorzoAblak =
       (currentState == FAILURE_STATE) && uiFlags.resetPrinted;
-  if (deviceMode != MODE_MONITOR || savingConfig || restartPending
+  if (deviceMode != MODE_MONITOR || configWriteInProgress() || restartRequested()
       || testState.resetStep != 0 || resetEllenorzoAblak) {
     return;
   }
@@ -1768,22 +957,6 @@ bool waitWithButtonsUntilOnline(uint32_t duration) {
 // néhány tíz ezredmásodperc - az 5 másodperc bőven elég tartalék.
 constexpr uint32_t SAVE_WAIT_MAX_MS = 5000;
 
-// A konfigfájloknak egyszerre csak EGY írója lehet: vagy a webes mentés
-// (async_tcp task), vagy a wifireset gomb törlése (loop task). A zár maga a
-// savingConfig jelző - a megszerzését viszont atomikussá kell tenni, mert a
-// puszta "if (savingConfig)" ellenőrzés és az írás megkezdése között a másik
-// task közbeléphetne, és a két író ugyanazokat a fájlokat írná egyszerre.
-// A rövid kritikus szakaszhoz ugyanazt a spinlockot használjuk, mint a napló.
-bool beginConfigWrite() {
-  bool acquired = false;
-  portENTER_CRITICAL(&evLogMux);
-  if (!savingConfig) {
-    savingConfig = true;
-    acquired = true;
-  }
-  portEXIT_CRITICAL(&evLogMux);
-  return acquired;
-}
 
 // Az alvas es az ujraindulas kozos torlopontja: megvarja a folyamatban levo
 // fajlirast, ES MEG IS SZEREZI a zarat.
@@ -1824,58 +997,7 @@ void lockConfigBeforeShutdown() {
   }
 }
 
-// HTML-escape egy attribútumérték számára.
-//
-// MIÉRT KELL: az SSID tetszőleges 32 bájt lehet - idézőjelet, `<`-t és `&`-et
-// is tartalmazhat. Escape NÉLKÜL az előkitöltés maga nyitna biztonsági rést a
-// saját portálunkon: egy idézőjel kitörne a value="..." attribútumból, egy
-// <script> pedig a lapba kerülne. A mentett SSID ráadásul a POST kezelőn át
-// bármi lehet, tehát ez nem elméleti.
-void printHtmlEscaped(AsyncResponseStream* r, const char* s) {
-  for (const char* p = s; *p != '\0'; p++) {
-    switch (*p) {
-      case '&':  r->print(F("&amp;"));  break;
-      case '<':  r->print(F("&lt;"));   break;
-      case '>':  r->print(F("&gt;"));   break;
-      case '"':  r->print(F("&quot;")); break;
-      case '\'': r->print(F("&#39;"));  break;
-      default:   r->write((uint8_t)*p); break;
-    }
-  }
-}
 
-// A beállító űrlap kiszolgálása, a mentett értékekkel ELŐKITÖLTVE.
-//
-// MIÉRT ELŐKITÖLTVE? Mert az üres címmező TÖRLÉST jelent. Aki statikus IP-vel
-// üzemel és csak a jelszót akarja átírni, annak a böngésző üresen küldené a
-// cím mezőket - és a mentés csendben DHCP-re váltana. (Mérve: AP1.)
-//
-// A JELSZÓT SOHA NEM töltjük elő: az az egyetlen titok ezen a lapon, és a
-// portál WPA2 kulcsa nyilvános, tehát a lap tartalma nem tekinthető védettnek.
-void sendConfigForm(AsyncWebServerRequest* request) {
-  AsyncResponseStream* r = request->beginResponseStream("text/html", 1024);
-  r->print(FORM_HEAD);
-
-  r->print(F("SSID <input name=\"ssid\" maxlength=\"32\" required value=\""));
-  printHtmlEscaped(r, ssid);
-  r->print(F("\"><br>"));
-
-  // A jelszó mező ÜRESEN indul, és a következménye ki van írva: enélkül a
-  // felhasználó azt hinné, hogy a mentett jelszó megmarad.
-  r->print(F("Password <input name=\"pass\" type=\"password\" maxlength=\"63\">"
-             " <small>(ures = nyilt halozat)</small><br>"));
-
-  r->print(F("IP <input name=\"ip\" maxlength=\"15\" placeholder=\"opcionalis\" value=\""));
-  printHtmlEscaped(r, ipStr);
-  r->print(F("\"><br>"));
-
-  r->print(F("Gateway <input name=\"gateway\" maxlength=\"15\" placeholder=\"opcionalis\" value=\""));
-  printHtmlEscaped(r, gatewayStr);
-  r->print(F("\"><br>"));
-
-  r->print(FORM_TAIL);
-  request->send(r);
-}
 
 // A relé lábának rögzítése az alvás idejére. Deep sleep alatt a digitális
 // padek (GPIO6-21) alapból nagyimpedanciásak; a gpio_hold_en() a pad
@@ -1895,36 +1017,6 @@ void holdRelayForSleep() {
   }
 }
 
-// Igaz, ha a napló LEGUTOLSÓ bejegyzése már ez a kód. A sorozatok elleni
-// spam-védelem közös alapja: a 32 bejegyzéses körpuffer néhány másodperc
-// alatt kiszorítaná a kivizsgálandó eseményeket (BOOT, ROUTER RESET, FATAL),
-// ha egy ismétlődő állapot minden körben új sort írna.
-//
-// A mux ugyanazért kell, mint a logEvent()-ben: a naplóba az async_tcp task
-// is ír (a POST kezelő CONFIG_SAVED sora), tehát a pozíció és a slot együtt
-// nem olvasható atomian.
-bool lastEventWas(uint8_t code) {
-  bool egyezik = false;
-  portENTER_CRITICAL(&evLogMux);
-  if (rtcEvMagic == EVLOG_MAGIC && rtcEvNext > 0) {
-    egyezik = (rtcEvents[(rtcEvNext - 1) % EVLOG_SIZE].code == code);
-  }
-  portEXIT_CRITICAL(&evLogMux);
-  return egyezik;
-}
-
-// Igaz, ha a napló legutóbbi két bejegyzése már pontosan ez a beragadt-gomb
-// kör (BOOT, majd STUCK BUTTON ugyanazzal a gombbal) - vagyis a mostani
-// ébredés csak a 60 mp-es alvás-ébredés kör ismétlése.
-bool stuckCycleAlreadyLogged(uint16_t which) {
-  if (rtcEvMagic != EVLOG_MAGIC || rtcEvNext < 2) {
-    return false;
-  }
-  const EventEntry& last = rtcEvents[(rtcEvNext - 1) % EVLOG_SIZE];
-  const EventEntry& prev = rtcEvents[(rtcEvNext - 2) % EVLOG_SIZE];
-  return last.code == EV_STUCK_BUTTON && last.param == which
-         && prev.code == EV_BOOT;
-}
 
 // Szándékosan nem az enterDeepSleep()-et hívja: itt a Wi-Fi és a webszerver
 // még el sem indult, és gombébresztést sem szabad armolni - a beragadt gomb
@@ -2171,7 +1263,7 @@ void enterDeepSleep(uint64_t timerUs) {
   // digitalWrite, aztán a hold, mert a hold a pad PILLANATNYI állapotát fogja.
   holdRelayForSleep();
   WiFi.disconnect(true);
-  server.end();
+  stopWebPortal();
   Serial.flush();
   Serial.end();
 
@@ -2313,12 +1405,6 @@ void wifiGiveUp() {
   retrySleep();
 }
 
-// Az AP beállító mód visszaszámlálásának újraindítása. Minden HTTP kérésnél
-// meghívjuk, így ha a felhasználó az utolsó pillanatban nyitja meg az oldalt,
-// kap még egy teljes időablakot a kitöltésre.
-void touchApDeadline() {
-  apDeadline = millis() + AP_TIMEOUT_MS;
-}
 
 // AP beállító mód lejárt mentés nélkül. Ugyanaz a logika, mint a LittleFS
 // hibánál: időzített ébresztés nincs, csak a reset gomb hozza vissza.
@@ -2396,7 +1482,7 @@ void resetbutton() {
   // konfigurációt hagyna hátra. Ugyanaz a szabály, mint az elalvásnál.
   // A mentés alatt a debounce sem indul el, tehát utána egy teljes 50 ms-os
   // lenyomás kell - egy mentés néhány tíz ezredmásodperc, ez nem érzékelhető.
-  if (savingConfig) {
+  if (configWriteInProgress()) {
     return;
   }
   // A megszakitas-alapu retesz: egy TELJES ERTEKU (>= BUTTON_DEBOUNCE_MS)
@@ -2469,7 +1555,7 @@ void doWifiReset() {
     logEvent(EV_FATAL, 4);
     // A zár oldása még a hibajelzés előtt: a fatalHalt() gombkezelőjét a
     // beragadt savingConfig némává tenné (a resetbutton() ellenőrzi).
-    savingConfig = false;
+    endConfigWrite();
     fatalHalt("A mentett wifi adatok nem torolhetok - serult fajlrendszer.");
     // fatalHalt() nem tér vissza
   }
@@ -2482,7 +1568,7 @@ void wifiresetbutton() {
   // Mentés közben a törlés és az újraindítás is végzetes lenne: két task írná
   // egyszerre ugyanazokat a fájlokat. Ez itt csak a GYORS kapu; az igazi
   // védelem a doWifiReset()-ben lévő beginConfigWrite().
-  if (savingConfig) {
+  if (configWriteInProgress()) {
     return;
   }
   // Megszakítás-alapú retesz - lásd a resetbutton() megfelelő ágát, beleértve
@@ -2543,231 +1629,6 @@ bool reconnectWifi() {
   return false;
 }
 
-// Egy bájt, legfeljebb timeoutMs várakozással. -1: lejárt a határidő, vagy a
-// szerver lezárta a kapcsolatot. Ez a kettő az egyetlen kilépési ok - a hívó
-// mindkettőt "nincs több adat"-ként kezeli.
-int readByteBounded(WiFiClient& stream, uint32_t timeoutMs) {
-  const uint32_t start = millis();
-  while ((millis() - start) < timeoutMs) {
-    // Csak akkor olvasunk, ha VAN mit: a read() a socket saját fogadási
-    // timeoutját használja, ami nem a mienk. Ha vakon hívnánk, egyetlen
-    // olvasás túlléphetné a timeoutMs határidőt - így viszont a határidő
-    // valóban a miénk, és nem függ a core beállításaitól.
-    if (stream.available() > 0) {
-      return stream.read();  // <0 is lehet: available() ígért, de elszállt
-    }
-    // A szerver lezárta és nincs több adat: nincs értelme a timeoutot kivárni
-    if (!stream.connected()) {
-      return -1;
-    }
-    resetbutton();
-    wifiresetbutton();
-    feedWatchdog();
-    // delay() és nem yield(): a yield() csak azonos prioritású taskok között
-    // ad át vezérlést, tehát üresen pörgetné a CPU-t a válaszra várva.
-    delay(BUTTON_POLL_MS);
-  }
-  return -1;
-}
-
-// Korlátozott méretű, időzáras olvasás: nem allokál, és nem tud "elszállni"
-// egy captive portal többszáz kilobájtos válaszán. A timeoutMs bájtok KÖZÖTTI
-// határidő, tehát egy lassan csordogáló válasz is végigolvasható, egy néma
-// kapcsolat viszont nem tart fel tovább egy timeoutnál.
-size_t readBounded(WiFiClient& stream, char* buf, size_t maxLen, uint32_t timeoutMs) {
-  size_t n = 0;
-  while (n < maxLen) {
-    const int c = readByteBounded(stream, timeoutMs);
-    if (c < 0) {
-      break;
-    }
-    buf[n++] = (char)c;
-  }
-  return n;
-}
-
-// Egy hexa számjegy értéke, vagy -1. NAGYBETŰT IS elfogad, mert a chunked
-// keretezés méret-sorai az RFC 9112 szerint bármelyik alakban jöhetnek.
-//
-// Ne keverd a hexVal()-lal: az a MI saját jelszó-kódolásunkat olvassa vissza,
-// és szándékosan csak kisbetűset fogad el (azt írjuk ki). A két függvény
-// neve korábban csak egy betűben tért el, a viselkedésük viszont nem -
-// ezért kapott ez beszédesebb nevet.
-int hexDigitAnyCase(int c) {
-  if (c >= '0' && c <= '9') return c - '0';
-  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-  return -1;
-}
-
-// Ugyanaz, mint a readBounded(), de lebontja a chunked keretezést.
-//
-// MIÉRT KELL: a HTTPClient a darabhatárokat CSAK a getString() /
-// writeToStream() útján bontja le - azokat viszont nem használjuk, mert
-// korlátlanul foglalnának. A nyers streamben tehát benne maradnak a
-// keretbájtok ("7\r\nsuccess\r\n0\r\n\r\n"), és a strcmp() a tökéletesen
-// működő végpontot is bukottnak látná. Content-Length-et küldő végpontnál ez
-// sosem jön elő, de egy közbeiktatott proxy bármikor átkeretezheti a választ.
-size_t readChunked(WiFiClient& stream, char* buf, size_t maxLen, uint32_t timeoutMs) {
-  size_t n = 0;
-  for (uint16_t chunk = 0; chunk < HTTP_MAX_CHUNKS; chunk++) {
-    // Méret sor: hexa szám, opcionális ";kiterjesztés", CRLF.
-    uint32_t size = 0;
-    bool sawDigit = false;
-    bool inExt = false;
-    for (;;) {
-      const int c = readByteBounded(stream, timeoutMs);
-      if (c < 0) return n;
-      if (c == '\n') break;
-      if (c == '\r' || inExt) continue;
-      if (c == ';') { inExt = true; continue; }
-      const int d = hexDigitAnyCase(c);
-      // Nem hexa a méret helyén: ez nem chunked keret. Nem találgatunk,
-      // a teszt elbukik - ez a biztonságos irány.
-      if (d < 0) return n;
-      if (size > (0xFFFFFFFFu - (uint32_t)d) / 16u) return n;  // túlcsordulás
-      size = size * 16u + (uint32_t)d;
-      sawDigit = true;
-    }
-    if (!sawDigit || size == 0) {
-      return n;  // üres méret sor, vagy a lezáró 0-s darab
-    }
-    for (uint32_t i = 0; i < size; i++) {
-      if (n >= maxLen) {
-        return n;  // ekkora választ nem a várt végpont küld - nem olvassuk végig
-      }
-      const int c = readByteBounded(stream, timeoutMs);
-      if (c < 0) return n;
-      buf[n++] = (char)c;
-    }
-    // A darabot lezáró CRLF: elnyeljük, de nem kötjük meg magunkat a pontos
-    // alakjában - a következő kör úgyis hexát vár.
-    for (uint8_t i = 0; i < 2; i++) {
-      const int c = readByteBounded(stream, timeoutMs);
-      if (c < 0) return n;
-      if (c == '\n') break;
-    }
-  }
-  return n;
-}
-
-bool testInternetHTTP(const char* url, const char* expectedResponse) {
-  WiFiClient client;
-  HTTPClient http;
-  http.setReuse(false);
-  http.setConnectTimeout((int32_t)HTTP_CONNECT_TIMEOUT_MS);
-  http.setTimeout((uint16_t)HTTP_RESPONSE_TIMEOUT_MS);
-
-  if (!http.begin(client, url)) {
-    Serial.println("Error: HTTP begin failed");
-    return false;
-  }
-
-  // A _transferEncoding privat, a nyers fejlec viszont igy elkerheto. Ez a
-  // hivas a VALASZ fejleceire vonatkozik (a HTTPClient.h kommentje felrevezeto,
-  // a handleHeaderResponse() tolti fel oket).
-  static const char* kCollectHeaders[] = { "Transfer-Encoding" };
-  http.collectHeaders(kCollectHeaders, 1);
-
-  const int httpCode = http.GET();
-  bool result = false;
-
-  if (expectedResponse[0] == '\0') {
-    // "generate_204" stilusu vegpont: nincs torzs, csak a statuszkod szamit.
-    // Ez SZIGORUBB, mint a szoveg-egyeztetes: egy captive portal nem tud 204-et
-    // adni, mert neki eppenseggel HTML-t vagy atiranyitast KELL kuldenie.
-    // Ugyanezt a dontest hozza a NetworkManager is (nm-connectivity.c: 204 ->
-    // "no content, as expected"; barmi mas -> portal).
-    result = (httpCode == HTTP_CODE_NO_CONTENT);
-    // Sikernel NEM irunk semmit: azt a hivo "Successful Test" sora mondja ki.
-    // A soros portra csak az kerul ki, ami hibakeresesnel szamit.
-    if (!result) {
-      Serial.print("Error on HTTP request, code: ");
-      Serial.println(httpCode);
-    }
-  } else if (httpCode == HTTP_CODE_OK) {
-    // Chunked valasznal a getSize() -1, es a nyers streamben ott vannak a
-    // keretbajtok is - azokat le kell bontani, kulonben a jo valasz is bukik.
-    const bool chunked = http.header("Transfer-Encoding").equalsIgnoreCase("chunked");
-    const int len = http.getSize();
-    if (len > (int)HTTP_MAX_PAYLOAD) {
-      // Ekkora választ nem a várt endpoint küld (pl. captive portal)
-      Serial.print("Unexpected payload size: ");
-      Serial.println(len);
-    } else {
-      // len == 0 (Content-Length: 0): nincs mit olvasni, várni sem kell rá.
-      // len < 0: nincs Content-Length, a keretet a kapcsolat zárása adja.
-      const size_t want = (len >= 0) ? (size_t)len : HTTP_MAX_PAYLOAD;
-      char payload[HTTP_MAX_PAYLOAD + 1];
-      // Ugyanaz a stream, amit a http.begin() kapott — nem függünk a
-      // getStream() core-verziónként eltérő visszatérési típusától.
-      const size_t n = chunked
-                         ? readChunked(client, payload, HTTP_MAX_PAYLOAD, HTTP_READ_TIMEOUT_MS)
-                         : readBounded(client, payload, want, HTTP_READ_TIMEOUT_MS);
-      payload[n] = '\0';
-      trimInPlace(payload);  // a záró CR/LF ne buktassa el az egyezést
-      result = (strcmp(payload, expectedResponse) == 0);
-      // Csak eltéréskor beszélünk. Ilyenkor viszont a KAPOTT törzs a
-      // legfontosabb információ: abból derül ki, hogy captive portál ült-e
-      // a kérésre, vagy az üzemeltető változtatta meg a választ.
-      if (!result) {
-        Serial.println(payload);
-        Serial.println("Hamis érték!");
-      }
-    }
-  } else {
-    Serial.print("Error on HTTP request, code: ");
-    Serial.println(httpCode);
-  }
-
-  http.end();
-  return result;
-}
-
-bool testInternetPing(const IPAddress& target, const char* targetName) {
-  Serial.print("Ping teszt futtatása (");
-  Serial.print(targetName);
-  Serial.print(" - ");
-  Serial.print(target);
-  Serial.println(")...");
-  uint8_t successCount = 0;
-
-  for (uint8_t j = 0; j < PING_ATTEMPTS; j++) {
-    // A Ping.ping() érték szerint veszi a címet (ESPping: bool ping(IPAddress,
-    // int16_t)), tehát a másolatot ő maga készíti - nem kell külön helyi példány.
-    const bool pingOK = Ping.ping(target, 1);  // 1 próbálkozás pingenként
-    Serial.print("Ping ");
-    Serial.print(j + 1);
-    if (pingOK) {
-      Serial.println(" sikeres.");
-      successCount++;
-      // Az eredmény eldőlt, a maradék pinget felesleges megvárni
-      if (successCount >= PING_MIN_SUCCESS) {
-        Serial.println("✅ Ping teszt sikeres.");
-        return true;
-      }
-    } else {
-      Serial.println(" sikertelen.");
-      if (j == 0) {
-        Serial.println("⚠️ Első ping hiba — lehet, hogy a hálózat ébred.");
-      }
-      const uint8_t remaining = PING_ATTEMPTS - (j + 1);
-      if (successCount + remaining < PING_MIN_SUCCESS) {
-        Serial.println("❌ Ping teszt sikertelen — hálózati probléma valószínű.");
-        return false;
-      }
-    }
-    if (j + 1 < PING_ATTEMPTS) {
-      waitWithButtons(PING_GAP_MS);  // Kíméletes tesztelés
-    }
-  }
-
-  // Ide nem lehet eljutni: 4 probaval es 2-es kuszobbel a ciklus mindig a ket
-  // korai return valamelyiken lep ki (a j=2 koron a 0 sikeres mar elbukott, a
-  // j=3-on a 2. siker mar visszateres). A fordito viszont megkoveteli, ezert
-  // ez a sor a lefedettsegben mindig fehér marad.
-  return successCount >= PING_MIN_SUCCESS;
-}
 
 // Elérhető-e a saját gateway-ünk?
 //
@@ -2856,6 +1717,11 @@ void handleFirstStart(uint32_t currentMillis) {
   uiFlags.firstStart = false;
 }
 
+
+
+
+
+
 void startConfigPortal() {
   if (deviceMode == MODE_CONFIG) {
     return;  // már fut
@@ -2876,517 +1742,7 @@ void startConfigPortal() {
   timing.blinkLast = millis();
   uiFlags.blinkOn = false;
 
-  Serial.println("Setting AP (Access Point)");
-  char apName[32];
-  snprintf(apName, sizeof(apName), "ESP-%s", ESP.getChipModel());
-  WiFi.mode(WIFI_AP);
-  WiFi.softAP(apName, AP_PASSWORD);
-  Serial.print("AP SSID: ");
-  Serial.println(apName);
-  Serial.print("AP IP address: ");
-  Serial.println(WiFi.softAPIP());
-
-  // Web Server Root URL. Az űrlap a programból megy ki, nem a LittleFS-ről:
-  // nincs se feltöltendő data/ mappa, se olyan eset, hogy a fájlrendszer
-  // állapota miatt ne lenne beállító felület.
-  //
-  // A LittleFS-ről szándékosan NEM szolgálunk ki semmit: egy serveStatic("/")
-  // a teljes fájlrendszert kiadta volna, azaz a /pass.txt-ben tárolt Wi-Fi
-  // jelszót is.
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
-    touchApDeadline();
-    sendConfigForm(request);
-  });
-  // Keep-alive. A nyitva lévő oldal 60 mp-enként meghívja, így az AP mód
-  // visszaszámlálása addig tolódik, amíg tényleg ott vagy a lapon. A válasz
-  // szándékosan egyetlen bájt: percenként fut, és a rádió a legdrágább.
-  server.on("/ping", HTTP_GET, [](AsyncWebServerRequest* request) {
-    touchApDeadline();
-    request->send(200, "text/plain", "1");
-  });
-
-  // Diagnosztikai napló. Ez az egyetlen mód, hogy soros kábel nélkül megtudd,
-  // mi történt az eszközzel - és épp AP módban vagy, amikor baj van.
-  server.on("/log", HTTP_GET, [](AsyncWebServerRequest* request) {
-    touchApDeadline();
-    // A stream puffere igény szerint nő (resizeAdd), de akkor soronként
-    // újraallokálna. Egy bőséges kezdőmérettel ez egyetlen foglalás lesz:
-    // fejléc + állapot + 32 sor x ~70 bájt + a ~900 bájtos jelmagyarázat +
-    // lábléc alatta marad.
-    AsyncResponseStream* r = request->beginResponseStream("text/html", 6144);
-    r->print(F("<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
-               "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-               "<title>Naplo</title></head><body><h2>Diagnosztikai naplo</h2>"));
-
-    const esp_reset_reason_t rr = esp_reset_reason();
-    r->printf("<p><b>Utolso indulas oka:</b> %s (%d)<br>",
-              resetReasonName(rr), (int)rr);
-    r->printf("<b>Watchdog ujraindulasok:</b> %u / %u<br>",
-              (unsigned)rtcWdtResets, (unsigned)MAX_WDT_RESETS);
-    r->printf("<b>Ujraprobalkozasi korok:</b> %u / %u<br>",
-              (unsigned)rtcRetryRounds, (unsigned)MAX_RETRY_ROUNDS);
-    // Az uptime ugyanabban az alakban, mint a soros porton - a nyers
-    // masodpercbol (pl. "165600 mp") ranezesre semmi nem latszik.
-    {
-      const uint32_t up = (uint32_t)(esp_timer_get_time() / 1000000);
-      r->printf("<b>Uptime:</b> %ud %uh %um %us</p>",
-                (unsigned)(up / 86400), (unsigned)((up % 86400) / 3600),
-                (unsigned)((up % 3600) / 60), (unsigned)(up % 60));
-    }
-
-    // Pillanatkép a naplóról a mux alatt: az író (logEvent) a loop taskból
-    // fut, ez a kezelő az async_tcp taskból - enélkül félig kiírt bejegyzést
-    // is olvashatnánk. A kritikus szakasz egy memcpy.
-    //
-    // EGYETLEN puffert hasznalunk mindkét forráshoz (RTC és fájl): az
-    // async_tcp task veremje véges, és 32 bejegyzés már 384 bájt. Előbb
-    // eldöntjük, melyik forrás kell, és csak azt töltjük be.
-    uint32_t evTotal;
-    EventEntry evCopy[EVLOG_SIZE];
-    portENTER_CRITICAL(&evLogMux);
-    evTotal = (rtcEvMagic == EVLOG_MAGIC) ? rtcEvNext : 0;
-    memcpy(evCopy, rtcEvents, sizeof(evCopy));
-    portEXIT_CRITICAL(&evLogMux);
-
-    // MELYIK A FRISSEBB? Az RTC naplo vagy a fajlba mentett?
-    //
-    // A fajl mindig az RTC naplo egy KORABBI pillanatkepe. Ebbol kovetkezik a
-    // szabaly:
-    //  - Ha az RTC naplo TULELTE a mentes ota eltelt idot (nem volt
-    //    aramszunet), akkor bovebb is nala: mindent tartalmaz, ami a fajlban
-    //    van, PLUSZ ami azota tortent. Ilyenkor az RTC nyer.
-    //  - Ha az RTC naplot torolte egy aramszunet, a szamlalo nullarol indult,
-    //    tehat a fajl tobb elozmenyt orzott meg. Ilyenkor a fajl nyer - es
-    //    epp ez a mentes ertelme.
-    //  - Ha viszont az RTC ota mar 32 UJ esemeny keletkezett, akkor a
-    //    korpuffer teljesen tele van friss adattal, ami idoben mindenkeppen
-    //    ujabb a fajlnal.
-    //  - Ha MINDKETTONEK van valos ideje (NTP), az dont: a nagyobb idobelyeg
-    //    nyer. Ez a legpontosabb valasz, ezert ez az elso szabaly.
-    //
-    // Ha epp fajliras folyik a masik taskbol, a fajlt NEM olvassuk: az RTC
-    // naplo ilyenkor is ep, es ez az egyszeru kizaras eleg.
-    // A dontes CSAK a fejlecbol tortenik, es a bejegyzeseket utana toltjuk be -
-    // igy egyszerre csak EGY 384 bajtos puffer all a vermen.
-    //
-    // Ha epp fajliras folyik a masik taskbol, a fajlt NEM olvassuk. Ez a
-    // kizaras nem atomi (az iras a kerdes utan is elindulhat), de nem is kell
-    // annak lennie: egy felig kiirt fajlon a fejlec ellenorzese bukik, es a
-    // lap ugyanoda jut - az RTC naplohoz.
-    EvFileHeader fej;
-    bool vanFajl = false;
-    if (!savingConfig && loadEventLogHeader(fej)) {
-      bool rtcNyer;
-      if (evTotal == 0) {
-        rtcNyer = false;                       // nincs mit mutatni az RTC-bol
-      } else {
-        // A fajl sajat idobelyege (mikor mentettuk) a helyes osszehasonlitasi
-        // alap: pontosan azt mondja meg, mikori a tartalma.
-        const uint32_t rtcEpoch = evCopy[(evTotal - 1) % EVLOG_SIZE].epoch;
-        if (rtcEpoch >= NTP_MIN_VALID_EPOCH
-            && fej.savedEpoch >= NTP_MIN_VALID_EPOCH) {
-          rtcNyer = (rtcEpoch >= fej.savedEpoch);   // valos ido dont
-        } else {
-          rtcNyer = (evTotal >= fej.evNextAtSave) || (evTotal >= EVLOG_SIZE);
-        }
-      }
-      if (!rtcNyer) {
-        if (loadEventLogEntries(fej, evCopy)) {
-          // A fajl bejegyzesei mar KIEGYENESITVE vannak (a legregebbitol a
-          // legujabbig), es a puffer elejen allnak; az evTotal a darabszam
-          // lesz, igy a lenti kiiro ciklus mindket forrasra ugyanaz.
-          vanFajl = true;
-          evTotal = fej.count;
-        } else {
-          // A BETOLTES FELUTON BUKOTT. Mivel EGY puffert hasznalunk, az
-          // olvasas addigra mar felulirhatta az RTC pillanatkep elejet -
-          // a puffer most fel fajl, fel RTC adat lenne. Ezert nem eleg
-          // "visszalepni" az RTC-re: UJRA kell venni a pillanatkepet.
-          portENTER_CRITICAL(&evLogMux);
-          evTotal = (rtcEvMagic == EVLOG_MAGIC) ? rtcEvNext : 0;
-          memcpy(evCopy, rtcEvents, sizeof(evCopy));
-          portEXIT_CRITICAL(&evLogMux);
-        }
-      }
-    }
-
-    if (evTotal == 0) {
-      // Sem az RTC-ben, sem a fajlban nincs semmi (vagy a fajl nem letezik,
-      // ures, csonka). Ez nem hiba: egyszeruen nincs mit mutatni.
-      r->print(F("<p>Nincs rogzitett esemeny.</p>"));
-    } else {
-      if (vanFajl) {
-        char mikor[24];
-        r->print(F("<p><b>Forras:</b> a fajlrendszerre mentett naplo"));
-        if (formatEpoch(fej.savedEpoch, mikor, sizeof(mikor))) {
-          r->printf(" (mentve: %s)", mikor);
-        }
-        r->print(F(" - az RTC naplo ennel regebbi vagy ures "
-                   "(pl. aramszunet torolte).</p>"));
-      } else {
-        r->print(F("<p><b>Forras:</b> az RTC memoriaban levo naplo "
-                   "(ez a frissebb).</p>"));
-      }
-      r->print(F("<table border=1 cellpadding=4><tr><th>Ido</th><th>Uptime</th>"
-                 "<th>Esemeny</th><th>Param</th></tr>"));
-      // A legregebbi meg meglevo bejegyzestol indulunk. Fajlbol olvasva a
-      // bejegyzesek mar sorban allnak, tehat a "% EVLOG_SIZE" ott is helyes.
-      const uint32_t shown = evTotal < EVLOG_SIZE ? evTotal : EVLOG_SIZE;
-      for (uint32_t i = evTotal - shown; i < evTotal; i++) {
-        const EventEntry& e = evCopy[i % EVLOG_SIZE];
-        char mikor[24];
-        r->print(F("<tr><td>"));
-        if (formatEpoch(e.epoch, mikor, sizeof(mikor))) {
-          r->print(mikor);
-        } else {
-          // Nem volt (meg) oraszinkron ennel a bejegyzesnel. Nem hiba - a
-          // uptime oszlop ilyenkor is elmond mindent.
-          r->print(F("-"));
-        }
-        r->printf("</td><td>%u:%02u:%02u</td><td>%s</td><td>%u</td></tr>",
-                  (unsigned)(e.uptimeSec / 3600), (unsigned)((e.uptimeSec % 3600) / 60),
-                  (unsigned)(e.uptimeSec % 60), eventName(e.code), (unsigned)e.param);
-      }
-      r->print(F("</table>"));
-    }
-    // Jelmagyarazat: a Param oszlop szamai kulonben csak a forraskodbol
-    // fejthetok meg - epp az az informacio veszne el, amiert az oldal van.
-    // FIGYELEM a jelolesre: az esemenyneveket SZANDEKOSAN nem tesszuk <b> koze.
-    // A tablazat cellai ">NEV<" alaku szoveget adnak, es a naplo tartalmara
-    // pontosan erre a mintara lehet illeszteni (igy teszi az L2 teszt is).
-    // Egy <b>BOOT</b> ugyanezt a mintat allitana elo a jelmagyarazatban, es
-    // elmosna a kulonbseget "a naplóban VAN ilyen esemeny" es "a lap emliti
-    // ezt az esemenyt" kozott.
-    r->print(F("<h3>Param jelentese</h3><ul>"
-               "<li>BOOT: az indulas oka (lasd fent)</li>"
-               "<li>WIFI OK: hanyadik ujraprobalkozasi korben sikerult</li>"
-               "<li>WIFI LOST: a WiFi.status() erteke</li>"
-               "<li>TEST FAIL: a bukott teszt sorszama (1-5)</li>"
-               "<li>ROUTER RESET: hanyadik ujrainditas (1-4)</li>"
-               "<li>AP MODE: 1 = nincs SSID, 2 = rossz jelszo, "
-               "3 = letelt a 2 nap, 4 = a gateway sem erheto el</li>"
-               "<li>GW UNREACH: 1 = a router reset elott, 2 = utana is</li>"
-               "<li>SLEEP: 1 = ujraprobalkozas, 2 = tartos internetkieses, "
-               "3 = AP idotullepes, 4 = vegzetes hiba</li>"
-               "<li>FATAL: 1 = LittleFS, 2 = konfig olvasas, "
-               "3 = watchdog, 4 = wifireset torles, 5 = tartosan keves heap</li>"
-               "<li>WDT RESET: hanyadik rendellenes ujraindulas</li>"
-               "<li>STUCK BUTTON: 0 = reset gomb, 1 = wifireset gomb</li>"
-               "<li>LOW HEAP: a szabad heap KB-ban a kuszob atlepesekor</li>"
-               "<li>HEAP RESTART: a szabad heap KB-ban az onkentes "
-               "ujraindulas elott</li>"
-               "</ul>"));
-    r->print(F("<p><i>Az uptime minden indulaskor nullarol indul, ezert a "
-               "BOOT sorok jelzik az ujraindulasokat. A naplo az "
-               "aramtalanitast nem eli tul.</i></p>"
-               "<p><a href=\"/\">Vissza a beallitasokhoz</a></p>"));
-    // A naplót is lehet 5 percnél tovább olvasni - ne aludjon el közben.
-    // Flashből megy a pufferbe, nem allokál külön.
-    r->print(KEEPALIVE_JS);
-    r->print(F("</body></html>"));
-    request->send(r);
-  });
-
-  server.onNotFound([](AsyncWebServerRequest* request) {
-    // A 404 is interakció: valaki épp az eszközzel dolgozik. A böngésző
-    // magától kéri például a /favicon.ico-t, és egy elgépelt cím sem
-    // jelenti azt, hogy a felhasználó elment. Enélkül a "minden HTTP kérés
-    // kitolja a határidőt" szabály nem lenne igaz.
-    touchApDeadline();
-    request->send(404, "text/plain", "Not found");
-  });
-
-  server.on("/", HTTP_POST, [](AsyncWebServerRequest* request) {
-    touchApDeadline();
-    if (!fsReady) {
-      // Nincs értelme menteni: a fájlrendszer nem áll rendelkezésre.
-      request->send(500, "text/plain",
-                    "LittleFS nem elerheto, a beallitasok nem menthetok. "
-                    "Ellenorizd a particios semat (partitions_custom.csv, "
-                    "'spiffs' cimkeju particio).");
-      return;
-    }
-
-    // --- 1. FÁZIS: validálás. Itt még sem fájlt nem írunk, sem globálist nem
-    // módosítunk: bármely mező hibája esetén MINDEN marad a régiben, így az
-    // 500-as válasz ("nem mentettünk") szó szerint igaz. A korábbi, menet
-    // közben író változat a hibás mező ELŐTT álló érvényes mezőket már
-    // kiírta - egy rossz gateway így fél-új, fél-régi konfigurációt hagyott
-    // a flashben, amivel az eszköz a következő induláskor rossz statikus
-    // címen jött volna fel.
-    bool saveOk = true;
-    bool ssidProvided = false;
-    // Az első hiba oka, hogy a felhasználó konkrét visszajelzést kapjon.
-    const char* failReason = nullptr;
-
-    // A jelöltek. A "Set" jelzők azt mondják meg, mely mezők érkeztek a
-    // kérésben - ami nem érkezett, annak a mentett értéke marad érvényben.
-    char ssidNew[SSID_MAX_LEN + 1] = { 0 };
-    char passNew[PASS_MAX_LEN + 1] = { 0 };
-    char encNew[SECRET_ENC_MAX + 1] = { 0 };
-    char ipNew[IPSTR_MAX_LEN + 1] = { 0 };
-    char gwNew[IPSTR_MAX_LEN + 1] = { 0 };
-    bool passSet = false;
-    bool ipSet = false;
-    bool gwSet = false;
-
-    // KOZOS jelolt-puffer mind a negy mezohoz, a legnagyobbhoz (jelszo)
-    // meretezve, es a mezo hatarnal BOVEBBRE: igy a masolas-beillesztes
-    // szokozeit le tudjuk vagni MIELOTT a hosszat merjuk. Egy puffer, mert az
-    // async_tcp task verme veges, es igy a negy ag nem rakodik egymasra.
-    char candidate[PASS_MAX_LEN * 2 + 2];
-
-    // size_t, nem int: a valodi AsyncWebServerRequest::params() ezt adja
-    // vissza, es a szukites -Wconversion mellett figyelmeztetest is kap.
-    const size_t params = request->params();
-    for (size_t i = 0; i < params; i++) {
-      const AsyncWebParameter* p = request->getParam(i);
-      if (!p->isPost()) {
-        continue;
-      }
-      const String& name = p->name();
-      const String& val = p->value();  // referencia: nincs felesleges másolat
-
-      if (name == PARAM_SSID) {
-        // A readConfigValue() beolvasáskor levágja a whitespace-t, ezért már
-        // itt is levágjuk: így az elmentett és a visszajelzett érték pontosan
-        // az, amivel az eszköz később csatlakozni fog. A csupa szóközből álló
-        // SSID így üresre fogy - azt pedig nem szabad sikerként elfogadni,
-        // mert az újraindulás után AP módban kötnénk ki.
-        strlcpy(candidate, val.c_str(), sizeof(candidate));
-        trimInPlace(candidate);
-        // A hosszat a VAGAS UTAN merjuk - ugyanugy, mint az IP/gateway agon.
-        // Korabban a nyers val.length() dontott, ezert egy 32 karakteres SSID
-        // egyetlen beillesztett zaro szokozzel (33 bajt) "tul hosszu"-kent
-        // bukott el, holott a vagott ertek tokeletesen ervenyes. A
-        // val.length() feltetel megmarad, de mar csak a CSONKOLAS ellen: egy
-        // a pufferbe sem fero bemenet vege csendben elveszne.
-        if (val.length() < sizeof(candidate)
-            && strlen(candidate) <= SSID_MAX_LEN && candidate[0] != '\0') {
-          ssidProvided = true;
-          strlcpy(ssidNew, candidate, sizeof(ssidNew));
-        } else {
-          Serial.println("Invalid SSID length!");
-          saveOk = false;
-          if (failReason == nullptr) failReason = "Ervenytelen SSID (1-32 karakter, nem csak szokoz).";
-        }
-      } else if (name == PARAM_PASS) {
-        strlcpy(candidate, val.c_str(), sizeof(candidate));
-        trimInPlace(candidate);
-        // A hosszat itt is a VAGAS UTAN merjuk (lasd az SSID agat): egy 63
-        // karakteres jelszo egyetlen beillesztett zaro szokozzel korabban
-        // "tul hosszu" hibat adott, pedig a vagas amugy is megtortent volna.
-        if (val.length() < sizeof(candidate) && strlen(candidate) <= PASS_MAX_LEN) {
-          strlcpy(passNew, candidate, sizeof(passNew));
-          // TUDATOS KORLAT: a vagas a masolas-beillesztessel bekerult szokozok
-          // ellen szol, es a WPA2 szabvany szerint egy jelszo ELEJEN vagy VEGEN
-          // allo szokoz onmagaban ervenyes volna. Ilyen jelszo ezzel az
-          // eszkozzel NEM allithato be - a mentett ertek a vagott valtozat lesz.
-          // Nem a tarolas kenyszeriti ki: a jelszo "v1:" + hexa alakban megy a
-          // fajlba, abban nincs szokoz, tehat a kodolas/dekodolas a szokozt
-          // hibatlanul visszaadna (ellentetben az SSID-vel, ami sima szovegkent
-          // tarolodik, es amit a readConfigValue() beolvasaskor ugyis vag).
-          // (A vagas mar a candidate pufferben megtortent.)
-          // Összekeverve mentjük, hogy egy flash dumpon a `strings` ne adjon
-          // használható jelszót. A visszaolvasásos ellenőrzés érintetlen: a
-          // writeConfigValue() a kódolt formát verifikálja.
-          if (encodeSecret(passNew, encNew, sizeof(encNew))) {
-            passSet = true;
-          } else {
-            // Szerkezetileg elerhetetlen ag: a passNew legfeljebb PASS_MAX_LEN
-            // (63) karakter, a kodolt alak pedig "v1:" + 2 hexa karakter
-            // bajtonkent = 3 + 126 = 129, a puffer viszont pontosan ekkora
-            // (SECRET_ENC_MAX). Vedelmi halo arra az esetre, ha valaki a ket
-            // konstans kozul csak az egyiket modositana - ezert a
-            // lefedettsegben feher marad.
-            Serial.println("- a jelszo kodolasa nem fert a pufferbe");
-            saveOk = false;
-            if (failReason == nullptr) failReason = "Belso hiba a jelszo mentesekor.";
-          }
-        } else {
-          Serial.println("Password too long!");
-          saveOk = false;
-          if (failReason == nullptr) failReason = "A jelszo tul hosszu (max 63 karakter).";
-        }
-      } else if (name == PARAM_IP) {
-        // Az SSID-hez es a jelszohoz hasonloan a masolas-beillesztes szokozeit
-        // itt is levagjuk a validalas elott: a "192.168.1.200 " szandeka
-        // egyertelmu. A puffer bovebb a mezonel, hogy a szokozokkel egyutt is
-        // beferjen a vagas elott; a vagott ertek hosszat kulon ellenorizzuk.
-        // A csupa szokoz uresre fogy = DHCP, nem hibauzenet.
-        strlcpy(candidate, val.c_str(), sizeof(candidate));
-        trimInPlace(candidate);
-        IPAddress testIP;
-        if (candidate[0] == '\0') {
-          ipNew[0] = '\0';
-          ipSet = true;
-        } else if (val.length() < sizeof(candidate)
-                   && strlen(candidate) <= IPSTR_MAX_LEN && testIP.fromString(candidate)
-                   && isUsableIPv4(testIP)) {
-          // A val.length() feltetel az SSID/jelszo agak explicit hossz-
-          // ellenorzesenek parja: a strlcpy() csonkolasa utan egy tulmeretes
-          // bemenet vege csendben elveszne, es a maradek akar ervenyes cimme
-          // is vagodhatna - ilyet nem fogadunk el, az a hiba-agra tartozik.
-          strlcpy(ipNew, candidate, sizeof(ipNew));
-          ipSet = true;
-        } else {
-          Serial.println("Invalid IP format!");
-          saveOk = false;
-          if (failReason == nullptr) failReason = "Ervenytelen IP cim (csak IPv4, nem 0.0.0.0).";
-        }
-      } else if (name == PARAM_GATEWAY) {
-        // Ugyanaz a vagas, mint az IP-nel.
-        strlcpy(candidate, val.c_str(), sizeof(candidate));
-        trimInPlace(candidate);
-        IPAddress testIP;
-        if (candidate[0] == '\0') {
-          gwNew[0] = '\0';
-          gwSet = true;
-        } else if (val.length() < sizeof(candidate)
-                   && strlen(candidate) <= IPSTR_MAX_LEN && testIP.fromString(candidate)
-                   && isUsableIPv4(testIP)) {
-          // Lasd az IP ag megjegyzeset a csonkolas elleni vedelemrol.
-          strlcpy(gwNew, candidate, sizeof(gwNew));
-          gwSet = true;
-        } else {
-          Serial.println("Invalid gateway format!");
-          saveOk = false;
-          if (failReason == nullptr) failReason = "Ervenytelen gateway (csak IPv4, nem 0.0.0.0).";
-        }
-      }
-
-      // CSAK A NEGY ISMERT MEZOT visszhangozzuk, es a hosszat is korlatozzuk.
-      //
-      // MIERT? Korabban a ciklus MINDEN beerkezo parametert kiirt, szo
-      // szerint. Az ismeretlen parametereket amugy sem dolgozzuk fel (a
-      // konfiguraciot nem tudjak atirni), tehat diagnosztikai ertekuk nincs -
-      // egy sok mezos POST viszont annyi sort irt volna a soros portra,
-      // ahany mezot kuldtek, es mindezt az async_tcp taskban, ami kozben a
-      // webszervert is kiszolgalja. A %.64s a tulmeretes ertekeket is
-      // levagja, igy egyetlen sor sem nohet korlatlanul.
-      //
-      // A jelszót soha nem írjuk ki nyíltan a soros portra.
-      if (name == PARAM_PASS) {
-        Serial.printf("POST[%s]: <%u chars>\n", name.c_str(), (unsigned)val.length());
-      } else if (name == PARAM_SSID || name == PARAM_IP || name == PARAM_GATEWAY) {
-        Serial.printf("POST[%s]: %.64s\n", name.c_str(), val.c_str());
-      }
-    }
-
-    // SSID nélkül az eszköz nem tudna hova csatlakozni: ilyet ne fogadjunk el
-    // sikerként, mert az újraindulás után ugyanitt kötnénk ki.
-    if (!ssidProvided) {
-      saveOk = false;
-      if (failReason == nullptr) failReason = "Hianyzo SSID.";
-    }
-
-    // Statikus IP-hez a gateway is kell. Az initWiFi() csak akkor konfigurál,
-    // ha MINDKETTŐ értelmezhető - félig kitöltve csendben DHCP-re esne vissza,
-    // a felhasználó viszont azt olvasná, hogy a megadott fix címen lesz.
-    // A VÉGSŐ értékpárt nézzük: a most küldöttet, különben a mentettet.
-    const char* ipFinal = ipSet ? ipNew : ipStr;
-    const char* gwFinal = gwSet ? gwNew : gatewayStr;
-    if ((ipFinal[0] != '\0') != (gwFinal[0] != '\0')) {
-      saveOk = false;
-      if (failReason == nullptr) {
-        failReason = "Statikus IP-hez az IP cimet ES a gateway-t is meg kell adni "
-                     "(DHCP-hez hagyd mindkettot uresen).";
-      }
-    }
-
-    if (!saveOk) {
-      // Ne hazudjunk sikert és főleg ne indítsunk újra: az újraindítás
-      // eldobná a beírt adatokat, a felhasználó pedig ugyanitt kötne ki.
-      // Fájlt nem írtunk és globálist sem módosítottunk - minden a régi.
-      touchApDeadline();
-      Serial.println("A beallitasok mentese SIKERTELEN.");
-      // A leghosszabb indoklás (statikus IP + gateway) a rögzített szöveggel
-      // együtt 176 bájt; a snprintf() csonkolna, ha ennél kisebb lenne.
-      char err[208];
-      snprintf(err, sizeof(err),
-               "A beallitasok mentese nem sikerult: %s "
-               "Az eszkoz NEM indul ujra, probald meg ismet.",
-               failReason ? failReason : "ismeretlen hiba.");
-      request->send(500, "text/plain", err);
-      return;
-    }
-
-    // --- 2. FÁZIS: minden mező érvényes -> zár, globálisok, fájlok.
-    // A zár (savingConfig) atomikus megszerzése: a wifireset gomb törlése a
-    // loop taskban ugyanezeket a fájlokat írná. Amíg a zár él, a loop() nem
-    // altatja el az eszközt, és a gombok sem szólnak közbe.
-    if (!beginConfigWrite()) {
-      request->send(503, "text/plain",
-                    "Az eszkoz eppen a konfiguraciot irja (gombos torles vagy "
-                    "masik mentes). Probald ujra egy pillanat mulva.");
-      return;
-    }
-
-    strlcpy(ssid, ssidNew, sizeof(ssid));
-    Serial.print("SSID set to: ");
-    Serial.println(ssid);
-    saveOk &= writeConfigValue(LittleFS, ssidPath, ssid);
-
-    if (passSet) {
-      strlcpy(pass, passNew, sizeof(pass));
-      Serial.print("Password set to: ");
-      Serial.print((unsigned)strlen(pass));
-      Serial.println(" chars");
-      saveOk &= writeConfigValue(LittleFS, passPath, encNew);
-    }
-    if (ipSet) {
-      strlcpy(ipStr, ipNew, sizeof(ipStr));
-      if (ipStr[0] == '\0') {
-        Serial.println("IP empty, using DHCP.");
-      } else {
-        Serial.print("IP Address set to: ");
-        Serial.println(ipStr);
-      }
-      saveOk &= writeConfigValue(LittleFS, ipPath, ipStr);
-    }
-    if (gwSet) {
-      strlcpy(gatewayStr, gwNew, sizeof(gatewayStr));
-      if (gatewayStr[0] == '\0') {
-        Serial.println("Gateway empty, using DHCP.");
-      } else {
-        Serial.print("Gateway set to: ");
-        Serial.println(gatewayStr);
-      }
-      saveOk &= writeConfigValue(LittleFS, gatewayPath, gatewayStr);
-    }
-
-    savingConfig = false;
-    touchApDeadline();
-
-    if (!saveOk) {
-      // Ide már csak tényleges fájlrendszer-hiba hozhat; ilyenkor a flash
-      // tartalma lehet vegyes, de az eszköz nem indul újra, és a válasz
-      // megmondja, mi történt.
-      Serial.println("A beallitasok mentese SIKERTELEN.");
-      request->send(500, "text/plain",
-                    "A beallitasok mentese nem sikerult: LittleFS irasi hiba. "
-                    "Az eszkoz NEM indul ujra, probald meg ismet.");
-      return;
-    }
-
-    char message[96];
-    if (ipStr[0] != '\0') {
-      snprintf(message, sizeof(message),
-               "Done. ESP will restart. Then go to IP address: %s", ipStr);
-    } else {
-      snprintf(message, sizeof(message),
-               "Done. ESP will restart and connect to your router (DHCP).");
-    }
-    request->send(200, "text/plain", message);
-
-    // Az async callbackben nem blokkolunk és nem indítunk újra:
-    // a loop() teszi meg, miután a válasz kiment.
-    logEvent(EV_CONFIG_SAVED, 0);
-    restartAt = millis() + RESTART_GRACE_MS;
-    restartPending = true;
-  });
-
-  server.begin();
+  startWebPortal();
 }
 
 void setup() {
@@ -3502,9 +1858,9 @@ void setup() {
   applyHeapCarry();
 
   Serial.println("Init LittleFS.");
-  fsReady = initLittleFS();
+  initLittleFS();   // az eredmenyt a modul jegyzi meg (filesystemReady)
 
-  if (!fsReady) {
+  if (!filesystemReady()) {
     // A konfigurációt tároló fájlrendszer nem elérhető. Ez NEM azonos azzal,
     // hogy nincs még konfiguráció - itt tényleg hiba van.
     if (deviceMode != MODE_FATAL) {
@@ -3577,24 +1933,22 @@ void setup() {
 
 }
 
-void loop() {
-  const uint32_t currentMillis = millis();
+// ---------------------------------------------------------------------------
+// A loop() harom uzemmod-aga es a kozos szamlalo-karbantartas.
+//
+// MIERT KULON? A loop() 362 sor volt, 38 dontesi ponttal es 6-os beagyazasi
+// melyseggel: egyszerre vegzett diszpecselest, allapotgepet, LED-villogtatast
+// es szamlalo-nullazast. Ez a program legkritikusabb fuggvenye - epp ennek
+// kellene a legatlathatobbnak lennie. A szetbontas utan a loop() maga csak
+// azt mondja meg, MI kovetkezik; a HOGYAN mind nevesitett fuggvenyben all.
+//
+// A "currentMillis" mindenhol atadott parameter marad, nem uj millis() hivas:
+// egy kor MINDEN dontese ugyanahhoz az idobelyeghez merjen.
+// ---------------------------------------------------------------------------
 
-  // Az AP-módú beállító oldal kérésére halasztott újraindítás.
-  //
-  // A türelmi idő alatt (2 mp) ÚJABB mentés is érkezhet - mobilon a dupla
-  // koppintás gyakori. Ilyenkor épp fájlírás folyik, és az újraindítás félbe
-  // vágná: előbb megvárjuk, hogy az írás befejeződjön - ÉS mindjárt meg is
-  // szerezzük a zárat, hogy a várakozás vége és az ESP.restart() közötti
-  // néhány ezredmásodpercben már ne indulhasson újabb mentés.
-  if (restartPending && (int32_t)(currentMillis - restartAt) >= 0) {
-    lockConfigBeforeShutdown();
-    restartPending = false;
-    Serial.println("RESTART!");
-    Serial.flush();
-    ESP.restart();
-  }
-
+// Egy ora hibatlan futas utan a korabbi hibasorozatok mar nem szamitanak.
+// MINDEN uzemmodban fut, a mod-elagazas ELOTT - lasd a benti indoklast.
+void clearHealthyRunCounters(uint32_t currentMillis) {
   // Hibátlanul lefutott egy óra: a watchdog számláló nullázható.
   //
   // MIÉRT ITT, a mód-elágazás ELŐTT? Mert a "hibátlan működés" nem üzemmód
@@ -3636,6 +1990,326 @@ void loop() {
     printUptime();
     Serial.println("1 ora hibatlan mukodes - a heap ujrainditas szamlalo nullazva.");
   }
+}
+
+// MODE_FATAL: vegzetes hiba jelzese. A program szandekosan nem fut tovabb -
+// nem tesztel es nem kapcsolja a relet.
+void handleFatalMode(uint32_t currentMillis) {
+  // Mindkét LED együtt, gyorsan villog. A program szándékosan nem fut
+  // tovább: nem tesztel és nem kapcsolja a relét.
+  if (currentMillis - timing.blinkLast >= FATAL_BLINK_MS) {
+    timing.blinkLast = currentMillis;
+    uiFlags.blinkOn = !uiFlags.blinkOn;
+    digitalWrite(ledPin, uiFlags.blinkOn ? HIGH : LOW);
+    digitalWrite(wifiledPin, uiFlags.blinkOn ? HIGH : LOW);
+  }
+  // A hiba magától nem múlik el: 5 perc jelzés után elalszunk, hogy ne
+  // fogyasszunk és ne villogjunk feleslegesen napokig.
+  if (currentMillis - timing.fatalStart >= FATAL_SLEEP_AFTER_MS) {
+    fatalSleep();
+  }
+  // A gombok élnek, hogy újraindítani vagy resetelni lehessen az eszközt.
+  resetbutton();
+  wifiresetbutton();
+  delay(BUTTON_POLL_MS);
+}
+
+// MODE_CONFIG: az AP beallito portal futasa. Nincs internetteszt.
+void handleConfigMode(uint32_t currentMillis) {
+  // A Wi-Fi LED villog: "beállító módban vagyok, várom a böngészőt". A
+  // státusz LED közben végig világít - a kettő együtt egyértelműen más,
+  // mint a végzetes hiba (mindkettő 5 Hz) vagy a router reset (csak a
+  // státusz LED, 2 Hz).
+  if (currentMillis - timing.blinkLast >= AP_BLINK_MS) {
+    timing.blinkLast = currentMillis;
+    uiFlags.blinkOn = !uiFlags.blinkOn;
+    digitalWrite(wifiledPin, uiFlags.blinkOn ? HIGH : LOW);
+  }
+  // Konfig módban nincs internetteszt. A portál AP_TIMEOUT_MS tétlenségig
+  // él; minden kérés és a folyamatban lévő mentés kitolja a határidőt.
+  resetbutton();
+  wifiresetbutton();
+  // Nem alszunk el, ha épp mentés folyik, vagy ha a sikeres mentés utáni
+  // újraindításra várunk.
+  if (!configWriteInProgress() && !restartRequested() &&
+      (int32_t)(currentMillis - apDeadline) >= 0) {
+    apSleep();
+  }
+  delay(BUTTON_POLL_MS);
+}
+
+// TESTING_STATE: a soron kovetkezo vegpont HTTP tesztje. Elotte megnezi, hogy
+// egyaltalan van-e Wi-Fi kapcsolat.
+void runTestingState() {
+  if (WiFi.status() != WL_CONNECTED) {
+    // SPAM-VEDELEM. Egy pislákoló kapcsolatnál (a jel a határon van, a
+    // driver állapota másodpercenként többször vált) ez az ág körönként
+    // újra lefutna, és a 32 elemű körpuffer kiszorítaná a kivizsgálandó
+    // eseményeket. A SULYOSSAGROL OSZINTEN: védelem nélkül, REALIS
+    // pislákolási ütemeknél (500 / 1000 / 2000 / 5000 ms) a mérés 4 / 2 /
+    // 1 / 0 bejegyzést adott, tehát a puffert nem söpörte el - a
+    // mechanizmus viszont valós, és a pislákolás gyorsulásával arányosan
+    // romlik. Ugyanaz a szabály, mint a TEST FAIL sorozatoknál: csak a
+    // sorozat ELSŐ tagja kerül a naplóba és a soros portra. Egy közbeeső
+    // másik esemény után újra naplózunk. (Mérve: LOG4.)
+    const bool ismetles = lastEventWas((uint8_t)EV_WIFI_LOST);
+    if (!ismetles) {
+      printUptime();
+      logEvent(EV_WIFI_LOST, (uint16_t)WiFi.status());
+      Serial.println("WiFi disconnected before test!");
+    }
+    digitalWrite(wifiledPin, LOW);
+
+    // Egységes politika: 3 próba 30 mp szünetekkel.
+    if (reconnectWifi()) {
+      // Visszajött, a teszt a következő körben fut le.
+      timing.stateStart = millis();
+      return;
+    }
+
+    // Nem jött vissza: azonnal router újraindítás, nem várunk további
+    // teszt ciklusokat. A FAILURE_STATE reset ágát így élesítjük - nincs
+    // hálózat, amin bármelyik végpont elérhető lenne, nincs mit végigpróbálni.
+    printUptime();
+    Serial.println("WiFi nem jott vissza - router ujrainditas kovetkezik.");
+    testState.cycleIndex = RESET_TRIGGER_CYCLE + 1;
+    currentState = FAILURE_STATE;
+    timing.stateStart = millis();
+    return;
+  }
+  // A kapcsolat magától is helyreállhat (auto-reconnect), ilyenkor a LED
+  // korábban hazudott volna.
+  digitalWrite(wifiledPin, HIGH);
+  if (rtcRetryRounds != 0) {
+    rtcRetryRounds = 0;  // működik a hálózat: új 2 napos ablak
+  }
+  printUptime();
+  Serial.println("Beginning Test.");
+  // Csak az indexet írjuk ki ITT: az azt mondja meg, MELYIK végpont jön,
+  // tehát a teszt ELŐTT van értelme. A hibaszámláló viszont a teszt
+  // EREDMÉNYE - ezért az a "Test failed." sorra került. Korábban itt állt,
+  // így a sorozat első tesztjénél mindig "0"-t írt ki.
+  //
+  // A KIÍRÁS 1-alapú (1..5), a belső cycleIndex marad 0-alapú: a 0..4
+  // tartomány a végpontválasztó if-lánc és a RESET_TRIGGER_CYCLE
+  // küszöb miatt kötött. Emberi olvasónak viszont nincs "0-dik teszt".
+  Serial.print("Teszt ciklus index = ");
+  Serial.println(testState.cycleIndex + 1);
+
+  // Mind az ot teszt HTTP, mert az ICMP nem bizonyit sem nevfeloldast, sem
+  // TCP-t: egy befagyott router-DNS mellett a ping tokeletesen megy, kozben
+  // egyetlen eszkoz sem eri el az internetet. Nem veletlen, hogy egyetlen
+  // nagy implementacio sem ICMP-vel validal (NetworkManager, Firefox,
+  // Windows NCSI: mind HTTP). Ot kulonbozo uzemelteto, ket ellenorzesi mod.
+  // Ures elvart valasz = 204-es ellenorzes, lasd testInternetHTTP().
+  bool testResult;
+  if (testState.cycleIndex == 1) {
+    testResult = testInternetHTTP("http://cp.cloudflare.com/generate_204", "");
+  } else if (testState.cycleIndex == 2) {
+    testResult = testInternetHTTP("http://detectportal.firefox.com/success.txt", "success");
+  } else if (testState.cycleIndex == 3) {
+    testResult = testInternetHTTP("http://nmcheck.gnome.org/check_network_status.txt",
+                                  "NetworkManager is online");
+  } else if (testState.cycleIndex == 4) {
+    testResult = testInternetHTTP("http://connectivitycheck.gstatic.com/generate_204", "");
+  } else {
+    testResult = testInternetHTTP("http://www.msftconnecttest.com/connecttest.txt", "Microsoft Connect Test");
+  }
+
+  if (testResult) {
+    testState.cycleIndex = 0;
+    testState.failedCount = 0;
+    testState.resetEvents = 0;
+    currentState = SUCCESS_STATE;
+  } else {
+    testState.failedCount++;
+    // Csak a hibasorozat első tagját naplózzuk: a 12 mp-enként ismétlődő
+    // bejegyzések különben percek alatt kiszorítanák a fontos eseményeket.
+    if (testState.failedCount == 1) {
+      // 1-alapú, hogy a /log oldal ugyanazt a számot mutassa, mint a
+      // soros port "Teszt ciklus index" sora.
+      logEvent(EV_TEST_FAIL, (uint16_t)(testState.cycleIndex + 1));
+    }
+    printUptime();
+    // A már megnövelt számláló: ez a mostani bukással együtt hány
+    // egymás utáni sikertelen teszt van. A nevező az a darabszám, ami
+    // után a router újraindítása következik (mind az öt végpont bukott).
+    Serial.print("Test failed. | Hibák száma = ");
+    Serial.print(testState.failedCount);
+    Serial.print(" / ");
+    Serial.println(MAX_CYCLE_INDEX + 1);
+    currentState = FAILURE_STATE;
+  }
+  // A tesztek percekig futhatnak, ezért friss időbélyeg kell.
+  timing.stateStart = millis();
+  return;
+}
+
+// FAILURE_STATE: vagy a kovetkezo vegpontra lep, vagy - ha mind az ot elbukott -
+// levezenyli a router ujrainditasat es az utana kovetkezo ellenorzeseket.
+void runFailureState(uint32_t currentMillis) {
+  // Mind az ot vegpont elbukott: a 4-es indexen a Google-t is probaltuk,
+  // tehat a 0..4 mind lefutott es mind bukott. Mivel a ket szamlalo egyutt
+  // lep (failedCount == cycleIndex + 1), ez pontosan 5 egymas utani bukas -
+  // de a feltetel szandekosan a VEGPONT-lefedettseget mondja ki, nem az
+  // idot: egyetlen uzemelteto kiesese soha ne latszodjon internetkimaradasnak.
+  // Egy failedCount-alapu kuszob ugyanezt ma szam szerint eltalalna, de nem
+  // ezt garantalna - ezert csak az index kot. A failedCount a naplozashoz es
+  // a soros kimenethez kell (csak a hibasorozat elso tagja kerul a naplóba).
+  if (testState.cycleIndex > RESET_TRIGGER_CYCLE) {
+
+    if (!uiFlags.resetPrinted) {
+      // Statikus IP mellett: ha a saját gateway-ünket sem érjük el, a hiba
+      // helyi, és a router újraindítása nem javíthatja. Egy esélyt azért
+      // adunk neki (hátha tényleg a router akadt meg) - a döntés a reset
+      // UTÁNI ellenőrzésnél születik meg.
+      if (gatewayUnreachable()) {
+        printUptime();
+        Serial.println("A sajat gateway sem elerheto - lehet, hogy rossz a statikus IP.");
+        Serial.println("Kap a router egy esélyt: ujrainditas, aztan ujra ellenorizzuk.");
+        logEvent(EV_GW_UNREACHABLE, 1);
+      }
+      printUptime();
+      Serial.println("Beginning Reset in FAILURE_STATE.");
+      while (!reset_device()) {
+        resetbutton();
+        wifiresetbutton();
+        feedWatchdog();
+        delay(BUTTON_POLL_MS);
+      }
+      printUptime();
+      Serial.println("Reset is done in FAILURE_STATE.");
+      Serial.println("RESET_DELAY start in FAILURE_STATE.");
+      timing.stateStart = millis();
+      uiFlags.resetPrinted = true;
+      resetDelayProbeLast = millis();  // az első próba egy intervallum múlva
+      return;                        // a RESET_DELAY a következő körökben telik
+    }
+
+    // A RESET_DELAY korai lezárása: ha a router hamarabb feláll, és az
+    // internet is megvan, nincs mire várni.
+    const bool earlyOnline = onlineProbeDue(resetDelayProbeLast, millis());
+
+    if (earlyOnline || millis() - timing.stateStart >= RESET_DELAY) {
+      printUptime();
+      if (earlyOnline) {
+        Serial.println("RESET_DELAY korai vege: halozat es internet OK.");
+      } else {
+        Serial.println("RESET_DELAY end in FAILURE_STATE.");
+      }
+
+      // Korai kilépéskor a kapcsolat MÁR él és mérve is van - a
+      // disconnect(true) épp azt bontaná le, amit az imént igazoltunk.
+      if (!earlyOnline) {
+        Serial.println("Reconnect WIFI in FAILURE_STATE.");
+        WiFi.disconnect(true);
+        blockingDelay(100);
+
+        // Egységesen 3 próba 30 mp szünetekkel. A reconnectWifi() minden
+        // próbája teljes initWiFi(), ami újra alkalmazza a statikus IP/DNS
+        // konfigot - a disconnect(true) ugyanis eldobja a netifet.
+        if (!reconnectWifi()) {
+          printUptime();
+          Serial.println("A router reset utan sem jott vissza a WiFi.");
+          digitalWrite(wifiledPin, LOW);
+          wifiGiveUp();
+          // Ez a return a host tesztekben feher marad, de nem azert, mert az
+          // ag nem fut le (a WF11 meri): a wifiGiveUp() vagy elalszik,
+          // vagy AP modba visz, es a harness az elalvast kivetellel
+          // modellezi - a vezerles ide mar nem ter vissza.
+          return;
+        }
+
+        printUptime();
+        Serial.println("WIFI OK in FAILURE_STATE.");
+      }
+      digitalWrite(wifiledPin, HIGH);
+
+      // A router megkapta az esélyét. Ha a gateway még mindig nem
+      // válaszol, a statikus IP a rossz - a routert nincs értelme tovább
+      // áramtalanítani. Beállító módba megyünk, hogy javítani lehessen.
+      if (gatewayUnreachable()) {
+        printUptime();
+        Serial.println("A router ujrainditasa utan sem elerheto a gateway.");
+        Serial.println("Valoszinuleg rossz a statikus IP - AP beallito mod.");
+        logEvent(EV_GW_UNREACHABLE, 2);
+        logEvent(EV_AP_MODE, 4);
+        digitalWrite(wifiledPin, LOW);
+        startConfigPortal();
+        return;
+      }
+
+      testState.cycleIndex = 0;
+      testState.failedCount = 0;
+      uiFlags.resetPrinted = false;
+      currentState = TESTING_STATE;
+    }
+
+  } else {
+    if (currentMillis - timing.stateStart >= PROBE_DELAY) {
+      if (testState.cycleIndex < MAX_CYCLE_INDEX) {
+        testState.cycleIndex++;
+      }
+      currentState = TESTING_STATE;
+    }
+  }
+}
+
+// SUCCESS_STATE: varakozas a kovetkezo teszt-korig.
+void runSuccessState(uint32_t currentMillis) {
+
+  if (!uiFlags.successPrinted) {
+    printUptime();
+    Serial.println("Successful Test");
+    Serial.println();
+    Serial.println("SUCCESS_DELAY delay start.");
+    uiFlags.successPrinted = true;
+  }
+
+  if (currentMillis - timing.stateStart >= SUCCESS_DELAY) {
+    printUptime();
+    Serial.println("SUCCESS_DELAY delay end.");
+    uiFlags.successPrinted = false;
+    timing.stateStart = currentMillis;
+    currentState = TESTING_STATE;
+  }
+}
+
+// MODE_MONITOR: a tenyleges internet-figyelo allapotgep. Ez a fuggveny mar csak
+// diszpecsel - az allapotok viselkedese kulon-kulon olvashato fent.
+void runMonitorStateMachine(uint32_t currentMillis) {
+  switch (currentState) {
+    case TESTING_STATE: runTestingState();             break;
+    case FAILURE_STATE: runFailureState(currentMillis); break;
+    case SUCCESS_STATE: runSuccessState(currentMillis); break;
+  }
+
+  // A várakozó állapotok (SUCCESS 1 perc, FAILURE 12 mp) alatt a loop()-nak
+  // nincs dolga. delay() nélkül 1. prioritáson pörögne 100% CPU-val; a
+  // vTaskDelay viszont ténylegesen felfüggeszti a taskot. Minden időzítés
+  // ezredmásodpercekben mér, tehát a 10 ms-os szemcsézettség nem számít.
+  delay(BUTTON_POLL_MS);
+}
+
+void loop() {
+  const uint32_t currentMillis = millis();
+
+  // Az AP-módú beállító oldal kérésére halasztott újraindítás.
+  //
+  // A türelmi idő alatt (2 mp) ÚJABB mentés is érkezhet - mobilon a dupla
+  // koppintás gyakori. Ilyenkor épp fájlírás folyik, és az újraindítás félbe
+  // vágná: előbb megvárjuk, hogy az írás befejeződjön - ÉS mindjárt meg is
+  // szerezzük a zárat, hogy a várakozás vége és az ESP.restart() közötti
+  // néhány ezredmásodpercben már ne indulhasson újabb mentés.
+  if (restartRequestDue(currentMillis)) {
+    lockConfigBeforeShutdown();
+    clearRestartRequest();
+    Serial.println("RESTART!");
+    Serial.flush();
+    ESP.restart();
+  }
+
+  clearHealthyRunCounters(currentMillis);
 
   // A heap felugyelete MINDEN uzemmodban mer es kiir (a diagnosztika ott is
   // kell, ahol epp baj van), az ujrainditas viszont csak monitor modban
@@ -3646,47 +2320,12 @@ void loop() {
   ensureNtp();
 
   if (deviceMode == MODE_FATAL) {
-    // Mindkét LED együtt, gyorsan villog. A program szándékosan nem fut
-    // tovább: nem tesztel és nem kapcsolja a relét.
-    if (currentMillis - timing.blinkLast >= FATAL_BLINK_MS) {
-      timing.blinkLast = currentMillis;
-      uiFlags.blinkOn = !uiFlags.blinkOn;
-      digitalWrite(ledPin, uiFlags.blinkOn ? HIGH : LOW);
-      digitalWrite(wifiledPin, uiFlags.blinkOn ? HIGH : LOW);
-    }
-    // A hiba magától nem múlik el: 5 perc jelzés után elalszunk, hogy ne
-    // fogyasszunk és ne villogjunk feleslegesen napokig.
-    if (currentMillis - timing.fatalStart >= FATAL_SLEEP_AFTER_MS) {
-      fatalSleep();
-    }
-    // A gombok élnek, hogy újraindítani vagy resetelni lehessen az eszközt.
-    resetbutton();
-    wifiresetbutton();
-    delay(BUTTON_POLL_MS);
+    handleFatalMode(currentMillis);
     return;
   }
 
   if (deviceMode == MODE_CONFIG) {
-    // A Wi-Fi LED villog: "beállító módban vagyok, várom a böngészőt". A
-    // státusz LED közben végig világít - a kettő együtt egyértelműen más,
-    // mint a végzetes hiba (mindkettő 5 Hz) vagy a router reset (csak a
-    // státusz LED, 2 Hz).
-    if (currentMillis - timing.blinkLast >= AP_BLINK_MS) {
-      timing.blinkLast = currentMillis;
-      uiFlags.blinkOn = !uiFlags.blinkOn;
-      digitalWrite(wifiledPin, uiFlags.blinkOn ? HIGH : LOW);
-    }
-    // Konfig módban nincs internetteszt. A portál AP_TIMEOUT_MS tétlenségig
-    // él; minden kérés és a folyamatban lévő mentés kitolja a határidőt.
-    resetbutton();
-    wifiresetbutton();
-    // Nem alszunk el, ha épp mentés folyik, vagy ha a sikeres mentés utáni
-    // újraindításra várunk.
-    if (!savingConfig && !restartPending &&
-        (int32_t)(currentMillis - apDeadline) >= 0) {
-      apSleep();
-    }
-    delay(BUTTON_POLL_MS);
+    handleConfigMode(currentMillis);
     return;
   }
 
@@ -3697,245 +2336,5 @@ void loop() {
 
   resetbutton();
   wifiresetbutton();
-
-  switch (currentState) {
-
-    case TESTING_STATE: {
-      if (WiFi.status() != WL_CONNECTED) {
-        // SPAM-VEDELEM. Egy pislákoló kapcsolatnál (a jel a határon van, a
-        // driver állapota másodpercenként többször vált) ez az ág körönként
-        // újra lefutna, és a 32 elemű körpuffer kiszorítaná a kivizsgálandó
-        // eseményeket. A SULYOSSAGROL OSZINTEN: védelem nélkül, REALIS
-        // pislákolási ütemeknél (500 / 1000 / 2000 / 5000 ms) a mérés 4 / 2 /
-        // 1 / 0 bejegyzést adott, tehát a puffert nem söpörte el - a
-        // mechanizmus viszont valós, és a pislákolás gyorsulásával arányosan
-        // romlik. Ugyanaz a szabály, mint a TEST FAIL sorozatoknál: csak a
-        // sorozat ELSŐ tagja kerül a naplóba és a soros portra. Egy közbeeső
-        // másik esemény után újra naplózunk. (Mérve: LOG4.)
-        const bool ismetles = lastEventWas((uint8_t)EV_WIFI_LOST);
-        if (!ismetles) {
-          printUptime();
-          logEvent(EV_WIFI_LOST, (uint16_t)WiFi.status());
-          Serial.println("WiFi disconnected before test!");
-        }
-        digitalWrite(wifiledPin, LOW);
-
-        // Egységes politika: 3 próba 30 mp szünetekkel.
-        if (reconnectWifi()) {
-          // Visszajött, a teszt a következő körben fut le.
-          timing.stateStart = millis();
-          break;
-        }
-
-        // Nem jött vissza: azonnal router újraindítás, nem várunk további
-        // teszt ciklusokat. A FAILURE_STATE reset ágát így élesítjük - nincs
-        // hálózat, amin bármelyik végpont elérhető lenne, nincs mit végigpróbálni.
-        printUptime();
-        Serial.println("WiFi nem jott vissza - router ujrainditas kovetkezik.");
-        testState.cycleIndex = RESET_TRIGGER_CYCLE + 1;
-        currentState = FAILURE_STATE;
-        timing.stateStart = millis();
-        break;
-      }
-      // A kapcsolat magától is helyreállhat (auto-reconnect), ilyenkor a LED
-      // korábban hazudott volna.
-      digitalWrite(wifiledPin, HIGH);
-      if (rtcRetryRounds != 0) {
-        rtcRetryRounds = 0;  // működik a hálózat: új 2 napos ablak
-      }
-      printUptime();
-      Serial.println("Beginning Test.");
-      // Csak az indexet írjuk ki ITT: az azt mondja meg, MELYIK végpont jön,
-      // tehát a teszt ELŐTT van értelme. A hibaszámláló viszont a teszt
-      // EREDMÉNYE - ezért az a "Test failed." sorra került. Korábban itt állt,
-      // így a sorozat első tesztjénél mindig "0"-t írt ki.
-      //
-      // A KIÍRÁS 1-alapú (1..5), a belső cycleIndex marad 0-alapú: a 0..4
-      // tartomány a végpontválasztó if-lánc és a RESET_TRIGGER_CYCLE
-      // küszöb miatt kötött. Emberi olvasónak viszont nincs "0-dik teszt".
-      Serial.print("Teszt ciklus index = ");
-      Serial.println(testState.cycleIndex + 1);
-
-      // Mind az ot teszt HTTP, mert az ICMP nem bizonyit sem nevfeloldast, sem
-      // TCP-t: egy befagyott router-DNS mellett a ping tokeletesen megy, kozben
-      // egyetlen eszkoz sem eri el az internetet. Nem veletlen, hogy egyetlen
-      // nagy implementacio sem ICMP-vel validal (NetworkManager, Firefox,
-      // Windows NCSI: mind HTTP). Ot kulonbozo uzemelteto, ket ellenorzesi mod.
-      // Ures elvart valasz = 204-es ellenorzes, lasd testInternetHTTP().
-      bool testResult;
-      if (testState.cycleIndex == 1) {
-        testResult = testInternetHTTP("http://cp.cloudflare.com/generate_204", "");
-      } else if (testState.cycleIndex == 2) {
-        testResult = testInternetHTTP("http://detectportal.firefox.com/success.txt", "success");
-      } else if (testState.cycleIndex == 3) {
-        testResult = testInternetHTTP("http://nmcheck.gnome.org/check_network_status.txt",
-                                      "NetworkManager is online");
-      } else if (testState.cycleIndex == 4) {
-        testResult = testInternetHTTP("http://connectivitycheck.gstatic.com/generate_204", "");
-      } else {
-        testResult = testInternetHTTP("http://www.msftconnecttest.com/connecttest.txt", "Microsoft Connect Test");
-      }
-
-      if (testResult) {
-        testState.cycleIndex = 0;
-        testState.failedCount = 0;
-        testState.resetEvents = 0;
-        currentState = SUCCESS_STATE;
-      } else {
-        testState.failedCount++;
-        // Csak a hibasorozat első tagját naplózzuk: a 12 mp-enként ismétlődő
-        // bejegyzések különben percek alatt kiszorítanák a fontos eseményeket.
-        if (testState.failedCount == 1) {
-          // 1-alapú, hogy a /log oldal ugyanazt a számot mutassa, mint a
-          // soros port "Teszt ciklus index" sora.
-          logEvent(EV_TEST_FAIL, (uint16_t)(testState.cycleIndex + 1));
-        }
-        printUptime();
-        // A már megnövelt számláló: ez a mostani bukással együtt hány
-        // egymás utáni sikertelen teszt van. A nevező az a darabszám, ami
-        // után a router újraindítása következik (mind az öt végpont bukott).
-        Serial.print("Test failed. | Hibák száma = ");
-        Serial.print(testState.failedCount);
-        Serial.print(" / ");
-        Serial.println(MAX_CYCLE_INDEX + 1);
-        currentState = FAILURE_STATE;
-      }
-      // A tesztek percekig futhatnak, ezért friss időbélyeg kell.
-      timing.stateStart = millis();
-      break;
-    }
-
-    case FAILURE_STATE:
-      // Mind az ot vegpont elbukott: a 4-es indexen a Google-t is probaltuk,
-      // tehat a 0..4 mind lefutott es mind bukott. Mivel a ket szamlalo egyutt
-      // lep (failedCount == cycleIndex + 1), ez pontosan 5 egymas utani bukas -
-      // de a feltetel szandekosan a VEGPONT-lefedettseget mondja ki, nem az
-      // idot: egyetlen uzemelteto kiesese soha ne latszodjon internetkimaradasnak.
-      // Egy failedCount-alapu kuszob ugyanezt ma szam szerint eltalalna, de nem
-      // ezt garantalna - ezert csak az index kot. A failedCount a naplozashoz es
-      // a soros kimenethez kell (csak a hibasorozat elso tagja kerul a naplóba).
-      if (testState.cycleIndex > RESET_TRIGGER_CYCLE) {
-
-        if (!uiFlags.resetPrinted) {
-          // Statikus IP mellett: ha a saját gateway-ünket sem érjük el, a hiba
-          // helyi, és a router újraindítása nem javíthatja. Egy esélyt azért
-          // adunk neki (hátha tényleg a router akadt meg) - a döntés a reset
-          // UTÁNI ellenőrzésnél születik meg.
-          if (gatewayUnreachable()) {
-            printUptime();
-            Serial.println("A sajat gateway sem elerheto - lehet, hogy rossz a statikus IP.");
-            Serial.println("Kap a router egy esélyt: ujrainditas, aztan ujra ellenorizzuk.");
-            logEvent(EV_GW_UNREACHABLE, 1);
-          }
-          printUptime();
-          Serial.println("Beginning Reset in FAILURE_STATE.");
-          while (!reset_device()) {
-            resetbutton();
-            wifiresetbutton();
-            feedWatchdog();
-            delay(BUTTON_POLL_MS);
-          }
-          printUptime();
-          Serial.println("Reset is done in FAILURE_STATE.");
-          Serial.println("RESET_DELAY start in FAILURE_STATE.");
-          timing.stateStart = millis();
-          uiFlags.resetPrinted = true;
-          resetDelayProbeLast = millis();  // az első próba egy intervallum múlva
-          break;                        // a RESET_DELAY a következő körökben telik
-        }
-
-        // A RESET_DELAY korai lezárása: ha a router hamarabb feláll, és az
-        // internet is megvan, nincs mire várni.
-        const bool earlyOnline = onlineProbeDue(resetDelayProbeLast, millis());
-
-        if (earlyOnline || millis() - timing.stateStart >= RESET_DELAY) {
-          printUptime();
-          if (earlyOnline) {
-            Serial.println("RESET_DELAY korai vege: halozat es internet OK.");
-          } else {
-            Serial.println("RESET_DELAY end in FAILURE_STATE.");
-          }
-
-          // Korai kilépéskor a kapcsolat MÁR él és mérve is van - a
-          // disconnect(true) épp azt bontaná le, amit az imént igazoltunk.
-          if (!earlyOnline) {
-            Serial.println("Reconnect WIFI in FAILURE_STATE.");
-            WiFi.disconnect(true);
-            blockingDelay(100);
-
-            // Egységesen 3 próba 30 mp szünetekkel. A reconnectWifi() minden
-            // próbája teljes initWiFi(), ami újra alkalmazza a statikus IP/DNS
-            // konfigot - a disconnect(true) ugyanis eldobja a netifet.
-            if (!reconnectWifi()) {
-              printUptime();
-              Serial.println("A router reset utan sem jott vissza a WiFi.");
-              digitalWrite(wifiledPin, LOW);
-              wifiGiveUp();
-              // A break a host tesztekben feher marad, de nem azert, mert az
-              // ag nem fut le (a WF11 meri): a wifiGiveUp() vagy elalszik,
-              // vagy AP modba visz, es a harness az elalvast kivetellel
-              // modellezi - a vezerles ide mar nem ter vissza.
-              break;
-            }
-
-            printUptime();
-            Serial.println("WIFI OK in FAILURE_STATE.");
-          }
-          digitalWrite(wifiledPin, HIGH);
-
-          // A router megkapta az esélyét. Ha a gateway még mindig nem
-          // válaszol, a statikus IP a rossz - a routert nincs értelme tovább
-          // áramtalanítani. Beállító módba megyünk, hogy javítani lehessen.
-          if (gatewayUnreachable()) {
-            printUptime();
-            Serial.println("A router ujrainditasa utan sem elerheto a gateway.");
-            Serial.println("Valoszinuleg rossz a statikus IP - AP beallito mod.");
-            logEvent(EV_GW_UNREACHABLE, 2);
-            logEvent(EV_AP_MODE, 4);
-            digitalWrite(wifiledPin, LOW);
-            startConfigPortal();
-            break;
-          }
-
-          testState.cycleIndex = 0;
-          testState.failedCount = 0;
-          uiFlags.resetPrinted = false;
-          currentState = TESTING_STATE;
-        }
-
-      } else {
-        if (currentMillis - timing.stateStart >= PROBE_DELAY) {
-          if (testState.cycleIndex < MAX_CYCLE_INDEX) {
-            testState.cycleIndex++;
-          }
-          currentState = TESTING_STATE;
-        }
-      }
-      break;
-
-    case SUCCESS_STATE:
-
-      if (!uiFlags.successPrinted) {
-        printUptime();
-        Serial.println("Successful Test");
-        Serial.println();
-        Serial.println("SUCCESS_DELAY delay start.");
-        uiFlags.successPrinted = true;
-      }
-
-      if (currentMillis - timing.stateStart >= SUCCESS_DELAY) {
-        printUptime();
-        Serial.println("SUCCESS_DELAY delay end.");
-        uiFlags.successPrinted = false;
-        timing.stateStart = currentMillis;
-        currentState = TESTING_STATE;
-      }
-      break;
-  }
-
-  // A várakozó állapotok (SUCCESS 1 perc, FAILURE 12 mp) alatt a loop()-nak
-  // nincs dolga. delay() nélkül 1. prioritáson pörögne 100% CPU-val; a
-  // vTaskDelay viszont ténylegesen felfüggeszti a taskot. Minden időzítés
-  // ezredmásodpercekben mér, tehát a 10 ms-os szemcsézettség nem számít.
-  delay(BUTTON_POLL_MS);
+  runMonitorStateMachine(currentMillis);
 }
