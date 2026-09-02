@@ -69,8 +69,12 @@ constexpr uint8_t wifiresetPin = D0;
 constexpr uint8_t resetPin = D1;
 
 // Timer variables
-// interval to wait for Wi-Fi connection (milliseconds)
-constexpr uint32_t interval = 20 * 1000;
+// Egy csatlakozasi proba felso hatarideje. A nev korabban egyszeruen
+// "interval" volt - a program legtobbet mondo nevu konstansai kozott
+// (RESET_DELAY, PROBE_DELAY, ONLINE_PROBE_INTERVAL_MS...) ez semmit nem mondott,
+// pedig a fajlban KULON KOMMENT figyelmeztet arra, hogy az "interval"-szeru
+// neveket konnyu osszekeverni.
+constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 20 * 1000;
 constexpr uint32_t SUCCESS_DELAY = 1 * 60 * 1000;
 // Szünet KÉT BUKOTT internetteszt között (az eszkaláció üteme). Ne keverd az
 // ONLINE_PROBE_INTERVAL_MS-sel: az a hosszú VÁRAKOZÁSOK korai lezárásának
@@ -228,6 +232,39 @@ constexpr uint8_t PROBE_PING_IP[4] = { 1, 1, 1, 1 };
 // mar 4-nel resetel, tehat a plafon a gyakorlatban nem is kot - de ez az a
 // szam, ameddig az indexnek egyaltalan ertelme van, es a leptetes ezt mondja ki.
 constexpr uint8_t MAX_CYCLE_INDEX = 4;
+
+// AZ OT TESZT-VEGPONT, INDEX SZERINT.
+//
+// MIERT TABLAZAT, ES NEM if-lanc? Ket okbol:
+//
+//  1. A 0-s index az if-lancban az ELSE agra esett, tehat a lista "elso" eleme
+//     a szerkezet VEGEN allt. A tablazat ugyanabban a sorrendben olvashato,
+//     mint amit a soros port es a /log oldal 1-alapon szamoz.
+//
+//  2. SEMMI nem kotote ossze a vegpontok SZAMAT a MAX_CYCLE_INDEX-szel. Ha
+//     valaki a plafont 5-re emelne, az if-lanc az 5-os indexnel CSENDBEN
+//     ujra a msftconnecttest-et probalta volna (az else ag) - vagyis egy
+//     uzemelteto ketszer szerepelt volna, es epp az a garancia veszett volna
+//     el, amiert ot kulonbozo vegpont van: "egyetlen uzemelteto kiesese soha
+//     ne latszodjon internetkimaradasnak". A lenti static_assert ezt mar
+//     FORDITASI IDOBEN megfogja.
+//
+// Az index ervenyessege szerkezetileg biztositott: a runFailureState() csak
+// MAX_CYCLE_INDEX-ig lepteti, a Wi-Fi-vesztes aga pedig RESET_TRIGGER_CYCLE+1
+// (= 4) erteket ad - mindketto a tablazaton belul marad.
+struct TestEndpoint {
+  const char* url;
+  const char* expect;   // ures = 204 (No Content) ellenorzes, lasd testInternetHTTP()
+};
+constexpr TestEndpoint TEST_ENDPOINTS[] = {
+  { "http://www.msftconnecttest.com/connecttest.txt",    "Microsoft Connect Test"   },
+  { "http://cp.cloudflare.com/generate_204",             ""                         },
+  { "http://detectportal.firefox.com/success.txt",       "success"                  },
+  { "http://nmcheck.gnome.org/check_network_status.txt", "NetworkManager is online" },
+  { "http://connectivitycheck.gstatic.com/generate_204", ""                         },
+};
+static_assert(sizeof(TEST_ENDPOINTS) / sizeof(TEST_ENDPOINTS[0]) == MAX_CYCLE_INDEX + 1,
+              "minden ciklus-indexhez PONTOSAN egy vegpont tartozzon");
 // A reset kuszobe: az index 3 UTAN, vagyis a 4-es indexu teszt (Google) bukasa
 // utan indul a router ujrainditas. Lasd a FAILURE_STATE-et.
 constexpr uint8_t RESET_TRIGGER_CYCLE = 3;
@@ -1171,7 +1208,7 @@ bool initWiFi() {
     wifiresetbutton();
     feedWatchdog();
     delay(BUTTON_POLL_MS);
-    if (millis() - startAttempt >= interval) {
+    if (millis() - startAttempt >= WIFI_CONNECT_TIMEOUT_MS) {
       printUptime();
       Serial.println("Failed to connect.");
       return false;
@@ -2123,19 +2160,8 @@ void runTestingState() {
   // nagy implementacio sem ICMP-vel validal (NetworkManager, Firefox,
   // Windows NCSI: mind HTTP). Ot kulonbozo uzemelteto, ket ellenorzesi mod.
   // Ures elvart valasz = 204-es ellenorzes, lasd testInternetHTTP().
-  bool testResult;
-  if (testState.cycleIndex == 1) {
-    testResult = testInternetHTTP("http://cp.cloudflare.com/generate_204", "");
-  } else if (testState.cycleIndex == 2) {
-    testResult = testInternetHTTP("http://detectportal.firefox.com/success.txt", "success");
-  } else if (testState.cycleIndex == 3) {
-    testResult = testInternetHTTP("http://nmcheck.gnome.org/check_network_status.txt",
-                                  "NetworkManager is online");
-  } else if (testState.cycleIndex == 4) {
-    testResult = testInternetHTTP("http://connectivitycheck.gstatic.com/generate_204", "");
-  } else {
-    testResult = testInternetHTTP("http://www.msftconnecttest.com/connecttest.txt", "Microsoft Connect Test");
-  }
+  const TestEndpoint& vegpont = TEST_ENDPOINTS[testState.cycleIndex];
+  const bool testResult = testInternetHTTP(vegpont.url, vegpont.expect);
 
   if (testResult) {
     testState.cycleIndex = 0;

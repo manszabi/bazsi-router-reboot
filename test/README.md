@@ -90,7 +90,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 
 ## Lefedett esetek
 
-**294 forgatókönyv, 1690 ellenőrzés. Sorlefedettség: 98,70%.**
+**295 forgatókönyv, 1695 ellenőrzés. Sorlefedettség: 98,65%.**
 
 ### A watchdog-etetés globális invariánsa
 

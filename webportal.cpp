@@ -134,7 +134,18 @@ static void printHtmlEscaped(AsyncResponseStream* r, const char* s) {
 // A JELSZÓT SOHA NEM töltjük elő: az az egyetlen titok ezen a lapon, és a
 // portál WPA2 kulcsa nyilvános, tehát a lap tartalma nem tekinthető védettnek.
 static void sendConfigForm(AsyncWebServerRequest* request) {
-  AsyncResponseStream* r = request->beginResponseStream("text/html", 1024);
+  // A KEZDO PUFFERMERET MERT ERTEK, nem becsles (AP8 forgatokonyv):
+  //   tipikus eset ("MyHomeNetwork" + ket valodi IP):     903 bajt
+  //   legrosszabb eset (32+15+15 karakter, mind escape-elve): 1238 bajt
+  // Az utobbi nem elmeleti: az SSID barmi lehet, es a printHtmlEscaped() egy
+  // idezojelbol HAT bajtot csinal (&quot;); a cimmezoket pedig egy serult
+  // /ip.txt is feltoltheti tetszoleges karakterekkel.
+  //
+  // A korabbi 1024 MINDKET esetnel szuk volt (a tipikusnal is csak 121 bajt
+  // tartalek), tehat a stream ujraallokalt volna - epp az async_tcp taskban,
+  // ahol a heap a legszukebb, es epp azt kerulnenk el a kezdomerettel.
+  // 1536 a mert maximum folott ~24% tartalekot ad.
+  AsyncResponseStream* r = request->beginResponseStream("text/html", 1536);
   r->print(FORM_HEAD);
 
   r->print(F("SSID <input name=\"ssid\" maxlength=\"32\" required value=\""));

@@ -7075,6 +7075,46 @@ static void scSYNC3() {
   CHECK(beginConfigWrite(), "es ujra megszerezheto");
 }
 
+
+static void scAP8() {
+  // AZ URLAP MERETE - a /log oldal LOG7-es meresenek parja.
+  //
+  // MIERT KELL? Az urlap ugyanugy egy AsyncResponseStream-be megy, ugyanolyan
+  // FIX kezdo pufferrel (1024 bajt) - de erre eddig NEM volt meres. A stream
+  // szukseg eseten no, tehat a tullepes nem hiba; a kezdomeret viszont epp
+  // azert van, hogy egyetlen foglalas legyen az async_tcp taskban, ahol a heap
+  // a legszukebb. Ha eszrevetlenul tullep, a cel csendben elvesz.
+  //
+  // A LEGROSSZABB ESET NEM ELMELETI. Az SSID barmi lehet (a POST kezelo 32
+  // karaktert enged), es a printHtmlEscaped() egy idezojelbol HAT bajtot csinal
+  // (&quot;). Az IP/gateway mezot a validalas ugyan IPv4-re szoritja, de a
+  // fajlbol beolvasott ertek nem megy at rajta - egy serult /ip.txt tetszoleges
+  // 15 karaktert adhat. Vagyis a felso korlat: 32+15+15 karakter, mind escape-elve.
+  coldBoot(false, "", "", "", "");
+  setup();
+  // A mentett ertekek kozvetlen felulirasa: ezt egy serult fajl is eloallithatja.
+  for (int i = 0; i < 32; i++) ssid[i] = '"';
+  ssid[32] = '\0';
+  for (int i = 0; i < 15; i++) { ipStr[i] = '"'; gatewayStr[i] = '"'; }
+  ipStr[15] = '\0'; gatewayStr[15] = '\0';
+
+  AsyncWebServerRequest req; g_handlers["/#1"](&req);
+  const size_t meret = req._body.size();
+  printf("     [info] az urlap legrosszabb esetben %u bajt (a puffer 1536)\n",
+         (unsigned)meret);
+  CHECK(req._code == 200, "az urlap kiszolgalodik");
+  CHECK(meret < 1536, "es belefer a stream 1536 bajtos kezdo pufferebe");
+  // A szokasos, valosagos eset legyen boven alatta - ez a kezdomeret indoklasa.
+  // A pufferek merete itt nem latszik (extern char[]), a bemasolt ertekek
+  // viszont bizonyithatoan belefernek: 13 < 33, 13 < 16, 11 < 16.
+  strcpy(ssid, "MyHomeNetwork");
+  strcpy(ipStr, "192.168.1.200");
+  strcpy(gatewayStr, "192.168.1.1");
+  AsyncWebServerRequest req2; g_handlers["/#1"](&req2);
+  printf("     [info] tipikus esetben %u bajt\n", (unsigned)req2._body.size());
+  CHECK(req2._body.size() < meret, "a tipikus eset kisebb a legrosszabbnal");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -7308,6 +7348,7 @@ static const Scenario kScenarios[] = {
   { "WF11: a router reset utan sem jon vissza a WiFi", scWF11 },
   { "AP5: aposztrof es tarsai az SSID-ben - HTML escape", scAP5 },
   { "AP7: mind a negy mezo egyformán turi a beillesztett szokozoket", scAP7 },
+  { "AP8: a beallito urlap befer a stream kezdo pufferebe", scAP8 },
   { "LOG7: a /log oldal a legrosszabb esetben is befer a pufferbe", scLOG7 },
   { "LOG8: firmware frissites utan a regi elrendezesu naplo ervenytelen", scLOG8 },
   { "LOG9: a wifireset a naplofajlt szandekosan NEM torli", scLOG9 },
