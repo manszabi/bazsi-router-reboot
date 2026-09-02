@@ -403,38 +403,56 @@ a watchdog-újraindulások számlálója és a 32 bejegyzéses diagnosztikai nap
 
 ```
 bazsi-router-reboot/
-├── bazsi_router_reboot.ino   # Fő Arduino sketch (a beállító weboldal is ebben van)
+├── bazsi_router_reboot.ino   # Fő sketch: a döntéshozatal (setup, loop, állapotgép)
+│
+├── limits_config.h           # a konfig mezők méretkorlátai (se állapot, se függvény)
+├── app_hooks.h               # amit a főmodul ad a moduloknak (szándékosan rövid)
+├── strutil.h/.cpp            # tiszta szöveg-segédek
+├── secret.h/.cpp             # a mentett jelszó összekeverése
+├── sync.h/.cpp               # a két task közti osztott állapot
+├── configstore.h/.cpp        # a négy mentett érték + LittleFS
+├── eventlog.h/.cpp           # diagnosztikai napló + valós idő (NTP)
+├── netprobe.h/.cpp           # HTTP végpont-tesztek és ICMP ping
+├── webportal.h/.cpp          # az AP beállító portál HTTP felülete
+│
 ├── partitions_custom.csv     # Egyedi partíciós tábla: OTA nélkül, 512 KiB LittleFS
+├── test/                     # host tesztkészlet (294 forgatókönyv)
 └── LICENSE                   # MIT License
 ```
 
-A Wi-Fi beállító weboldal a sketchbe van fordítva (`FORM_HEAD` / `FORM_TAIL`
+A Wi-Fi beállító weboldal a programba van fordítva (`FORM_HEAD` / `FORM_TAIL`
 konstansok + a `sendConfigForm()` generálja a mezőket), a flash `.rodata`
 szekciójában – nincs külön feltöltendő `data/` mappa. A LittleFS-re így csak a
 négy konfigurációs fájl és a mentett napló kerül (`/ssid.txt`, `/pass.txt`,
 `/ip.txt`, `/gateway.txt`, `/evlog.bin` – ez utóbbi ~400 bájt).
 
-### A sketch felépítése
+### A program felépítése
 
-Egyetlen fájl, ~3950 sor, **75 függvény**. A gerinc két üzemmód
-(`MODE_MONITOR` / `MODE_CONFIG` / `MODE_FATAL`) és három állapot
-(`TESTING` → `SUCCESS`, vagy `TESTING` → `FAILURE`); minden más ezt szolgálja
-ki. `MODE_MONITOR`-ból van út a másik kettőbe, **visszaút nincs**.
+**Nyolc fordítási egység**, ~4640 sor, **98 függvény**, 43%-a komment. A gerinc
+három üzemmód (`MODE_MONITOR` / `MODE_CONFIG` / `MODE_FATAL`) és három állapot
+(`TESTING` → `SUCCESS`, vagy `TESTING` → `FAILURE`). `MODE_MONITOR`-ból van út
+a másik kettőbe, **visszaút nincs**.
 
-| # | Réteg | Kulcsfüggvények |
+A modulok külön fordítási egységek, saját headerrel: **amit a header nem hirdet
+meg, azt a linker sem találja meg**. Fentről lefelé, minden modul csak a nála
+lentebb állóktól függ:
+
+| Modul | Mit birtokol | Mit exportál |
 |---|---|---|
-| 1 | Konfiguráció és állapot | *(csak adat: konstansok, `TestState`, `TimingState`, `UIFlags`, az RTC blokkok)* |
-| 2 | Napló és fájlkezelés | `logEvent()` · `encodeSecret()` / `decodeSecretInPlace()` · `readConfigValue()` / `writeConfigValue()` |
-| 3 | Valós idő, naplómentés, heap | `ensureNtp()` · `saveEventLog()` / `loadEventLogHeader()` · `checkHeap()` |
-| 4 | Watchdog és gombok | `initWatchdog()` · `feedWatchdog()` · `onResetButtonEdge()` / `onWifiResetButtonEdge()` |
-| 5 | Várakozások és zárak | `waitWithButtons()` · `onlineProbe()` · `beginConfigWrite()` / `lockConfigBeforeShutdown()` |
-| 6 | Wi-Fi, relé, alvás, újraindítás | `initWiFi()` · `reset_device()` · `enterDeepSleep()` · `resetbutton()` / `doWifiReset()` |
-| 7 | Internet-tesztek | `testInternetHTTP()` · `testInternetPing()` · `readChunked()` |
-| 8 | AP beállító portál | `startConfigPortal()` · `sendConfigForm()` · `printHtmlEscaped()` |
-| 9 | Belépési pontok | `setup()` · `loop()` · `handleFirstStart()` |
+| `webportal` | az AP portál HTTP felülete – ez a **biztonságkritikus** felület | **3 függvény** (a POST-kezelő, a `/log` oldal, az űrlap és a `server` mind belső) |
+| `netprobe` | HTTP és ICMP mérés – csak **mér**, nem dönt | `testInternetHTTP()`, `testInternetPing()` |
+| `eventlog` | a diagnosztikai napló és a valós idő | `logEvent()`, `saveEventLog()`, `ensureNtp()`, … |
+| `configstore` | a négy mentett érték, a fájljaik, a LittleFS | a négy puffer + az olvasó/író függvények |
+| `sync` | a két task közti osztott állapot | 7 függvény – a jelzők maguk **belsők** |
+| `secret` | a jelszó összekeverése | `encodeSecret()`, `decodeSecretInPlace()` |
+| `strutil` | `trimInPlace()` | 1 függvény |
 
-Sorszámokkal, teljes függvénylistával és a fizikai vs. logikai sorrend
-eltéréseivel: [MUKODES.md 16. fejezet](MUKODES.md).
+A főmodulban a **döntéshozatal** maradt: `setup()`, `loop()`, az állapotgép
+(`runTestingState()` / `runFailureState()` / `runSuccessState()`), a Wi-Fi, a
+relé, az alvások, a gombok, a watchdog és a heap-felügyelet.
+
+Teljes függvénylistával és a határhúzás indoklásával:
+[MUKODES.md 16. fejezet](MUKODES.md).
 
 ## 📦 Szükséges könyvtárak
 
@@ -459,7 +477,10 @@ eltéréseivel: [MUKODES.md 16. fejezet](MUKODES.md).
 1. Telepítsd az **ESP32 board support**-ot az Arduino IDE-ben
 2. Telepítsd a szükséges könyvtárakat (Library Manager vagy kézi telepítés)
 3. Válaszd ki a board-ot: **ESP32-C3** (pl. *XIAO_ESP32C3*)
-4. Nyisd meg a `bazsi_router_reboot.ino` fájlt
+4. Nyisd meg a `bazsi_router_reboot.ino` fájlt. A mellette lévő `.h` és `.cpp`
+   modulokat **ugyanabban a mappában** kell hagyni – az Arduino a sketch mappa
+   minden forrását lefordítja és hozzálinkeli (a szerkesztőben külön fülként
+   jelennek meg).
 5. Másold a `partitions_custom.csv`-t a sketch mappájába **`partitions.csv`**
    néven – a core a sketch melletti `partitions.csv`-t automatikusan használja.
    (Ha inkább gyári sémát választanál a `Tools` → `Partition Scheme` menüből,

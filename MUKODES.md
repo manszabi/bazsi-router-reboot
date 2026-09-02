@@ -1092,7 +1092,7 @@ elérhetetlen vagy a névfeloldás bukik, az a mi `loop()`-unkat nem érinti.
 > A mérés: az `NV11` végigjátssza a teljes eszkalációt (tesztek bukása → router
 > reset → mentés → alvás), majd egy áramszünet utáni `/log` oldalt is –
 > **végig óraszinkron nélkül**. Mellékesen az **egész tesztkészlet** így fut: a
-> `coldBoot()` `g_epochNow = 0`-t állít, tehát mind a 278 forgatókönyv a
+> `coldBoot()` `g_epochNow = 0`-t állít, tehát mind a 294 forgatókönyv a
 > „nincs óraszinkron" állapotot játssza.
 
 > A valós idő a **deep sleepet túléli**. Az `esp_timer` (és így a `millis()`)
@@ -1189,93 +1189,77 @@ arányosan romlik; a védelem hat sor, és nincs hátránya. (Mérve: `LOG4`.)
 
 ## 16. A forráskód szerkezete
 
-A program **egyetlen `.ino` fájl, ~3950 sor, 75 függvény**. Nagyjából a felét
-kommentek teszik ki – a legtöbb egy-egy döntés *indoklása*, nem a kód
-újramondása.
+A program **nyolc fordítási egység**: a `bazsi_router_reboot.ino` és hét modul
+a sketch mappájában. Összesen ~4643 sor, 98 függvény; **43%-a komment** – a
+legtöbb egy-egy döntés *indoklása*, nem a kód újramondása.
 
-### A gerinc: két üzemmód, három állapot
+> Miért nem egy fájl? Mert egy 4100 soros `.ino`-ban nincs fordító által
+> kikényszerített láthatóság: bármely függvény hozzáérhet bármely globálishoz.
+> Külön fordítási egységekben viszont amit a header nem hirdet meg, azt a
+> **linker sem találja meg**. Ez nem elmélet: a `netprobe` kiemelésekor a
+> fordító azonnal jelzett két függőséget (`trimInPlace`, `waitWithButtons`),
+> amit a kézi átvizsgálás nem vett észre.
 
-Minden más ezt szolgálja ki:
+### A gerinc: három üzemmód, három állapot
 
 | | |
 |---|---|
 | **`deviceMode`** | `MODE_MONITOR` (a routert figyeli) · `MODE_CONFIG` (AP portál) · `MODE_FATAL` (megállt, villog) |
 | **`currentState`** | `TESTING_STATE` → `SUCCESS_STATE` → vissza · vagy `TESTING_STATE` → `FAILURE_STATE` (router reset) |
 
-A `MODE_MONITOR`-ból van út a másik kettőbe, **visszaút nincs**. Erre a
-szerkezeti tényre több biztonsági érvelés is épül – például az, hogy a Wi-Fi
-konfigurációs puffereket nem kell zárral védeni (lásd a 13. fejezetet).
+A `MODE_MONITOR`-ból van út a másik kettőbe, **visszaút nincs**.
 
-### 1. Konfiguráció és állapot (`1–636`)
+### A modulok
 
-Nincs benne függvény, csak adat: pinek, időzítési konstansok, a három
-állapot-struct (`TestState`, `TimingState`, `UIFlags`), a három enum (`State`,
-`DeviceMode`, `ConfigStatus`), és az RTC memóriában élő blokkok:
-`EventCode` / `EventEntry`, `EvFileHeader`, valamint a `rtcEv*`, `rtcWdt*`,
-`rtcHeap*`, `rtcCarry*` változók.
+Fentről lefelé: minden modul csak a nála lentebb állóktól függ. A `configstore`
+és az `eventlog` közti egyetlen közös pont a fájlrendszer állapota.
 
-### 2. Napló és fájlkezelés (`639–998`)
+| Modul | Sor | Mit birtokol | Mit exportál |
+|---|---:|---|---|
+| **`limits_config.h`** | 16 | a konfig mezők méretkorlátai | 3 konstans, se állapot, se függvény |
+| **`strutil`** | 34 | `trimInPlace()` | 1 függvény |
+| **`secret`** | 123 | a jelszó összekeverése a flashben | `encodeSecret()`, `decodeSecretInPlace()` – a `secretSeed()`, `xorshift32()`, `hexVal()` **belső** |
+| **`sync`** | 252 | a két task közti osztott állapot | 7 függvény + `evLogMux` – a `savingConfig`, `restartPending`, `restartAt` **belső** |
+| **`configstore`** | 243 | a négy mentett érték, a fájljaik, a LittleFS | a négy puffer, `readConfigValue()`, `writeConfigValue()`, `clearConfigValue()`, `initLittleFS()`, `filesystemReady()` |
+| **`eventlog`** | 574 | a diagnosztikai napló **és** a valós idő (NTP) | `logEvent()`, `saveEventLog()`, `load*()`, `eventName()`, `formatEpoch()`, `ensureNtp()` – a `startNtp()`, `nowEpoch()` **belső** |
+| **`netprobe`** | 277 | HTTP végpont-tesztek és ICMP ping | `testInternetHTTP()`, `testInternetPing()` – a négy korlátozott olvasó **belső** |
+| **`webportal`** | 733 | az AP beállító portál HTTP felülete | **mindössze 3**: `startWebPortal()`, `stopWebPortal()`, `touchApDeadline()` |
+| **`app_hooks.h`** | 49 | amit a főmodul ad a moduloknak | `feedWatchdog()`, `resetbutton()`, `wifiresetbutton()`, `waitWithButtons()`, `printUptime()`, `diagCounters()` |
 
-| Csoport | Függvények |
-|---|---|
-| Napló | `logEvent()` · `resetReasonName()` · `eventName()` · `lastEventWas()` · `stuckCycleAlreadyLogged()` |
-| Jelszó-összekeverés | `secretSeed()` · `xorshift32()` · `encodeSecret()` · `hexVal()` · `decodeSecretInPlace()` |
-| Fájlok | `initLittleFS()` · `fileMatches()` · `readConfigValue()` · `writeConfigValue()` · `clearConfigValue()` |
-| Segédek | `isUsableIPv4()` · `trimInPlace()` · `enterFatal()` |
+> A `webportal` kapta a legszorosabb határt, mert ez a program
+> **biztonságkritikus felülete**: ezen megy be a Wi-Fi jelszó. A POST-kezelő,
+> a `/log` oldal, az űrlap, a `ConfigDraft` típus és maga a `server` objektum is
+> a modulon belül van – a `ConfigDraft` a headerbe be sem került.
+>
+> Az `app_hooks.h` szándékosan rövid, és ez maga a mérőeszköz: **ha nőni kezd,
+> az a rossz határhúzás első jele.** Egyszer már meg is történt – a
+> `filesystemReady()` átmenetileg ide került, majd oda, ahová való (`configstore`).
 
-### 3. Valós idő, naplómentés, heap (`1000–1450`)
+### A főmodul (`bazsi_router_reboot.ino`, 2337 sor, 49 függvény)
 
-| Csoport | Függvények |
-|---|---|
-| NTP | `nowEpoch()` · `startNtp()` · `ensureNtp()` · `formatEpoch()` |
-| Mentés / betöltés | `saveEventLog()` · `loadEventLogHeader()` · `loadEventLogEntries()` |
-| Heap | `initHeapState()` · `applyHeapCarry()` · `checkHeap()` |
-
-### 4. Watchdog és gombok (`1453–1610`)
-
-`checkWatchdogResets()` · `initWatchdog()` · `feedWatchdog()` · a két ISR
-(`onResetButtonEdge()`, `onWifiResetButtonEdge()`) · `armButtonLatches()` ·
-`pressedButtonNow()`
-
-### 5. Várakozások és zárak (`1612–1830`)
-
-`blockingDelay()` · `waitWithButtons()` · `waitWithButtonsUntilOnline()` ·
-`onlineProbe()` · `onlineProbeDue()` · `beginConfigWrite()` ·
-`lockConfigBeforeShutdown()`
-
-### 6. Wi-Fi, relé, alvás, újraindítás (`1980–2540`)
+Ami maradt: a **döntéshozatal**. A modulok mérnek és tárolnak, a főmodul
+eldönti, mi következik.
 
 | Csoport | Függvények |
 |---|---|
-| Wi-Fi | `initWiFi()` · `reconnectWifi()` · `wifiAuthFailed()` · `wifiGiveUp()` |
+| Belépési pontok | `setup()` · `loop()` |
+| A `loop()` ágai | `clearHealthyRunCounters()` · `handleFatalMode()` · `handleConfigMode()` · `runMonitorStateMachine()` |
+| Az állapotgép | `runTestingState()` · `runFailureState()` · `runSuccessState()` · `handleFirstStart()` |
+| Wi-Fi | `initWiFi()` · `reconnectWifi()` · `wifiAuthFailed()` · `wifiGiveUp()` · `gatewayUnreachable()` |
 | Relé | `reset_device()` · `routerResetAndRetry()` · `holdRelayForSleep()` |
 | A négy alvás | `enterDeepSleep()` ← `retrySleep()`, `internetFailSleep()`, `apSleep()`, `fatalSleep()`; külön úton `handleStuckButton()` |
-| Gombok, újraindítás | `resetbutton()` · `wifiresetbutton()` · `restartFromButton()` · `doWifiReset()` · `fatalHalt()` · `printUptime()` |
-
-### 7. Internet-tesztek (`2549–2795`)
-
-`testInternetHTTP()` · `testInternetPing()` · `gatewayUnreachable()` · az
-olvasók: `readByteBounded()`, `readBounded()`, `readChunked()`,
-`hexDigitAnyCase()`
-
-### 8. AP beállító portál (`1834–1880` + `2859–3395`)
-
-`startConfigPortal()` – ebben él a négy HTTP kezelő (`GET /`, `/ping`, `/log`,
-`POST /`) · `sendConfigForm()` · `printHtmlEscaped()` · `touchApDeadline()`
-
-### 9. Belépési pontok (`3399`, `3587`)
-
-`setup()` és `loop()`, plusz a `handleFirstStart()`.
+| Gombok | a két ISR (`onResetButtonEdge()`, `onWifiResetButtonEdge()`) · `armButtonLatches()` · `resetbutton()` · `wifiresetbutton()` · `pressedButtonNow()` · `doWifiReset()` |
+| Watchdog és heap | `initWatchdog()` · `checkWatchdogResets()` · `feedWatchdog()` · `checkHeap()` · `initHeapState()` · `applyHeapCarry()` |
+| Várakozások | `blockingDelay()` · `waitWithButtons()` · `waitWithButtonsUntilOnline()` · `onlineProbe()` · `onlineProbeDue()` |
+| Leállás | `lockConfigBeforeShutdown()` · `restartFromButton()` · `enterFatal()` · `fatalHalt()` |
+| Üzemmódváltás | `startConfigPortal()` – a naplómentés, a `deviceMode` és a LED-ek; a HTTP részt a `webportal` végzi |
 
 ### Amit érdemes tudni olvasás előtt
 
 > **A fizikai sorrend és a logikai csoportosítás nem mindenhol esik egybe.** A
-> `printHtmlEscaped()` és a `sendConfigForm()` a portálhoz tartozik, de a fájl
-> közepén, a zárak után áll – mert a `startConfigPortal()` előtt kell
-> definiálni őket. A `gatewayUnreachable()` logikailag a Wi-Fi-hez tartozik, de
-> a tesztek közé került, mert a `testInternetPing()`-re épül. A fájl elején álló
-> előre-deklarációs blokk (`~600–636`) épp ezért van: feloldja a körkörös
-> hivatkozásokat.
+> `gatewayUnreachable()` logikailag a Wi-Fi-hez tartozik, de a `testInternetPing()`
+> után áll, mert arra épül. A főmodul elején álló előre-deklarációs blokk épp
+> ezért van: feloldja a körkörös hivatkozásokat egy fordítási egységen belül.
 
 Négy visszatérő minta szövi át az egészet:
 
