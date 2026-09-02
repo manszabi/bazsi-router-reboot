@@ -38,10 +38,11 @@ bool fileMatches(fs::FS& fs, const char* path, const char* value, size_t len);
 extern bool fsReady;
 extern uint32_t rtcWdtMagic;
 extern uint32_t rtcWdtResets;
-extern volatile bool savingConfig;
+// A sync modul allapota SZANDEKOSAN nem elerheto kivulrol (static a
+// sync.cpp-ben). A tesztek ugyanazon a szerzodesen at dolgoznak, mint a
+// program - ez tobb, mint kenyszer: igy a tesztek a VISELKEDEST rogzitik,
+// nem az implementaciot.
 extern volatile uint32_t apDeadline;
-extern volatile bool restartPending;
-extern volatile uint32_t restartAt;
 extern uint32_t rtcRetryRounds;
 extern uint32_t rtcEvMagic;
 extern uint32_t rtcEvNext;
@@ -201,7 +202,7 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   // Egy valodi hidegindulas ezeket is nullazza (sima globalisok). Enelkul egy
   // korabbi mentes utan beallitott halasztott ujrainditas atszivarogna a
   // "reboot" utanra, es kesobb, a scenario kozepen inditana ujra az eszkozt.
-  restartPending = false; restartAt = 0; savingConfig = false;
+  clearRestartRequest(); endConfigWrite();
   // A sketch sima globalisai: egy valodi ujraindulas (a deep sleepbol ebredes
   // is) ezeket nullazza, mert nem RTC memoriaban vannak. Enelkul egy tobb
   // bootot vegigjatszo forgatokonyvben a resetEvents atszivarogna, es a
@@ -897,13 +898,13 @@ static void scWF4() {
   // Fájlírás közben SOHA nem alszik el (utolsó pillanatban beírt adatok)
   coldBoot(false, "", "", "", "");
   setup();
-  savingConfig = true;
+  (void)beginConfigWrite();
   bool slept = false;
   const uint32_t t0 = g_millis;
   try { while (g_millis - t0 < 8u*60*1000) loop(); }
   catch (DeepSleepSignal&) { slept = true; }
   CHECK(!slept, "mentés közben NEM aludt el, pedig letelt az 5 perc");
-  savingConfig = false;
+  endConfigWrite();
   try { loop(); } catch (DeepSleepSignal&) { slept = true; }
   CHECK(slept, "a mentés befejeztével viszont elalszik");
 }
@@ -1139,8 +1140,8 @@ static void scP1() {
   CHECK(g_fs["/pass.txt"].find("titkosjelszo") == std::string::npos,
         "de a fájlban NEM szerepel nyílt szöveggel");
   CHECK(g_fs["/ip.txt"].empty(), "üres IP -> DHCP");
-  CHECK(restartPending, "újraindítás beütemezve");
-  CHECK(!savingConfig, "a mentés jelző visszaállt");
+  CHECK(restartRequested(), "újraindítás beütemezve");
+  CHECK(!configWriteInProgress(), "a mentés jelző visszaállt");
 }
 
 static void scP2() {
@@ -1151,7 +1152,7 @@ static void scP2() {
   const char* longSsid = "012345678901234567890123456789012345";  // 36 karakter
   const int code = postConfig(longSsid, "jelszo", "", "", &body);
   CHECK(code == 500, "HTTP 500 - nem hazudik sikert");
-  CHECK(!restartPending, "NEM indul újra, az adatok nem vesznek el");
+  CHECK(!restartRequested(), "NEM indul újra, az adatok nem vesznek el");
   CHECK(body.find("SSID") != std::string::npos, "a válasz megnevezi az okot");
 }
 
@@ -1161,7 +1162,7 @@ static void scP3() {
   setup();
   const int code = postConfig(nullptr, "jelszo", "", "");
   CHECK(code == 500, "HTTP 500 hiányzó SSID esetén");
-  CHECK(!restartPending, "nem indul újra");
+  CHECK(!restartRequested(), "nem indul újra");
 }
 
 static void scP4() {
@@ -1173,7 +1174,7 @@ static void scP4() {
   std::string body;
   const int code = postConfig("MyNetwork", "jelszo", "nem-ip-cim", "", &body);
   CHECK(code == 500, "HTTP 500 rossz IP esetén");
-  CHECK(!restartPending, "nem indul újra");
+  CHECK(!restartRequested(), "nem indul újra");
   CHECK(body.find("IP") != std::string::npos, "a válasz megnevezi az okot");
   CHECK(!g_fs.count("/ssid.txt") && !g_fs.count("/pass.txt"),
         "az érvényes SSID/jelszó SEM íródott ki (két fázisú mentés)");
@@ -1187,7 +1188,7 @@ static void scP5() {
   g_fsWritable = false;
   const int code = postConfig("MyNetwork", "jelszo", "", "");
   CHECK(code == 500, "HTTP 500 írási hiba esetén");
-  CHECK(!restartPending, "nem indul újra");
+  CHECK(!restartRequested(), "nem indul újra");
   g_fsWritable = true;
 }
 
@@ -2034,14 +2035,14 @@ static void scP8() {
   int code = postConfig("Halozat", "jelszo123", "192.168.1.200", "", &body);
   CHECK(code == 500, "IP gateway nelkul -> 500, nem hamis siker");
   CHECK(body.find("gateway") != std::string::npos, "az indoklas megnevezi a gateway-t");
-  CHECK(!restartPending, "nem indul ujra a hianyos konfiggal");
+  CHECK(!restartRequested(), "nem indul ujra a hianyos konfiggal");
 
   code = postConfig("Halozat", "jelszo123", "", "192.168.1.1", &body);
   CHECK(code == 500, "gateway IP nelkul -> szinten 500");
 
   code = postConfig("Halozat", "jelszo123", "192.168.1.200", "192.168.1.1", &body);
   CHECK(code == 200, "mindketto megadva -> 200");
-  CHECK(restartPending, "es most mar ujraindul");
+  CHECK(restartRequested(), "es most mar ujraindul");
 }
 
 static void scP9() {
@@ -2282,7 +2283,7 @@ static void scIP2() {
   std::string body;
   int code = postConfig("Halozat", "jelszo123", "::1", "fe80::1", &body);
   CHECK(code == 500, "IPv6 cimparos -> 500, nem csendes DHCP");
-  CHECK(!restartPending, "nem indul ujra ervenytelen cimmel");
+  CHECK(!restartRequested(), "nem indul ujra ervenytelen cimmel");
 
   // A vegyes paros a rosszabb eset: IPv4 IP + IPv6 gateway eseten a config()
   // 0.0.0.0-s gateway-t ES 0.0.0.0-s elsodleges DNS-t allitana be.
@@ -2314,7 +2315,7 @@ static void scP10() {
   // elalvasnal.
   coldBoot(false, "", "", "", "");
   setup();
-  savingConfig = true;
+  (void)beginConfigWrite();
   g_pinRead[3] = LOW;                      // D1 = GPIO3, reset gomb
   bool restarted = false;
   try {
@@ -2322,7 +2323,7 @@ static void scP10() {
   } catch (RestartSignal&) { restarted = true; }
   CHECK(!restarted, "mentes kozben NEM indul ujra");
 
-  savingConfig = false;
+  endConfigWrite();
   try {
     // A mentes alatt a debounce sem indult el, tehat itt egy teljes 50 ms-os
     // lenyomas kell - nehany tized masodperc bosegesen eleg ra.
@@ -2337,7 +2338,7 @@ static void scP11() {
   coldBoot(false, "", "", "", "");
   setup();
   g_fs["/ssid.txt"] = "RegiHalozat";
-  savingConfig = true;
+  (void)beginConfigWrite();
   g_pinRead[2] = LOW;                      // D0 = GPIO2, wifireset gomb
   bool restarted = false;
   try {
@@ -2346,7 +2347,7 @@ static void scP11() {
   CHECK(!restarted, "mentes kozben NEM indul ujra");
   CHECK(g_fs["/ssid.txt"] == "RegiHalozat", "es nem is torolte a fajlokat");
 
-  savingConfig = false;
+  endConfigWrite();
   try {
     for (int i = 0; i < 20; i++) { wifiresetbutton(); delay(10); }
   } catch (RestartSignal&) { restarted = true; }
@@ -2376,7 +2377,7 @@ static void scP13() {
   std::string body;
   const int code = postConfig("     ", "jelszo123", "", "", &body);
   CHECK(code == 500, "csupa szokoz SSID -> 500");
-  CHECK(!restartPending, "nem indul ujra hasznalhatatlan SSID-vel");
+  CHECK(!restartRequested(), "nem indul ujra hasznalhatatlan SSID-vel");
 }
 
 
@@ -2429,7 +2430,7 @@ static void scP14() {
   coldBoot(false, "", "", "", "");
   setup();
   CHECK(postConfig("Halozat", "jelszo123", "", "") == 200, "mentes OK");
-  CHECK(restartPending, "ujrainditas beutemezve");
+  CHECK(restartRequested(), "ujrainditas beutemezve");
 
   bool early = false;
   try {
@@ -2585,7 +2586,7 @@ static void scP15() {
   const int code = postConfig("Halozat", longPass.c_str(), "", "", &body);
   CHECK(code == 500, "tul hosszu jelszo -> 500");
   CHECK(body.find("jelszo") != std::string::npos, "az indoklas a jelszot nevezi meg");
-  CHECK(!restartPending, "nem indul ujra");
+  CHECK(!restartRequested(), "nem indul ujra");
 }
 
 // --- Monitorozas: a kapcsolat visszajon -------------------------------------
@@ -2732,7 +2733,7 @@ static void scX9() {
   g_handlers["/#2"](&req);
   CHECK(g_fs["/ssid.txt"] == "EredetiHalozat", "a query parameter NEM irja at az SSID-t");
   CHECK(req._code == 500, "SSID nelkuli mentes -> 500");
-  CHECK(!restartPending, "es nem indit ujra");
+  CHECK(!restartRequested(), "es nem indit ujra");
 }
 
 // --- Egy napnal hosszabb uptime ---------------------------------------------
@@ -2789,7 +2790,7 @@ static void scFS8() {
   const int code = postConfig("Halozat", "jelszo123", "", "", &body);
   g_fsSilentWriteFail = false;
   CHECK(code == 500, "nema irashiba -> 500, nem hamis siker");
-  CHECK(!restartPending, "es nem indul ujra hasznalhatatlan konfiggal");
+  CHECK(!restartRequested(), "es nem indul ujra hasznalhatatlan konfiggal");
 }
 
 static void scFS9() {
@@ -3192,7 +3193,7 @@ static void scP16() {
 // --- Fajliras kozben SEM alvas, SEM ujrainditas ----------------------------
 static uint32_t g_saveEndsAt = 0;
 static void saveFinisher() {
-  if (g_saveEndsAt && g_millis >= g_saveEndsAt) { savingConfig = false; g_saveEndsAt = 0; }
+  if (g_saveEndsAt && g_millis >= g_saveEndsAt) { endConfigWrite(); g_saveEndsAt = 0; }
 }
 
 static void scWR1() {
@@ -3202,11 +3203,11 @@ static void scWR1() {
   coldBoot(false, "", "", "", "");
   setup();
   CHECK(postConfig("Halozat", "jelszo123", "", "") == 200, "elso mentes OK");
-  CHECK(restartPending, "ujrainditas beutemezve");
+  CHECK(restartRequested(), "ujrainditas beutemezve");
 
   // Masodik mentes indul. FONTOS: a turelmi idon (2 mp) TUL fejezodjon be,
   // kulonben a varakozo ag el sem indulna - a restart check addig nem fut.
-  savingConfig = true;
+  (void)beginConfigWrite();
   g_saveEndsAt = g_millis + 2500;
   g_onDelay = saveFinisher;
 
@@ -3221,9 +3222,9 @@ static void scWR1() {
   // A jelzo itt SZANDEKOSAN true: a leallasi ut nem csak megvarta az irast,
   // hanem meg is szerezte a zarat, hogy a varakozas vege es az ESP.restart()
   // kozotti ablakban se indulhasson ujabb mentes. (Lasd SH1.) Ez a teszt
-  // korabban a "!savingConfig"-ra fogadott - vagyis az implementaciora, nem a
+  // korabban a "!configWriteInProgress()"-ra fogadott - vagyis az implementaciora, nem a
   // tulajdonsagra; az igazi allitas a fenti idozites.
-  CHECK(savingConfig, "es a zar most MAR a mienk - uj mentes nem indulhat");
+  CHECK(configWriteInProgress(), "es a zar most MAR a mienk - uj mentes nem indulhat");
   CHECK(serialHas("Fajliras folyik"), "jelzi is, hogy var");
   CHECK(serialHas("A fajliras befejezodott"), "es hogy kesz");
 }
@@ -3233,7 +3234,7 @@ static void scWR2() {
   coldBoot(false, "", "", "", "");
   setup();
   apDeadline = g_millis;          // a hatarido MOST jart le
-  savingConfig = true;
+  (void)beginConfigWrite();
   g_saveEndsAt = g_millis + 800;
   g_onDelay = saveFinisher;
 
@@ -3245,7 +3246,7 @@ static void scWR2() {
 
   CHECK(slept, "vegul elalszik");
   CHECK(g_millis - t0 >= 800, "de csak a fajliras utan");
-  CHECK(savingConfig, "es a zar az elalvasig a mienk marad (lasd SH1)");
+  CHECK(configWriteInProgress(), "es a zar az elalvasig a mienk marad (lasd SH1)");
 }
 
 static void scWR3() {
@@ -3254,7 +3255,7 @@ static void scWR3() {
   coldBoot(false, "", "", "", "");
   setup();
   postConfig("Halozat", "jelszo123", "", "");
-  savingConfig = true;            // szandekosan sosem tisztul
+  (void)beginConfigWrite();            // szandekosan sosem tisztul
   bool restarted = false;
   const uint32_t t0 = g_millis;
   try { for (int i = 0; i < 5000; i++) loop(); }
@@ -3263,7 +3264,7 @@ static void scWR3() {
   CHECK(g_millis - t0 >= 5000, "de csak az 5 mp-es hatarido utan");
   CHECK(g_millis - t0 < 8000, "es nem var a vegtelensegig");
   CHECK(serialHas("sem fejezodott be"), "figyelmeztet a beragadt jelzore");
-  savingConfig = false;
+  endConfigWrite();
 }
 
 
@@ -3538,17 +3539,17 @@ static void scP18() {
 }
 
 static void scP19() {
-  // A konfigfájloknak egy írója lehet: ha a zár (savingConfig) másnál van -
+  // A konfigfájloknak egy írója lehet: ha a zár (configWriteInProgress()) másnál van -
   // épp a wifireset gomb töröl -, a webes mentés 503-mal hátrál, fájlt nem ír.
   coldBoot(false, "", "", "", "");
   setup();
-  savingConfig = true;                     // a másik író épp dolgozik
+  (void)beginConfigWrite();                     // a másik író épp dolgozik
   const int code = postConfig("MyNetwork", "jelszo", "", "");
   CHECK(code == 503, "zárolt konfignál 503, nem néma felülírás");
   CHECK(!g_fs.count("/ssid.txt"), "fájl nem íródott");
-  CHECK(!restartPending, "újraindítás sincs beütemezve");
-  CHECK(savingConfig, "a más által tartott zárat nem engedte el");
-  savingConfig = false;
+  CHECK(!restartRequested(), "újraindítás sincs beütemezve");
+  CHECK(configWriteInProgress(), "a más által tartott zárat nem engedte el");
+  endConfigWrite();
   const int code2 = postConfig("MyNetwork", "jelszo", "", "");
   CHECK(code2 == 200, "a zár felszabadulása után a mentés már lefut");
 }
@@ -3866,7 +3867,7 @@ static void scAP4() {
   coldBoot(false, "", "", "", "");
   setup();
   CHECK(postConfig("Halozat", "jelszo123", "192.168.1.200", "192.168.1.1") == 200, "elso mentes");
-  restartPending = false;
+  clearRestartRequest();
 
   // A bongeszo azt kuldi vissza, amit a lapon LAT - ezt olvassuk ki.
   AsyncWebServerRequest g; g_handlers["/#1"](&g);
@@ -4354,7 +4355,7 @@ static void scNV13() {
   CHECK(!saveEventLog("masodik, valtozas nelkul"),
         "valtozas nelkul a mentes kimarad");
   CHECK(rtcSavedEvNext == mentettPozicio, "a jelzo sem mozdul");
-  CHECK(!savingConfig, "es a zarat sem szerezte meg feleslegesen");
+  CHECK(!configWriteInProgress(), "es a zarat sem szerezte meg feleslegesen");
 
   // Egy uj esemeny utan viszont igen.
   logEvent((EventCode)2, 77);
@@ -4453,7 +4454,7 @@ static void scAP7() {
   CHECK(g_fs["/gateway.txt"] == "192.168.1.1", "es a gateway is");
 
   // A tulmeretes ertek viszont TOVABBRA IS hiba - a vagas nem menti meg.
-  restartPending = false; savingConfig = false;
+  clearRestartRequest(); endConfigWrite();
   std::string ssid33(33, 'C');
   CHECK(postConfig(ssid33.c_str(), "jelszo123", "", "") == 500,
         "33 karakteres SSID viszont tovabbra is hiba");
@@ -4469,7 +4470,7 @@ static void scAP5() {
   setup();
   CHECK(postConfig("O'Brien & <Wifi> \"haz\"", "jelszo123", "", "") == 200,
         "mentes kulonleges karakterekkel");
-  restartPending = false;
+  clearRestartRequest();
 
   AsyncWebServerRequest req; g_handlers["/#1"](&req);
   const std::string& b = req._body;
@@ -4541,7 +4542,7 @@ static void scAP6() {
   const int kod = postConfig("Halozat", "jelszo123", "", "");
   CHECK(kod == 500, "csatolatlan fajlrendszernel 500-at ad");
   CHECK(g_fs.find("/ssid.txt") == g_fs.end(), "es tenyleg semmit nem irt ki");
-  CHECK(!restartPending, "ujraindulast sem utemez be");
+  CHECK(!restartRequested(), "ujraindulast sem utemez be");
 }
 
 static void scWF11() {
@@ -4598,22 +4599,22 @@ static void scNV3() {
   monitorUzembe();
   g_fs.erase("/evlog.bin");
 
-  savingConfig = true;                    // valaki mas eppen ir
+  (void)beginConfigWrite();                    // valaki mas eppen ir
   const bool ok = saveEventLog("teszt");
   CHECK(!ok, "foglalt zarnal a mentes kimarad");
   CHECK(g_fs.count("/evlog.bin") == 0, "es tenyleg nem is irt semmit");
-  CHECK(savingConfig, "a mas altal tartott zarat nem engedte el");
+  CHECK(configWriteInProgress(), "a mas altal tartott zarat nem engedte el");
   CHECK(serialHas("kimarad"), "es meg is mondja, miert");
 
-  savingConfig = false;
+  endConfigWrite();
   const bool ok2 = saveEventLog("teszt");
   CHECK(ok2, "szabad zarnal viszont lefut");
-  CHECK(!savingConfig, "es a mentes UTAN feloldja a zarat");
+  CHECK(!configWriteInProgress(), "es a mentes UTAN feloldja a zarat");
 }
 
 static void scNV4() {
   // NINCS KOZBEN ALVAS, UJRAINDULAS VAGY MASIK IRAS. Ezt nem kulon kod
-  // biztositja, hanem maga a zar: amig a savingConfig a miénk, a leallasi ut
+  // biztositja, hanem maga a zar: amig a configWriteInProgress() a miénk, a leallasi ut
   // megvarja (lockConfigBeforeShutdown), a gombok kimaradnak, es masik iras
   // sem indulhat. A meres ezt a KOVETKEZMENYT rogziti.
   coldBoot(true, "TestNet", "pw", "", "");
@@ -4621,7 +4622,7 @@ static void scNV4() {
   monitorUzembe();
 
   // A mentes kozben (a zar a mienk) egy gombnyomas ne inditson ujra.
-  savingConfig = true;
+  (void)beginConfigWrite();
   g_pinRead[PIN_RESETBTN] = LOW;
   bool restarted = false;
   try {
@@ -4632,7 +4633,7 @@ static void scNV4() {
 
   // ...es egy webes mentes sem tud irast inditani.
   CHECK(!beginConfigWrite(), "es masik fajliras sem indulhat");
-  savingConfig = false;
+  endConfigWrite();
 }
 
 static void scNV5() {
@@ -5028,7 +5029,7 @@ static void scHP5() {
     rtcHeapMagic = 0;
     setup();
     monitorUzembe();
-    savingConfig = true;
+    (void)beginConfigWrite();
     g_freeHeap = 5000; g_maxAllocHeap = 4000;
     bool restarted = false;
     int guard = 0;
@@ -5039,7 +5040,7 @@ static void scHP5() {
       }
     } catch (RestartSignal&) { restarted = true; }
     CHECK(!restarted, "fajliras kozben sem indit ujra");
-    savingConfig = false;
+    endConfigWrite();
   }
 }
 
@@ -5220,7 +5221,7 @@ static void scLOG9() {
   setup();                                 // AP mod -> a naplo kiment
   CHECK(g_fs.count("/evlog.bin") == 1, "van mentett naplo");
   CHECK(postConfig("Halozat", "jelszo123", "", "") == 200, "mentettunk konfigot");
-  restartPending = false; savingConfig = false;
+  clearRestartRequest(); endConfigWrite();
 
   bool restarted = false;
   try { doWifiReset(); } catch (RestartSignal&) { restarted = true; }
@@ -5545,8 +5546,8 @@ static void scCC1() {
       loop();
       if (guard % 5000 == 0) {
         postConfig("Halozat", "jelszo123", "192.168.1.200", "192.168.1.1");
-        restartPending = false;            // ne induljon ujra a meres kozben
-        savingConfig = false;
+        clearRestartRequest();             // ne induljon ujra a meres kozben
+        endConfigWrite();
       }
     }
   } catch (DeepSleepSignal&) {} catch (RestartSignal&) {}
@@ -5604,14 +5605,14 @@ static void scCC3() {
   coldBoot(false, "", "", "", "");
   setup();
   CHECK(postConfig("ElsoHalozat", "jelszo123", "", "") == 200, "elso mentes");
-  restartPending = false;
+  clearRestartRequest();
 
   AsyncWebServerRequest r1; g_handlers["/#1"](&r1);
   CHECK(r1._body.find("value=\"ElsoHalozat\"") != std::string::npos,
         "a GET urlap a TELJES, epp ervenyes SSID-t mutatja");
 
   CHECK(postConfig("MasodikHalozat", "masikjelszo", "", "") == 200, "masodik mentes");
-  restartPending = false;
+  clearRestartRequest();
   AsyncWebServerRequest r2; g_handlers["/#1"](&r2);
   CHECK(r2._body.find("value=\"MasodikHalozat\"") != std::string::npos,
         "a kovetkezo GET mar a TELJES uj erteket - nincs felig atirt allapot");
@@ -5958,9 +5959,9 @@ static void scSH1() {
   CHECK(deviceMode == (DeviceMode)1, "AP modban vagyunk, a portal fut");
 
   // 1) A zar szabad -> a leallasi ut megszerzi.
-  savingConfig = false;
+  endConfigWrite();
   lockConfigBeforeShutdown();
-  CHECK(savingConfig, "a leallasi ut MEG IS SZEREZTE a zarat, nem csak megvarta");
+  CHECK(configWriteInProgress(), "a leallasi ut MEG IS SZEREZTE a zarat, nem csak megvarta");
   CHECK(!beginConfigWrite(), "igy egy beerkezo mentes mar nem tud irast inditani");
 
   // 2) Es a POST kezelo ilyenkor tiszta 503-at ad - nem csonka fajlt.
@@ -5970,7 +5971,7 @@ static void scSH1() {
 
   // 3) A hataridos kilepes megmarad: ha a jelzo BERAGAD, az eszkoz nem fagyhat
   //    le miatta - 5 mp utan a zar nelkul is tovabblep. (A regi viselkedes.)
-  savingConfig = true;
+  (void)beginConfigWrite();
   const uint32_t t0 = g_millis;
   lockConfigBeforeShutdown();
   const uint32_t dt = g_millis - t0;
@@ -6186,7 +6187,7 @@ static void scAP1() {
         "elso mentes statikus IP-vel");
   CHECK(g_fs["/ip.txt"] == "192.168.1.200", "az IP elmentve");
   CHECK(g_fs["/gateway.txt"] == "192.168.1.1", "a gateway elmentve");
-  restartPending = false;
+  clearRestartRequest();
 
   // Most a felhasznalo CSAK a jelszot irja at. A bongeszo mind a negy mezot
   // elkuldi - a cimmezoket uresen, mert az urlap nem mutatta a mentett erteket.
@@ -6248,8 +6249,8 @@ static void scFS13() {
   g_fsCapacity = 12;
   const int kod = postConfig("Halozat", "hosszabbJelszo", "", "");
   CHECK(kod == 500, "irasi hibanal 500-as valasz");
-  CHECK(!savingConfig, "a ZAR felszabadult (a mentes nem ragadt be)");
-  CHECK(!restartPending, "es NINCS ujrainditas utemezve");
+  CHECK(!configWriteInProgress(), "a ZAR felszabadult (a mentes nem ragadt be)");
+  CHECK(!restartRequested(), "es NINCS ujrainditas utemezve");
   // A gomboknak tovabbra is hatniuk kell.
   g_pinRead[3] = LOW;
   bool restarted = false;
@@ -6274,7 +6275,7 @@ static void scFS14() {
   CHECK(postConfig("RegiHalozat", "regiJelszo", "", "") == 200, "elso mentes OK");
   const std::string regiPass = g_fs["/pass.txt"];
   CHECK(!regiPass.empty(), "a regi jelszo a fajlban van");
-  restartPending = false;
+  clearRestartRequest();
 
   // Most a fajlrendszer megtelik: az SSID meg kifer, a jelszo mar nem.
   g_fsCapacity = g_fs["/ssid.txt"].size() + 4;
@@ -6346,12 +6347,12 @@ static void scLAT4() {
   setup();
   gombNyomas(3, 200);
   CHECK(btnResetLatched, "reteszelve");
-  savingConfig = true;                         // epp ir az async task
+  (void)beginConfigWrite();                         // epp ir az async task
   bool restarted = false;
   try { resetbutton(); } catch (RestartSignal&) { restarted = true; }
   CHECK(!restarted, "mentes alatt NEM indit ujra");
   CHECK(btnResetLatched, "a jelzo MEGMARADT - a nyomas nem veszett el");
-  savingConfig = false;                        // a mentes befejezodott
+  endConfigWrite();                        // a mentes befejezodott
   try { resetbutton(); } catch (RestartSignal&) { restarted = true; }
   CHECK(restarted, "a mentes utan viszont lefut");
 }
@@ -6379,20 +6380,20 @@ static void scLAT6() {
   // NYOM NELKUL elveszett, mert a pollozott ag nem tudja potolni.
   //
   // A helyes viselkedes: a jelzo maradjon meg, amig tenylegesen ujra nem
-  // indulunk. Itt kozvetlenul a helper-t hivjuk, hogy a hivo savingConfig
+  // indulunk. Itt kozvetlenul a helper-t hivjuk, hogy a hivo configWriteInProgress()
   // kapujat megkeruljuk, es pontosan a szuk versenyhelyzetet modellezzuk.
   coldBoot(true, "TestNet", "pw", "", "");
   setup();
   gombNyomas(3, 200);
   CHECK(btnResetLatched, "reteszelve");
 
-  savingConfig = true;                // a zar mar valakie
+  (void)beginConfigWrite();                // a zar mar valakie
   bool restarted = false;
   try { restartFromButton("teszt"); } catch (RestartSignal&) { restarted = true; }
   CHECK(!restarted, "foglalt zarnal nem indul ujra");
   CHECK(btnResetLatched, "es a RETESZ MEGMARAD - a nyomas nem veszett el");
 
-  savingConfig = false;               // a zar felszabadult
+  endConfigWrite();               // a zar felszabadult
   try { resetbutton(); } catch (RestartSignal&) { restarted = true; }
   CHECK(restarted, "a felszabadulas utan a reteszelt nyomas lefut");
 }
@@ -6416,20 +6417,20 @@ static void scLAT7() {
 
 static void scBTN4() {
   // A reset gomb ujrainditasa is ATOMIKUSAN szerzi meg a konfigzarat, nem
-  // csak a gyors savingConfig-ellenorzest vegzi. Enelkul az async_tcp task
+  // csak a gyors configWriteInProgress()-ellenorzest vegzi. Enelkul az async_tcp task
   // epp a ket println() + Serial.flush() alatt inditott mentese felbevagodna,
   // es csonka konfiguraciot hagyna a flashben. (A wifiresetbutton() eddig is
   // igy csinalta - a resetbutton() nem, ez volt az inkonzisztencia.)
   coldBoot(false, "", "", "", "");
   setup();
-  savingConfig = false;
+  endConfigWrite();
   g_pinRead[3] = LOW;                 // reset gomb lenyomva
   resetbutton();                      // elso mintavetel: csak megjegyzi
   g_millis += 100;                    // a debounce letelik
   bool restarted = false;
   try { resetbutton(); } catch (RestartSignal&) { restarted = true; }
   CHECK(restarted, "az ujrainditas megtortent");
-  CHECK(savingConfig,
+  CHECK(configWriteInProgress(),
         "es kozben a zar a miénk volt - mentes nem indulhatott bele");
 
   // A masik irany: ha MAR fut egy mentes, a gomb NEM indit ujra.
@@ -6438,7 +6439,7 @@ static void scBTN4() {
   g_pinRead[3] = LOW;
   resetbutton();
   g_millis += 100;
-  savingConfig = true;                // az async task epp ir
+  (void)beginConfigWrite();                // az async task epp ir
   bool restarted2 = false;
   try { resetbutton(); } catch (RestartSignal&) { restarted2 = true; }
   CHECK(!restarted2, "folyamatban levo mentes alatt NEM indit ujra");
@@ -6626,7 +6627,7 @@ static void scLED6() {
   coldBoot(false, "", "", "", "");
   setup();
   CHECK(postConfig("Halozat", "jelszo123", "", "") == 200, "mentes OK");
-  CHECK(restartPending, "ujrainditas beutemezve");
+  CHECK(restartRequested(), "ujrainditas beutemezve");
   int valtas = 0, last = g_pinState[PIN_WIFILED];
   const uint32_t t0 = g_millis;
   try {
@@ -6911,7 +6912,7 @@ static void scEVT1() {
 // ---------------------------------------------------------------------------
 // SYNC: a ket task kozotti osztott allapot.
 //
-// MIT MER ES MIT NEM. A restartAt + restartPending par valodi versenyhelyzete
+// MIT MER ES MIT NEM. A hatarido + jelzo par valodi versenyhelyzete
 // KET MAGOT igenyelne; a host harness egyszalu, tehat a versenyt magat nem
 // tudja eloallitani - es ezt oszinten ki kell mondani, mert egy "reprodukaltuk
 // a race-t" allitas itt hamis lenne. Amit ez a harom forgatokonyv mer, az a
@@ -6935,8 +6936,11 @@ static void scSYNC1() {
   CHECK(g_criticalEnters == 1,
         "a requestRestart() a part EGYETLEN kritikus szakaszban irja");
   CHECK(g_criticalMaxDepth == 1, "es a szakasz nem agyazodik egymasba");
-  CHECK(restartPending, "a keres bejegyzodott");
-  CHECK(restartAt == 102000u, "a hatarido a turelmi idovel kesobb");
+  CHECK(restartRequested(), "a keres bejegyzodott");
+  // A hataridot mar nem olvassuk kozvetlenul (a sync modulon belul van):
+  // a szerzodes szerint kerdezzuk vissza, ami tobbet is mond nala.
+  CHECK(!restartRequestDue(101999), "1 ms-mal a turelmi ido elott meg nem esedekes");
+  CHECK(restartRequestDue(102000), "pontosan a turelmi ido vegen esedekes");
 
   // Olvasas: szinten egyetlen szakasz.
   g_criticalEnters = 0;
@@ -7283,7 +7287,7 @@ static const Scenario kScenarios[] = {
   { "BNC3: folyamatosan recsego (kopott) gomb nem indit ujra", scBNC3 },
   { "BNC4: a beragadt-gomb ellenorzes pattogasturo", scBNC4 },
   { "EVT1: a /log TEST FAIL paramétere is 1-alapú", scEVT1 },
-  { "SYNC1: a restartAt+restartPending par EGY kritikus szakaszban", scSYNC1 },
+  { "SYNC1: a hatarido+jelzo par EGY kritikus szakaszban", scSYNC1 },
   { "SYNC2: az ujraindulasi hatarido szemantikaja", scSYNC2 },
   { "SYNC3: a konfigzar megszerzese es feloldasa szimmetrikus", scSYNC3 },
 };

@@ -93,6 +93,13 @@ jobs:
       - name: Egyedi particios tabla bemasolasa
         run: cp partitions_custom.csv partitions.csv
 
+      # A sketch mappajaban levo .cpp modulokat az Arduino KULON forditasi
+      # egysegkent forditja es linkeli - ugyanugy, ahogy a host build teszi a
+      # test/Makefile MODULES listaja alapjan. Uj modulnal MINDKET helyen fel
+      # kell venni (a host build a hianyzo szimbolumot azonnal jelzi).
+      - name: A modulok listaja
+        run: ls -1 *.cpp *.h
+
       - name: Forditas
         run: |
           arduino-cli compile \

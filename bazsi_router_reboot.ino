@@ -21,6 +21,15 @@
 // ez a paros tartja meg alvas alatt (driver/gpio.h, a gpio_hold_en 3. megj.).
 #include "driver/gpio.h"
 
+// A sajat modulok. Amit ezek a headerek nem hirdetnek meg, az a modulokon
+// kivulrol nem elerheto - ezt mar a fordito kenyszeriti ki, nem a fegyelem.
+#include "limits_config.h"
+#include "sync.h"
+#include "strutil.h"
+#include "secret.h"
+#include "app_hooks.h"
+#include "netprobe.h"
+
 // Create AsyncWebServer object on port 80
 AsyncWebServer server(80);
 
@@ -70,11 +79,6 @@ const char AP_PASSWORD[] = "12345678";
 static_assert(sizeof(AP_PASSWORD) - 1 >= 8, "AP jelszo: legalabb 8 karakter (WPA2)");
 static_assert(sizeof(AP_PASSWORD) - 1 <= 63, "AP jelszo: legfeljebb 63 karakter (WPA2)");
 
-// A HTML űrlapról érkező értékek. Fix méretű bufferek: nincs heap-töredezettség,
-// és a szabvány szerinti maximumok egyben validációt is jelentenek.
-constexpr size_t SSID_MAX_LEN  = 32;  // IEEE 802.11 SSID
-constexpr size_t PASS_MAX_LEN  = 63;  // WPA2-PSK passphrase
-constexpr size_t IPSTR_MAX_LEN = 15;  // "255.255.255.255"
 
 char ssid[SSID_MAX_LEN + 1]        = { 0 };
 char pass[PASS_MAX_LEN + 1]        = { 0 };
@@ -294,19 +298,8 @@ constexpr uint32_t ONLINE_PROBE_INTERVAL_MS = 60 * 1000;
 // jön létre.
 constexpr uint8_t PROBE_PING_IP[4] = { 1, 1, 1, 1 };
 
-// Teszt paraméterek
-constexpr uint8_t PING_ATTEMPTS = 4;
-constexpr uint8_t PING_MIN_SUCCESS = 2;
-constexpr uint32_t PING_GAP_MS = 1000;
-constexpr size_t HTTP_MAX_PAYLOAD = 96;  // a várt válaszok < 32 bájt
-constexpr uint32_t HTTP_CONNECT_TIMEOUT_MS = 5000;
-constexpr uint32_t HTTP_RESPONSE_TIMEOUT_MS = 10000;
-constexpr uint32_t HTTP_READ_TIMEOUT_MS = 1500;
-// Chunked valasznal hany darabot vagyunk hajlandok vegigolvasni. Minden nem
-// lezaro darab legalabb 1 bajtot ad, es a puffer hataran ugyis megallunk, tehat
-// ennyi kort elmeletileg sem lehet tullepni - ez csak egy vegso kapaszkodo,
-// nehogy egy szabalytalan keretezes vegtelen ciklusba vigyen.
-constexpr uint16_t HTTP_MAX_CHUNKS = HTTP_MAX_PAYLOAD + 2;
+// A teszt parameterek (PING_*, HTTP_*) a netprobe.h-ban allnak, a
+// mereseikkel egy helyen.
 // A legmagasabb letezo ciklus index: ot vegpont van, 0..4. A FAILURE_STATE
 // mar 4-nel resetel, tehat a plafon a gyakorlatban nem is kot - de ez az a
 // szam, ameddig az indexnek egyaltalan ertelme van, es a leptetes ezt mondja ki.
@@ -564,29 +557,8 @@ RTC_NOINIT_ATTR uint8_t  rtcCarryResetEvents;  // atvitt resetEvents (CARRY_NONE
 // kapna eselyt a konfiguracio javitasara. Ezert ezt is atvisszuk.
 RTC_NOINIT_ATTR uint32_t rtcCarryRetryRounds;
 
-// A KET TASK KOZOTT OSZTOTT ALLAPOT. Ezt a negy valtozot a loop task es az
-// AsyncTCP "async_tcp" taskja is latja.
-//
-// FONTOS: az also harmat (restartPending, restartAt, savingConfig) NE ird es NE
-// olvasd kozvetlenul - hasznald a beginConfigWrite() alatti fuggvenyeket
-// (requestRestart, restartRequestDue, restartRequested, clearRestartRequest,
-// beginConfigWrite, endConfigWrite, configWriteInProgress). Az indoklas ott
-// all, reszletesen; roviden: a restartPending es a restartAt EGYUTT hordoz egy
-// invarianst, tehat egyutt is kell irni es olvasni oket.
-//
-// Az apDeadline a kivetel: onallo jelentesu egyetlen szo, nincs masikkal kozos
-// invariansa, ezert ott a volatile eleg.
-
-// Az aszinkron webszerver callbackjéből nem szabad blokkolni/újraindítani,
-// ezért csak jelzünk, az újraindítást a loop() végzi el.
-volatile bool restartPending = false;
-volatile uint32_t restartAt = 0;
-
-// AP beállító mód: mikor aludjon el, ha nem érkezik mentés. Minden HTTP kérés
-// kitolja. A savingConfig azt jelzi, hogy épp fájlírás folyik - ilyenkor
-// semmiképp nem alszunk el.
-volatile uint32_t apDeadline = 0;
-volatile bool savingConfig = false;
+// A ket task kozott osztott allapot (restartPending, restartAt, apDeadline,
+// savingConfig) es az elereset vegzo fuggvenyek a sync.h / sync.cpp-ben allnak.
 
 // Forward declarations (a .ino auto-prototípusok helyett explicit módon)
 void printUptime();
@@ -611,15 +583,6 @@ bool routerResetAndRetry();
 bool wifiAuthFailed();
 bool reset_device();
 void logEvent(EventCode code, uint16_t param);
-bool beginConfigWrite();
-void endConfigWrite();
-// A ket task kozotti osztott allapot elerese - a reszletes indoklas a
-// definiciojuknal, a beginConfigWrite() alatt all.
-bool configWriteInProgress();
-void requestRestart(uint32_t delayMs);
-bool restartRequestDue(uint32_t now);
-bool restartRequested();
-void clearRestartRequest();
 void startConfigPortal();
 const char* resetReasonName(esp_reset_reason_t r);
 void sendConfigForm(AsyncWebServerRequest* request);
@@ -645,7 +608,6 @@ bool reconnectWifi();
 bool writeConfigValue(fs::FS& fs, const char* path, const char* message);
 bool isUsableIPv4(const IPAddress& addr);
 bool gatewayUnreachable();
-bool testInternetPing(const IPAddress& target, const char* targetName);
 bool encodeSecret(const char* plain, char* out, size_t outSize);
 void decodeSecretInPlace(char* buf);
 
@@ -656,7 +618,8 @@ void decodeSecretInPlace(char* buf);
 // atomi, ezért kritikus szakasz védi - enélkül két egyidejű hívás ugyanabba
 // a slotba írhatna, vagy egy bejegyzés elveszne. A szakasz rövid (a memset
 // csak a legelső híváskor fut), a megszakítás-tiltás belefér.
-portMUX_TYPE evLogMux = portMUX_INITIALIZER_UNLOCKED;
+// Az evLogMux a sync.h-ban all: a naplo ES a ket task kozotti osztott
+// allapot ugyanazt a rovid kritikus szakaszt hasznalja.
 void logEvent(EventCode code, uint16_t param) {
   // A KET IDOBELYEGET A KRITIKUS SZAKASZON KIVUL keszitjuk el.
   //
@@ -737,103 +700,6 @@ const char* eventName(uint8_t code) {
   }
 }
 
-// --- A mentett jelszó összekeverése ----------------------------------------
-//
-// Cél, pontosan körülhatárolva: egy flash dumpon futtatott `strings` NE adjon
-// használható jelszót, és egy kimásolt /pass.txt más lapkán se működjön.
-//
-// Amit NEM ad: ez nem titkosítás. Aki kódot tud futtatni az eszközön (a C3-ban
-// beépített USB Serial/JTAG-gel vagy saját sketch-csel), az a visszafejtett
-// jelszót kiolvassa a RAM-ból - a művelet ugyanis magán az eszközön történik.
-// Az egyetlen valódi védelem a flash titkosítás (eFuse-ban tárolt kulccsal).
-//
-// Formátum: "v1:" + kisbetűs hexa. Az előtag nélküli fájl régi, sima szöveges
-// mentés; azt továbbra is elfogadjuk, különben egy frissítés használhatatlanná
-// tenné a már beállított eszközöket.
-//
-// A kulcsfolyam magjában ott van az eFuse MAC is (esp_efuse_mac_get_default(),
-// Esp.cpp). Az eFuse NEM a flashben van, tehát egy önmagában kimásolt
-// flash-tartalom kevés hozzá, és a nyilvános forráskódból írt általános
-// dekóder sem elég: az adott chip is kell.
-constexpr uint32_t SECRET_SALT = 0x42415A53UL;  // "BAZS"
-constexpr char SECRET_PREFIX[] = "v1:";
-constexpr size_t SECRET_PREFIX_LEN = sizeof(SECRET_PREFIX) - 1;
-// "v1:" + 2 hexa jegy jelszó-bájtonként
-constexpr size_t SECRET_ENC_MAX = SECRET_PREFIX_LEN + 2 * PASS_MAX_LEN;
-
-uint32_t secretSeed() {
-  const uint64_t mac = ESP.getEfuseMac();  // 6 bájt, a felső 2 nulla
-  const uint32_t seed = SECRET_SALT ^ (uint32_t)mac ^ (uint32_t)(mac >> 32);
-  // A xorshift a 0 állapotból soha nem lép ki - ezt ki kell zárni.
-  return seed != 0 ? seed : SECRET_SALT;
-}
-
-// Determinisztikus kulcsfolyam. Pozíciófüggő, tehát az ismétlődő karakterek
-// sem adnak ismétlődő bájtokat a fájlban.
-uint32_t xorshift32(uint32_t& x) {
-  x ^= x << 13;
-  x ^= x >> 17;
-  x ^= x << 5;
-  return x;
-}
-
-bool encodeSecret(const char* plain, char* out, size_t outSize) {
-  const size_t len = strlen(plain);
-  if (outSize < SECRET_PREFIX_LEN + 2 * len + 1) {
-    return false;
-  }
-  memcpy(out, SECRET_PREFIX, SECRET_PREFIX_LEN);
-  uint32_t state = secretSeed();
-  // NEM "HEX": a Print.h-ban az egy makro (#define HEX 16), tehat abbol
-  // "static const char 16[]" lenne. A core makrói (HEX, DEC, OCT, BIN) minden
-  // sketchre ravonatkoznak - a lokalis nevek nem utkozhetnek veluk.
-  static const char kHexDigits[] = "0123456789abcdef";
-  for (size_t i = 0; i < len; i++) {
-    const uint8_t b = (uint8_t)plain[i] ^ (uint8_t)(xorshift32(state) & 0xFF);
-    out[SECRET_PREFIX_LEN + 2 * i]     = kHexDigits[b >> 4];
-    out[SECRET_PREFIX_LEN + 2 * i + 1] = kHexDigits[b & 0x0F];
-  }
-  out[SECRET_PREFIX_LEN + 2 * len] = '\0';
-  return true;
-}
-
-int hexVal(char c) {
-  if (c >= '0' && c <= '9') return c - '0';
-  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-  return -1;  // szándékosan csak kisbetűs: ezt írjuk ki
-}
-
-// Helyben dekódol. Ha a tartalom nem a mi formátumunk, VÁLTOZATLANUL hagyja -
-// így a régi, sima szöveges mentések is működnek, és az sem baj, ha valakinek
-// történetesen "v1:" a jelszava.
-//
-// Szándékosan NEM végzetes hiba a hibás tartalom: rossz jelszóval a Wi-Fi
-// egyszerűen nem jön össze, és az eszköz a szokásos úton AP módba kerül, ahol
-// újra beállítható. Ez öngyógyul, a villogó LED nem.
-void decodeSecretInPlace(char* buf) {
-  if (strncmp(buf, SECRET_PREFIX, SECRET_PREFIX_LEN) != 0) {
-    return;  // régi, sima szöveges mentés
-  }
-  const char* hex = buf + SECRET_PREFIX_LEN;
-  const size_t hexLen = strlen(hex);
-  if (hexLen % 2 != 0) {
-    return;
-  }
-  for (size_t i = 0; i < hexLen; i++) {
-    if (hexVal(hex[i]) < 0) {
-      return;
-    }
-  }
-  // A kiírási index (i) mindig kisebb az olvasásinál (3 + 2i), ezért a helyben
-  // dekódolás előrefelé haladva biztonságos.
-  uint32_t state = secretSeed();
-  const size_t n = hexLen / 2;
-  for (size_t i = 0; i < n; i++) {
-    const uint8_t b = (uint8_t)((hexVal(hex[2 * i]) << 4) | hexVal(hex[2 * i + 1]));
-    buf[i] = (char)(b ^ (uint8_t)(xorshift32(state) & 0xFF));
-  }
-  buf[n] = '\0';
-}
 
 // Használható-e ez a cím statikus IPv4 konfigurációnak?
 //
@@ -851,20 +717,6 @@ bool isUsableIPv4(const IPAddress& addr) {
 }
 
 // Whitespace levágása helyben, allokáció nélkül
-void trimInPlace(char* s) {
-  size_t len = strlen(s);
-  while (len > 0 && isspace((unsigned char)s[len - 1])) {
-    s[--len] = '\0';
-  }
-  size_t start = 0;
-  while (s[start] != '\0' && isspace((unsigned char)s[start])) {
-    start++;
-  }
-  if (start > 0) {
-    memmove(s, s + start, len - start + 1);
-  }
-}
-
 // Initialize LittleFS
 bool initLittleFS() {
   if (!LittleFS.begin(true)) {
@@ -1789,144 +1641,6 @@ bool waitWithButtonsUntilOnline(uint32_t duration) {
 // néhány tíz ezredmásodperc - az 5 másodperc bőven elég tartalék.
 constexpr uint32_t SAVE_WAIT_MAX_MS = 5000;
 
-// A konfigfájloknak egyszerre csak EGY írója lehet: vagy a webes mentés
-// (async_tcp task), vagy a wifireset gomb törlése (loop task). A zár maga a
-// savingConfig jelző - a megszerzését viszont atomikussá kell tenni, mert a
-// puszta "if (savingConfig)" ellenőrzés és az írás megkezdése között a másik
-// task közbeléphetne, és a két író ugyanazokat a fájlokat írná egyszerre.
-// A rövid kritikus szakaszhoz ugyanazt a spinlockot használjuk, mint a napló.
-bool beginConfigWrite() {
-  bool acquired = false;
-  portENTER_CRITICAL(&evLogMux);
-  if (!savingConfig) {
-    savingConfig = true;
-    acquired = true;
-  }
-  portEXIT_CRITICAL(&evLogMux);
-  return acquired;
-}
-
-// A zar feloldasa. Parja a beginConfigWrite()-nak, es SZANDEKOSAN ugyanazt a
-// spinlockot hasznalja, pedig egyetlen bool irasa onmagaban is oszthatatlan.
-// Ket okbol:
-//
-//  - FELSZABADITASI SORREND. A feloldas azt jelenti ki, hogy a fajlirasok
-//    befejezodtek. Ha a masik task a jelzot mar hamisnak latja, latnia kell
-//    mindent, ami a zar alatt tortent. A kritikus szakasz ezt a sorrendet
-//    kikenyszeriti; a puszta volatile iras nem.
-//  - SZIMMETRIA. Zarat szerezni fuggvennyel, elengedni viszont egy szabadon
-//    allo "savingConfig = false;" sorral harom kulonbozo helyen: pontosan igy
-//    marad el valahol a feloldas egy kesobbi modositasnal.
-void endConfigWrite() {
-  portENTER_CRITICAL(&evLogMux);
-  savingConfig = false;
-  portEXIT_CRITICAL(&evLogMux);
-}
-
-// ---------------------------------------------------------------------------
-// A KET TASK KOZOTTI OSZTOTT ALLAPOT - es miert epp ez a harom fuggveny van.
-//
-// A programban ket FreeRTOS task fut: a loop task, es az AsyncTCP sajat
-// "async_tcp" taskja, ami a webszervert szolgalja ki. Harom fele osztott
-// valtozo van, es NEM ugyanaz a szabaly vonatkozik rajuk:
-//
-// 1. EGYETLEN SZO, ONALLO JELENTESSEL - apDeadline.
-//    Egy igazitott 32 bites olvasas/iras oszthatatlan, es ennek a valtozonak
-//    nincs masik valtozoval kozos invariansa: barmelyik erteket latja is az
-//    olvaso (a regit vagy az ujat), az onmagaban ervenyes hatarido. Itt a
-//    volatile eleg - az a dolga, hogy a fordito tenylegesen olvassa ki, ne
-//    tartsa regiszterben. Nem kell zar.
-//
-// 2. EGY JELZO, AMIN ZAR MULIK - savingConfig.
-//    Itt nem az olvasas oszthatatlansaga a kerdes, hanem hogy a "megnezem,
-//    aztan beallitom" ket lepese kozott a masik task ne ferhessen be. Ezt
-//    teszi atomikussa a beginConfigWrite() / endConfigWrite() par.
-//
-// 3. KET VALTOZO, KOZOS INVARIANSSAL - restartAt + restartPending.
-//    EZ AZ EGYETLEN VALODI VESZELY a programban, es ez a harom fuggveny
-//    miatta all itt.
-//
-//    Az async_tcp task ket KULON irast vegez:
-//        restartAt = millis() + RESTART_GRACE_MS;
-//        restartPending = true;
-//    a loop task pedig a kettot EGYUTT olvassa ki es egyben dont beloluk:
-//        if (restartPending && (int32_t)(now - restartAt) >= 0) ...
-//
-//    Ha az olvaso a jelzot mar igaznak latja, de a hataridot meg a REGI
-//    ertekevel, akkor ervenytelen paron dont. A restartAt kezdoerteke 0, tehat
-//    a "now - 0 >= 0" gyakorlatilag mindig igaz: az eszkoz AZONNAL ujraindulna,
-//    meg mielott a 200-as valasz kiment volna a bongeszonek. A felhasznalo azt
-//    latna, hogy a mentes "nem valaszolt" - kozben tokeletesen elmentette.
-//
-//    ESP32-C3-on ez ma NEM fordul elo, es ezt fontos oszinten kimondani: a
-//    chip EGYMAGOS, tehat a ket task ugyanazon a magon, egymast valtva fut
-//    (nincs egyideju iras es olvasas), a volatile-volatile irasokat pedig a
-//    fordito sem rendezheti at egymashoz kepest. A helyesseg tehat ADOTT -
-//    csak nem a kodbol kovetkezik, hanem a hardver egy tulajdonsagabol,
-//    amit a nyelv nem garantal, es amit a program sehol nem mondott ki.
-//
-//    Ez ket dolgot jelent. Eloszor: egy ketmagos ESP32-re (S3, vagy a
-//    klasszikus ESP32) portolva a vedelem SZO NELKUL eltunne, es a hiba ritka,
-//    nem reprodukalhato ujraindulaskent jelentkezne - a legrosszabb fajta.
-//    Masodszor: egy jovobeli olvasonak semmi nem arulna el, hogy itt egyaltalan
-//    kerdes volt. Ezert a part ugyanaz a spinlock vedi, ami a naplot: a ket
-//    iras es a ket olvasas egy-egy oszthatatlan szakaszba kerul. Az ar nehany
-//    utasitas egy 10 ms-onkent futo cikluson; a nyereseg az, hogy a helyesseg
-//    innentol a kodbol kovetkezik.
-//
-// A megszakitas-kezelokkel osztott jelzok (btnResetLatched, btnWifiResetLatched)
-// SZANDEKOSAN maradnak sima volatile bool-ok: ez az 1. eset. A hozzajuk tartozo
-// idobelyegeket (btnResetDownAt, btnWifiResetDownAt) rajtuk kivul SENKI nem
-// olvassa - kizarolag az ISR irja es olvassa -, tehat task oldalon nincs par,
-// amit egyutt kellene latni.
-// ---------------------------------------------------------------------------
-
-// Halasztott ujraindulas kerese az async_tcp taskbol.
-// A millis() SZANDEKOSAN a kritikus szakaszon KIVUL fut: a szakaszban csak a
-// ket iras all, semmi tobb.
-void requestRestart(uint32_t delayMs) {
-  const uint32_t at = millis() + delayMs;
-  portENTER_CRITICAL(&evLogMux);
-  restartAt = at;
-  restartPending = true;
-  portEXIT_CRITICAL(&evLogMux);
-}
-
-// Van-e ervenyes ujraindulasi keres, es letelt-e a turelmi ido? A jelzot es a
-// hataridot EGYUTT olvassuk - ez a fuggveny letezesenek egyetlen oka.
-bool restartRequestDue(uint32_t now) {
-  portENTER_CRITICAL(&evLogMux);
-  const bool due = restartPending && (int32_t)(now - restartAt) >= 0;
-  portEXIT_CRITICAL(&evLogMux);
-  return due;
-}
-
-// Van-e egyaltalan folyamatban levo ujraindulasi keres? (Az AP mod tetlensegi
-// elalvasa nezi: ujraindulas elott nem alszunk el.) Itt nincs par - egyetlen
-// jelzo -, de ugyanazon az uton kerdezzuk, mint a tobbit.
-bool restartRequested() {
-  portENTER_CRITICAL(&evLogMux);
-  const bool p = restartPending;
-  portEXIT_CRITICAL(&evLogMux);
-  return p;
-}
-
-// A keres torlese. Csak az ujraindulas elott fut, tehat a hatasa maganak az
-// ujraindulasnak amugy is elveszne - de a jelzot nem hagyjuk igazan allva egy
-// olyan uton sem, ahol az ESP.restart() barmiert visszaterne.
-void clearRestartRequest() {
-  portENTER_CRITICAL(&evLogMux);
-  restartPending = false;
-  portEXIT_CRITICAL(&evLogMux);
-}
-
-// Folyamatban levo fajliras? (Ugyanaz a megfontolas, mint fent.)
-bool configWriteInProgress() {
-  portENTER_CRITICAL(&evLogMux);
-  const bool s = savingConfig;
-  portEXIT_CRITICAL(&evLogMux);
-  return s;
-}
 
 // Az alvas es az ujraindulas kozos torlopontja: megvarja a folyamatban levo
 // fajlirast, ES MEG IS SZEREZI a zarat.
@@ -2686,231 +2400,6 @@ bool reconnectWifi() {
   return false;
 }
 
-// Egy bájt, legfeljebb timeoutMs várakozással. -1: lejárt a határidő, vagy a
-// szerver lezárta a kapcsolatot. Ez a kettő az egyetlen kilépési ok - a hívó
-// mindkettőt "nincs több adat"-ként kezeli.
-int readByteBounded(WiFiClient& stream, uint32_t timeoutMs) {
-  const uint32_t start = millis();
-  while ((millis() - start) < timeoutMs) {
-    // Csak akkor olvasunk, ha VAN mit: a read() a socket saját fogadási
-    // timeoutját használja, ami nem a mienk. Ha vakon hívnánk, egyetlen
-    // olvasás túlléphetné a timeoutMs határidőt - így viszont a határidő
-    // valóban a miénk, és nem függ a core beállításaitól.
-    if (stream.available() > 0) {
-      return stream.read();  // <0 is lehet: available() ígért, de elszállt
-    }
-    // A szerver lezárta és nincs több adat: nincs értelme a timeoutot kivárni
-    if (!stream.connected()) {
-      return -1;
-    }
-    resetbutton();
-    wifiresetbutton();
-    feedWatchdog();
-    // delay() és nem yield(): a yield() csak azonos prioritású taskok között
-    // ad át vezérlést, tehát üresen pörgetné a CPU-t a válaszra várva.
-    delay(BUTTON_POLL_MS);
-  }
-  return -1;
-}
-
-// Korlátozott méretű, időzáras olvasás: nem allokál, és nem tud "elszállni"
-// egy captive portal többszáz kilobájtos válaszán. A timeoutMs bájtok KÖZÖTTI
-// határidő, tehát egy lassan csordogáló válasz is végigolvasható, egy néma
-// kapcsolat viszont nem tart fel tovább egy timeoutnál.
-size_t readBounded(WiFiClient& stream, char* buf, size_t maxLen, uint32_t timeoutMs) {
-  size_t n = 0;
-  while (n < maxLen) {
-    const int c = readByteBounded(stream, timeoutMs);
-    if (c < 0) {
-      break;
-    }
-    buf[n++] = (char)c;
-  }
-  return n;
-}
-
-// Egy hexa számjegy értéke, vagy -1. NAGYBETŰT IS elfogad, mert a chunked
-// keretezés méret-sorai az RFC 9112 szerint bármelyik alakban jöhetnek.
-//
-// Ne keverd a hexVal()-lal: az a MI saját jelszó-kódolásunkat olvassa vissza,
-// és szándékosan csak kisbetűset fogad el (azt írjuk ki). A két függvény
-// neve korábban csak egy betűben tért el, a viselkedésük viszont nem -
-// ezért kapott ez beszédesebb nevet.
-int hexDigitAnyCase(int c) {
-  if (c >= '0' && c <= '9') return c - '0';
-  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-  return -1;
-}
-
-// Ugyanaz, mint a readBounded(), de lebontja a chunked keretezést.
-//
-// MIÉRT KELL: a HTTPClient a darabhatárokat CSAK a getString() /
-// writeToStream() útján bontja le - azokat viszont nem használjuk, mert
-// korlátlanul foglalnának. A nyers streamben tehát benne maradnak a
-// keretbájtok ("7\r\nsuccess\r\n0\r\n\r\n"), és a strcmp() a tökéletesen
-// működő végpontot is bukottnak látná. Content-Length-et küldő végpontnál ez
-// sosem jön elő, de egy közbeiktatott proxy bármikor átkeretezheti a választ.
-size_t readChunked(WiFiClient& stream, char* buf, size_t maxLen, uint32_t timeoutMs) {
-  size_t n = 0;
-  for (uint16_t chunk = 0; chunk < HTTP_MAX_CHUNKS; chunk++) {
-    // Méret sor: hexa szám, opcionális ";kiterjesztés", CRLF.
-    uint32_t size = 0;
-    bool sawDigit = false;
-    bool inExt = false;
-    for (;;) {
-      const int c = readByteBounded(stream, timeoutMs);
-      if (c < 0) return n;
-      if (c == '\n') break;
-      if (c == '\r' || inExt) continue;
-      if (c == ';') { inExt = true; continue; }
-      const int d = hexDigitAnyCase(c);
-      // Nem hexa a méret helyén: ez nem chunked keret. Nem találgatunk,
-      // a teszt elbukik - ez a biztonságos irány.
-      if (d < 0) return n;
-      if (size > (0xFFFFFFFFu - (uint32_t)d) / 16u) return n;  // túlcsordulás
-      size = size * 16u + (uint32_t)d;
-      sawDigit = true;
-    }
-    if (!sawDigit || size == 0) {
-      return n;  // üres méret sor, vagy a lezáró 0-s darab
-    }
-    for (uint32_t i = 0; i < size; i++) {
-      if (n >= maxLen) {
-        return n;  // ekkora választ nem a várt végpont küld - nem olvassuk végig
-      }
-      const int c = readByteBounded(stream, timeoutMs);
-      if (c < 0) return n;
-      buf[n++] = (char)c;
-    }
-    // A darabot lezáró CRLF: elnyeljük, de nem kötjük meg magunkat a pontos
-    // alakjában - a következő kör úgyis hexát vár.
-    for (uint8_t i = 0; i < 2; i++) {
-      const int c = readByteBounded(stream, timeoutMs);
-      if (c < 0) return n;
-      if (c == '\n') break;
-    }
-  }
-  return n;
-}
-
-bool testInternetHTTP(const char* url, const char* expectedResponse) {
-  WiFiClient client;
-  HTTPClient http;
-  http.setReuse(false);
-  http.setConnectTimeout((int32_t)HTTP_CONNECT_TIMEOUT_MS);
-  http.setTimeout((uint16_t)HTTP_RESPONSE_TIMEOUT_MS);
-
-  if (!http.begin(client, url)) {
-    Serial.println("Error: HTTP begin failed");
-    return false;
-  }
-
-  // A _transferEncoding privat, a nyers fejlec viszont igy elkerheto. Ez a
-  // hivas a VALASZ fejleceire vonatkozik (a HTTPClient.h kommentje felrevezeto,
-  // a handleHeaderResponse() tolti fel oket).
-  static const char* kCollectHeaders[] = { "Transfer-Encoding" };
-  http.collectHeaders(kCollectHeaders, 1);
-
-  const int httpCode = http.GET();
-  bool result = false;
-
-  if (expectedResponse[0] == '\0') {
-    // "generate_204" stilusu vegpont: nincs torzs, csak a statuszkod szamit.
-    // Ez SZIGORUBB, mint a szoveg-egyeztetes: egy captive portal nem tud 204-et
-    // adni, mert neki eppenseggel HTML-t vagy atiranyitast KELL kuldenie.
-    // Ugyanezt a dontest hozza a NetworkManager is (nm-connectivity.c: 204 ->
-    // "no content, as expected"; barmi mas -> portal).
-    result = (httpCode == HTTP_CODE_NO_CONTENT);
-    // Sikernel NEM irunk semmit: azt a hivo "Successful Test" sora mondja ki.
-    // A soros portra csak az kerul ki, ami hibakeresesnel szamit.
-    if (!result) {
-      Serial.print("Error on HTTP request, code: ");
-      Serial.println(httpCode);
-    }
-  } else if (httpCode == HTTP_CODE_OK) {
-    // Chunked valasznal a getSize() -1, es a nyers streamben ott vannak a
-    // keretbajtok is - azokat le kell bontani, kulonben a jo valasz is bukik.
-    const bool chunked = http.header("Transfer-Encoding").equalsIgnoreCase("chunked");
-    const int len = http.getSize();
-    if (len > (int)HTTP_MAX_PAYLOAD) {
-      // Ekkora választ nem a várt endpoint küld (pl. captive portal)
-      Serial.print("Unexpected payload size: ");
-      Serial.println(len);
-    } else {
-      // len == 0 (Content-Length: 0): nincs mit olvasni, várni sem kell rá.
-      // len < 0: nincs Content-Length, a keretet a kapcsolat zárása adja.
-      const size_t want = (len >= 0) ? (size_t)len : HTTP_MAX_PAYLOAD;
-      char payload[HTTP_MAX_PAYLOAD + 1];
-      // Ugyanaz a stream, amit a http.begin() kapott — nem függünk a
-      // getStream() core-verziónként eltérő visszatérési típusától.
-      const size_t n = chunked
-                         ? readChunked(client, payload, HTTP_MAX_PAYLOAD, HTTP_READ_TIMEOUT_MS)
-                         : readBounded(client, payload, want, HTTP_READ_TIMEOUT_MS);
-      payload[n] = '\0';
-      trimInPlace(payload);  // a záró CR/LF ne buktassa el az egyezést
-      result = (strcmp(payload, expectedResponse) == 0);
-      // Csak eltéréskor beszélünk. Ilyenkor viszont a KAPOTT törzs a
-      // legfontosabb információ: abból derül ki, hogy captive portál ült-e
-      // a kérésre, vagy az üzemeltető változtatta meg a választ.
-      if (!result) {
-        Serial.println(payload);
-        Serial.println("Hamis érték!");
-      }
-    }
-  } else {
-    Serial.print("Error on HTTP request, code: ");
-    Serial.println(httpCode);
-  }
-
-  http.end();
-  return result;
-}
-
-bool testInternetPing(const IPAddress& target, const char* targetName) {
-  Serial.print("Ping teszt futtatása (");
-  Serial.print(targetName);
-  Serial.print(" - ");
-  Serial.print(target);
-  Serial.println(")...");
-  uint8_t successCount = 0;
-
-  for (uint8_t j = 0; j < PING_ATTEMPTS; j++) {
-    // A Ping.ping() érték szerint veszi a címet (ESPping: bool ping(IPAddress,
-    // int16_t)), tehát a másolatot ő maga készíti - nem kell külön helyi példány.
-    const bool pingOK = Ping.ping(target, 1);  // 1 próbálkozás pingenként
-    Serial.print("Ping ");
-    Serial.print(j + 1);
-    if (pingOK) {
-      Serial.println(" sikeres.");
-      successCount++;
-      // Az eredmény eldőlt, a maradék pinget felesleges megvárni
-      if (successCount >= PING_MIN_SUCCESS) {
-        Serial.println("✅ Ping teszt sikeres.");
-        return true;
-      }
-    } else {
-      Serial.println(" sikertelen.");
-      if (j == 0) {
-        Serial.println("⚠️ Első ping hiba — lehet, hogy a hálózat ébred.");
-      }
-      const uint8_t remaining = PING_ATTEMPTS - (j + 1);
-      if (successCount + remaining < PING_MIN_SUCCESS) {
-        Serial.println("❌ Ping teszt sikertelen — hálózati probléma valószínű.");
-        return false;
-      }
-    }
-    if (j + 1 < PING_ATTEMPTS) {
-      waitWithButtons(PING_GAP_MS);  // Kíméletes tesztelés
-    }
-  }
-
-  // Ide nem lehet eljutni: 4 probaval es 2-es kuszobbel a ciklus mindig a ket
-  // korai return valamelyiken lep ki (a j=2 koron a 0 sikeres mar elbukott, a
-  // j=3-on a 2. siker mar visszateres). A fordito viszont megkoveteli, ezert
-  // ez a sor a lefedettsegben mindig fehér marad.
-  return successCount >= PING_MIN_SUCCESS;
-}
 
 // Elérhető-e a saját gateway-ünk?
 //
