@@ -240,6 +240,7 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   // a kulonbseg elojel nelkul alulcsordulna (~4,29 milliard) - vagyis a globalis
   // res-invarians hamisan bukna. (A merest ez a ket sor teszi ertelmezhetove.)
   g_wdtLastFeed = 0; g_wdtMaxFeedGap = 0;
+  g_criticalMaxDepth = 0;
   // A heap modellje is hidegindul: egy valodi bekapcsolas tiszta heappel
   // indul. Enelkul egy korabbi forgatokonyv alacsony heapje atszivarogna a
   // kovetkezobe, es ott VARATLAN onkentes ujraindulast okozna.
@@ -7409,6 +7410,33 @@ static Result runIsolated(const Scenario& sc) {
     // mert erteke kiirhato - igy lehet megkeresni, MELYIK ut a leghosszabb.
     // ------------------------------------------------------------------
     if (getenv("WDTGAP")) fprintf(stderr, "WDTGAP %s | %u\n", sc.name, (unsigned)g_wdtMaxFeedGap);
+    // Diagnosztikai riport (PROBE=1): forgatokonyvenkent a kritikus szakasz
+    // melysege, a soros sorok es a naplobejegyzesek szama, a szimulalt ido.
+    // Ezzel lehet megkeresni, MELYIK ut a legterheltebb.
+    if (getenv("PROBE")) fprintf(stderr, "PROBE|%s|crit=%d|ser=%zu|ev=%u|ms=%u\n",
+        sc.name, g_criticalMaxDepth, g_serialLog.size(), (unsigned)rtcEvNext,
+        (unsigned)g_millis);
+
+    // ------------------------------------------------------------------
+    // GLOBALIS INVARIANS: a kritikus szakasz SOSEM agyazodik egymasba.
+    //
+    // MIERT VESZELYES A BEAGYAZAS? A portENTER_CRITICAL az ESP32-n egy NEM
+    // rekurziv spinlockot vesz fel. Ha ugyanaz a task masodszor is belep,
+    // magara var - vagyis azonnali, teljes megallas, amibol csak a watchdog
+    // hoz ki. Es mivel a szakasz a megszakitasokat is tiltja, meg a watchdog
+    // interruptja sem futna: az eszkoz nemán fagyna le.
+    //
+    // Ez ma HELYES: a merés szerint 280 forgatokonyv eri el az 1-es melyseget
+    // es EGY SEM a 2-est. De eddig csak HAROM forgatokonyv nezte - egy uj,
+    // zaron beluli hivas (pl. egy logEvent() egy mar nyitott szakaszban)
+    // eszrevetlen maradt volna, es csak az eszkozon derult volna ki, a
+    // legrosszabb pillanatban.
+    //
+    // Ugyanaz a minta, mint a watchdog-etetesi resnel: harom kezzel valasztott
+    // eset helyett MINDEN forgatokonyv meri.
+    // ------------------------------------------------------------------
+    CHECK(g_criticalMaxDepth <= 1,
+          "a kritikus szakasz sosem agyazodott egymasba");
     if (g_wdtGapWaiver != nullptr) {
       printf("     [info] a watchdog-res invarians alol felmentve: %s\n", g_wdtGapWaiver);
     } else {

@@ -41,11 +41,27 @@ jobs:
 
       # A teljes keszlet MINDKET IDF agon (a gomb-ebresztes API-ja IDF 6-ban
       # atnevezodott; a sketch #if-fel valaszt, tehat mindkettot fordulni kell).
-      # Statikus ellenorzes a forditas elott: minden blokkolo ciklusnak etetnie
-      # kell a watchdogot. Gyors, es a meg teszteletlen uj agakat is elkapja.
-      - name: make blocking
+      # Forras-szintu ellenorzesek a forditas elott. Ezek olyan szabalyokat
+      # tartanak be, amiket eddig CSAK A FEGYELEM: minden blokkolo ciklus etesse
+      # a watchdogot, es a program ne allokaljon dinamikusan. Gyorsak, es a meg
+      # teszteletlen uj agakat is elkapjak.
+      - name: make lint
         working-directory: test
-        run: make blocking
+        run: make lint
+
+      # Szigoru fordito-figyelmeztetesek -O2-vel (csonkolas, tulcsordulas).
+      # KULON cel, mert ezek a figyelmeztetesek -O0 mellett CSENDBEN kimaradnak,
+      # a fo teszt-build viszont -O0 (a pontos lefedettseg miatt).
+      - name: make warn
+        working-directory: test
+        run: make warn
+
+      # Veremkoltsegvetes az async_tcp taskon futo HTTP kezelokre. A kod tobb
+      # helyen EPP a veges veremre hivatkozva valaszt kozos puffert - a szamot
+      # eddig semmi nem merte.
+      - name: make stack
+        working-directory: test
+        run: make stack
 
       - name: make test
         working-directory: test

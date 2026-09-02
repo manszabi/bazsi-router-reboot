@@ -17,7 +17,7 @@ DEPS     := $(BUILD)/sketch.cpp $(MODULES) $(wildcard ../*.h) test_main.cpp \
 # A sanitizeres futtatas kulon cel: ugyanazok a forgatokonyvek, de ASan+UBSan
 # alatt. Puffertulcsordulast, hasznalat-utani-felszabaditast es definialatlan
 # viselkedest fog meg - olyasmit, amit egy CHECK() sosem latna.
-.PHONY: test san cov covgate blocking clean
+.PHONY: test san cov covgate lint warn stack clean
 test: $(BUILD)/run-idf5 $(BUILD)/run-idf6
 	@echo "=== IDF 5 (ESP32 Arduino 3.3.11) ==="
 	@$(BUILD)/run-idf5
@@ -68,8 +68,47 @@ covgate: $(BUILD)/run-cov
 # Statikus ellenorzes: minden blokkolo ciklus etesse a watchdogot. Ez a
 # futasideju res-invarianst egesziti ki: az csak a bejart utakat meri, ez
 # viszont a FORRAST nezi, tehat a meg teszteletlen uj agakat is elkapja.
-blocking:
-	@python3 ../tools_check_blocking.py
+lint:
+	@python3 ../tools_lint.py
+
+# SZIGORU FIGYELMEZTETESEK, KULON CELBAN.
+#
+# MIERT NEM A FO BUILDBEN? Mert a -Wformat-truncation es a -Wstringop-* csak
+# OPTIMALIZALAS mellett fut le (a fordito a konstansokat elobb terjeszti). A fo
+# teszt-build -O0, hogy a lefedettseg es a hibakereses pontos legyen - ott ezek
+# a figyelmeztetesek CSENDBEN nem szolalnanak meg. Ezert kulon, -O2-vel.
+#
+# Amit fog: egy snprintf(), aminek a puffere kicsi a lehetseges kimenethez; egy
+# strlcpy/memcpy, ami tul irhat. Ez ma tiszta - a puffermeretek helyesek -, de
+# eddig SEMMI nem tartotta be: egy uj mezo vagy egy hosszabb hibauzenet
+# eszrevetlenul csonkolt volna.
+WARNFLAGS := -O2 -Wall -Wextra -Wshadow -Wno-unused-parameter -Wno-overloaded-virtual \
+             -Wformat-truncation=2 -Wformat-overflow=2 \
+             -Wstringop-truncation -Wstringop-overflow=4 -Werror
+
+warn: $(BUILD)/sketch.cpp
+	@for f in $(BUILD)/sketch.cpp $(MODULES); do \
+	   $(CXX) -std=gnu++17 $(WARNFLAGS) -Istubs -I.. -DESP_IDF_VERSION_MAJOR=5 \
+	          -c $$f -o /dev/null || exit 1; \
+	 done
+	@echo "Szigoru figyelmeztetesek (-O2, csonkolas/tulcsordulas): tiszta."
+
+# VEREMKOLTSEGVETES az async_tcp taskra.
+#
+# A ket HTTP kezelo NEM a loop taskon fut, hanem az AsyncTCP sajat taskjan,
+# aminek a verme veges. A kod tobb helyen EPP ERRE hivatkozva valaszt kozos
+# puffert vagy ket lepest egy helyett - de a szamot eddig semmi nem merte.
+#
+# OSZINTEN A MERES HATARAIROL: ez HOST (x86-64) veremkeret, nem a RISC-V-e. A
+# ket szam nem egyenlo. Iranymutatonak viszont pontos: ha valaki egy 2 KB-os
+# puffert tesz a POST kezelobe, az ITT is azonnal latszik.
+STACK_LIMIT ?= 1200
+
+stack:
+	@rm -f $(BUILD)/*.su
+	@$(CXX) -std=gnu++17 -O2 -fstack-usage -Istubs -I.. -DESP_IDF_VERSION_MAJOR=5 \
+	        -c ../webportal.cpp -o $(BUILD)/stack.o
+	@python3 ../tools_stack.py $(BUILD)/stack.su $(STACK_LIMIT)
 
 $(BUILD):
 	@mkdir -p $(BUILD)

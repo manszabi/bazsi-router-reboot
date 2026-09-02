@@ -86,7 +86,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 
 ## Lefedett esetek
 
-**294 forgatókönyv, 1396 ellenőrzés. Sorlefedettség: 98,70%.**
+**294 forgatókönyv, 1690 ellenőrzés. Sorlefedettség: 98,70%.**
 
 ### A watchdog-etetés globális invariánsa
 
@@ -121,15 +121,44 @@ Mutációval igazolva: a `FAILURE_STATE` reset-ciklusából kivett `feedWatchdog
 Az `initWiFi()` 20 s-es várakozásából kivéve *nem* bukik – és ez helyes:
 20 s < 90 s, az nem watchdog-reset.
 
-### Statikus ellenőrzés: `make blocking`
+### Globális invariáns: a kritikus szakasz sosem ágyazódik egymásba
 
-A futásidejű invariáns csak a **bejárt** utakat méri. Egy új, még teszteletlen
-blokkoló ág ott észrevétlen maradna – ezért a `tools_check_blocking.py` a
-**forrást** nézi: minden `delay()`-t tartalmazó `while`/`for`/`do` ciklusnak
-etetnie kell, vagy vissza kell térnie a `loop()`-ba, vagy `// WDT-OK: <indok>`
-jelölést kell kapnia. Ma két ilyen jelölés van (a 3 s-es beragadt-gomb villogás
-és a soros port bevárása, ahol a watchdog még nem is él) – **mindkettő
-indoklással a forrásban**.
+A `portENTER_CRITICAL` az ESP32-n **nem rekurzív** spinlockot vesz fel. Ha
+ugyanaz a task másodszor is belép, magára vár — azonnali, teljes megállás, és
+mivel a szakasz a megszakításokat is tiltja, még a watchdog megszakítása sem
+futna: az eszköz **némán fagyna le**.
+
+Mérve: 280 forgatókönyv éri el az 1-es mélységet, **egy sem a 2-est**. Eddig ezt
+három forgatókönyv nézte; mostantól mind. Mutációval igazolva: egy beágyazott
+`portENTER_CRITICAL` a `lastEventWas()`-ban **20 forgatókönyvet** buktat meg.
+
+### Statikus ellenőrzések: `make lint`, `make warn`, `make stack`
+
+A futásidejű invariánsok csak a **bejárt** utakat mérik. Egy új, még teszteletlen
+ág ott észrevétlen maradna – ezért három ellenőrzés a **forrást**, illetve a
+lefordított kódot nézi. Mindhárom mutációval igazolva.
+
+| Cél | Mit tart be | Miért nem volt eddig kikényszerítve |
+|---|---|---|
+| `make lint` | **(1)** minden `delay()`-t tartalmazó `while`/`for`/`do` ciklus etessen, térjen vissza a `loop()`-ba, vagy kapjon `// WDT-OK: <indok>` jelölést · **(2)** nincs dinamikus foglalás (`malloc`, `new`, STL tároló, érték szerinti `String`) | a (2) a README és a MUKODES **állítása** volt, nulla ellenőrzéssel |
+| `make warn` | `-Wformat-truncation=2`, `-Wformat-overflow=2`, `-Wstringop-*`, `-Werror` | ezek **csak `-O2` mellett** futnak, a fő teszt-build viszont `-O0` (a pontos lefedettségért) – így csendben kimaradtak |
+| `make stack` | az async_tcp taskon futó HTTP kezelők veremkerete (`handleConfigPost` 720 B, `sendDiagnosticLog` 592 B, küszöb 1200 B) | a kód több helyen **épp a véges veremre hivatkozva** választ közös puffert – de a számot semmi nem mérte |
+
+Két `// WDT-OK` jelölés van ma (a 3 s-es beragadt-gomb villogás és a soros port
+bevárása, ahol a watchdog még nem is él) – **mindkettő indoklással a forrásban**.
+
+> A `make stack` határai kimondva: ez **host (x86-64) veremkeret**, nem a
+> RISC-V-é. A két szám nem egyenlő, tehát nem abszolút garancia. Iránymutatónak
+> viszont pontos: egy 2 KB-os puffer a POST kezelőben itt is azonnal látszik
+> (mérve: 2768 bájt, a küszöb fölött).
+
+#### Amit szándékosan *nem* tettem globális invariánssá
+
+A **naplóelárasztás** és a **soros kiírás rátája** nem fordítható értelmes
+globális szabállyá: a hosszú forgatókönyvek jogosan lépik túl (az `R8` 33 kör
+alatt 99 bejegyzést ír a 32 elemű gyűrűbe), és az alvás a harness-ben azonnali,
+ami a percre vetített rátát torzítja. Ott a célzott `LOG*` és `SER*` tesztek a
+helyes eszköz – egy rossz globális küszöb csak zajt adna.
 
 | | |
 |---|---|
