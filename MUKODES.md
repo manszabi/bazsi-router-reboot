@@ -551,6 +551,20 @@ ne reagáljon, mint hogy spontán újrainduljon.
 > ellen szoftver nem védhet. Új hardver revízióban a gombot érdemes szabad,
 > nem-strapping lábra tenni (pl. `D2` = GPIO4).
 
+### A mezők validálása – közös szabály
+
+Mind a négy mező **ugyanúgy** viselkedik: előbb levágjuk a másolás-beillesztés
+szóközeit, és **csak azután** mérjük a hosszt. Enélkül egy határértékes érték
+egyetlen beillesztett záró szóközzel „túl hosszú" hibát adna – holott a vágott
+érték tökéletesen érvényes, és a beolvasás úgyis vágna. A túlméretes érték
+viszont továbbra is hiba: a vágás nem menti meg. (Mérve: `AP7`.)
+
+> A soros portra **csak a négy ismert mezőt** visszhangozzuk, és a hosszt is
+> korlátozzuk (`%.64s`). Az ismeretlen paramétereket amúgy sem dolgozzuk fel,
+> tehát diagnosztikai értékük nincs – egy sok mezős POST viszont annyi sort írt
+> volna, ahány mezőt küldtek, mindezt az `async_tcp` taskban, ami közben a
+> webszervert is kiszolgálja.
+
 **Fájlírás közben egyik gomb sem hat.** A mentést az aszinkron webszerver
 taskja végzi; egy odaeső gombnyomás félbeszakított írást okozna. A gombok a
 mentés befejeztével működnek tovább (ilyenkor egy új 50 ms-os lenyomás kell).
@@ -1110,7 +1124,13 @@ szándékos:
 
 A puffer két különböző taskból is íródik – a `loop()`-ból és az AsyncTCP
 webszerver taskjából –, ezért minden írás és olvasás `portENTER_CRITICAL`
-kritikus szakaszban történik. A szakaszok **nincsenek egymásba ágyazva**
+kritikus szakaszban történik. A **két időbélyeg viszont a szakaszon kívül**
+készül el: a kritikus szakasz a C3-on letiltja a megszakításokat, tehát odabent
+minden extra munka közvetlen költség – az uptime egy 64 bites osztás, a valós
+idő pedig `time()`-ot hív, ami az ESP-IDF-ben a rendszeróra saját zárját is
+megfoghatja. Idegen zárat felvenni letiltott megszakítások mellett nem az a
+minta, amit egy naplózó függvénytől várunk; így odabent tényleg csak
+értékadások maradnak. A szakaszok **nincsenek egymásba ágyazva**
 (mérve: `LOG5`), így nem tudnak megakadni.
 
 ### Túlcsordulhat-e?

@@ -4416,6 +4416,36 @@ static void scNV15() {
         "ismeretlen ok eseten sem hallgat el a lap");
 }
 
+static void scAP7() {
+  // A NEGY MEZO EGYFORMAN TURI A BEILLESZTETT SZOKOZOKET.
+  //
+  // TALALT KOVETKEZETLENSEG. Az IP es a gateway aga a hosszat a VAGAS UTAN
+  // merte, az SSID es a jelszo viszont a nyers val.length()-bol. Emiatt egy
+  // hatarertekes ertek EGYETLEN beillesztett zaro szokozzel "tul hosszu"
+  // hibat adott - holott a vagott ertek tokeletesen ervenyes, es a
+  // readConfigValue() beolvasaskor ugyis vagna.
+  coldBoot(false, "", "", "", "");
+  setup();
+
+  // 32 karakteres SSID + zaro szokoz = 33 bajt nyersen.
+  std::string ssid32(32, 'A');
+  std::string pass63(63, 'b');
+  const int kod = postConfig((ssid32 + " ").c_str(), (pass63 + " ").c_str(),
+                             " 192.168.1.200 ", " 192.168.1.1 ");
+  CHECK(kod == 200, "a hatarertekes ertekek zaro szokozzel is mentodnek");
+  CHECK(g_fs["/ssid.txt"] == ssid32, "az SSID a VAGOTT, 32 karakteres ertek");
+  CHECK(storedPass() == pass63, "a jelszo a VAGOTT, 63 karakteres ertek");
+  CHECK(g_fs["/ip.txt"] == "192.168.1.200", "az IP is vagva");
+  CHECK(g_fs["/gateway.txt"] == "192.168.1.1", "es a gateway is");
+
+  // A tulmeretes ertek viszont TOVABBRA IS hiba - a vagas nem menti meg.
+  restartPending = false; savingConfig = false;
+  std::string ssid33(33, 'C');
+  CHECK(postConfig(ssid33.c_str(), "jelszo123", "", "") == 500,
+        "33 karakteres SSID viszont tovabbra is hiba");
+  CHECK(g_fs["/ssid.txt"] == ssid32, "es a korabbi ertek erintetlen maradt");
+}
+
 static void scAP5() {
   // HTML-ESCAPE: APOSZTROF AZ SSID-BEN. A printHtmlEscaped() ot karaktert
   // kezel; a lefedettseg szerint az aposztrof aga eddig SOSEM futott le.
@@ -7095,6 +7125,7 @@ static const Scenario kScenarios[] = {
   { "AP6: mentes csatolatlan fajlrendszerrel -> tiszta 500", scAP6 },
   { "WF11: a router reset utan sem jon vissza a WiFi", scWF11 },
   { "AP5: aposztrof es tarsai az SSID-ben - HTML escape", scAP5 },
+  { "AP7: mind a negy mezo egyformán turi a beillesztett szokozoket", scAP7 },
   { "LOG7: a /log oldal a legrosszabb esetben is befer a pufferbe", scLOG7 },
   { "LOG8: firmware frissites utan a regi elrendezesu naplo ervenytelen", scLOG8 },
   { "LOG9: a wifireset a naplofajlt szandekosan NEM torli", scLOG9 },

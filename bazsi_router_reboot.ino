@@ -637,6 +637,24 @@ void decodeSecretInPlace(char* buf);
 // csak a legelső híváskor fut), a megszakítás-tiltás belefér.
 portMUX_TYPE evLogMux = portMUX_INITIALIZER_UNLOCKED;
 void logEvent(EventCode code, uint16_t param) {
+  // A KET IDOBELYEGET A KRITIKUS SZAKASZON KIVUL keszitjuk el.
+  //
+  // MIERT? A portENTER_CRITICAL a C3-on letiltja a megszakitasokat, tehat
+  // odabent minden extra munka kozvetlen koltseg. Az uptime egy 64 bites
+  // osztas, a nowEpoch() pedig time()-ot hiv - az ESP-IDF-ben ez a
+  // rendszerora sajat zarjat is megfoghatja. Idegen zarat felvenni letiltott
+  // megszakitasok mellett nem az a minta, amit egy naplozo fuggvenytol
+  // varunk; a struktura sajat kommentje is azt allitja, hogy a szakasz
+  // "rovid". Igy viszont odabent tenyleg csak ertekadasok maradnak.
+  //
+  // Az idobelyegek nehany mikromasodperccel korabbrol szarmaznak - ez a
+  // masodperces felbontas mellett nem szamit.
+  const uint32_t uptimeSec = (uint32_t)(esp_timer_get_time() / 1000000);
+  // Ha az NTP mar szinkronizalt, a valos idot is eltesszuk. Enelkul csak
+  // uptime van, ami minden indulaskor nullarol kezd - ket bootolas esemenyei
+  // igy nem rendezhetok egymashoz.
+  const uint32_t epoch = nowEpoch();
+
   portENTER_CRITICAL(&evLogMux);
   if (rtcEvMagic != EVLOG_MAGIC) {
     rtcEvMagic = EVLOG_MAGIC;
@@ -645,11 +663,8 @@ void logEvent(EventCode code, uint16_t param) {
     memset(rtcEvents, 0, sizeof(rtcEvents));
   }
   EventEntry& e = rtcEvents[rtcEvNext % EVLOG_SIZE];
-  e.uptimeSec = (uint32_t)(esp_timer_get_time() / 1000000);
-  // Ha az NTP mar szinkronizalt, a valos idot is eltesszuk. Enelkul csak
-  // uptime van, ami minden indulaskor nullarol kezd - ket bootolas esemenyei
-  // igy nem rendezhetok egymashoz. A time() nem blokkol es nem allokal.
-  e.epoch = nowEpoch();
+  e.uptimeSec = uptimeSec;
+  e.epoch = epoch;
   e.code = (uint8_t)code;
   e.param = param;
   e.reserved = 0;
@@ -980,10 +995,6 @@ void enterFatal(const char* reason) {
   Serial.println(" perc mulva az eszkoz elalszik (magatol nem ebred fel).");
 }
 
-// Watchdog/panic miatti újraindulások figyelése. Ha a program ismételten
-// megakad, az újraindítgatás önmagában nem megoldás - inkább jelezzünk.
-// A heap allapot RTC blokkjanak felelesztese. Ugyanaz a minta, mint a
-// watchdog szamlalonal: bekapcsolas utan a NOINIT terulet tartalma szemet.
 // A rendszerora aktualis erteke, ha az NTP mar szinkronizalt - kulonben 0.
 // Nem blokkol, nem allokal, es szinkron nelkul is biztonsagos.
 uint32_t nowEpoch() {
@@ -1254,6 +1265,8 @@ bool loadEventLogEntries(const EvFileHeader& fej, EventEntry* ki) {
   return olvasott == kell;
 }
 
+// A heap allapot RTC blokkjanak felelesztese. Ugyanaz a minta, mint a
+// watchdog szamlalonal: bekapcsolas utan a NOINIT terulet tartalma szemet.
 void initHeapState() {
   if (rtcHeapMagic != HEAP_MAGIC) {
     rtcHeapMagic = HEAP_MAGIC;
@@ -1435,6 +1448,8 @@ void checkHeap(uint32_t now) {
   ESP.restart();
 }
 
+// Watchdog/panic miatti újraindulások figyelése. Ha a program ismételten
+// megakad, az újraindítgatás önmagában nem megoldás - inkább jelezzünk.
 void checkWatchdogResets() {
   const esp_reset_reason_t reason = esp_reset_reason();
 
@@ -1544,7 +1559,6 @@ void initWatchdog() {
   Serial.println(" s");
 }
 
-// Csak akkor etetünk, ha a loop task már fel van iratkozva.
 // A ket megszakitas-kezelo. IRAM_ATTR: a flash epp foglalt lehet (SPI olvasas),
 // ezert az ISR nem elhet flashben. Mindketto CSAK jelzoket allit - semmi mas.
 // A millis() ISR-bol is hivhato: a core-ban esp_timer_get_time()-ra epul, ami
@@ -1588,6 +1602,7 @@ void armButtonLatches() {
   attachInterrupt(digitalPinToInterrupt(wifiresetPin), onWifiResetButtonEdge, CHANGE);
 }
 
+// Csak akkor etetünk, ha a loop task már fel van iratkozva.
 void feedWatchdog() {
   if (watchdogEnabled) {
     feedLoopWDT();
@@ -3115,6 +3130,12 @@ void startConfigPortal() {
     bool ipSet = false;
     bool gwSet = false;
 
+    // KOZOS jelolt-puffer mind a negy mezohoz, a legnagyobbhoz (jelszo)
+    // meretezve, es a mezo hatarnal BOVEBBRE: igy a masolas-beillesztes
+    // szokozeit le tudjuk vagni MIELOTT a hosszat merjuk. Egy puffer, mert az
+    // async_tcp task verme veges, es igy a negy ag nem rakodik egymasra.
+    char candidate[PASS_MAX_LEN * 2 + 2];
+
     // size_t, nem int: a valodi AsyncWebServerRequest::params() ezt adja
     // vissza, es a szukites -Wconversion mellett figyelmeztetest is kap.
     const size_t params = request->params();
@@ -3132,10 +3153,16 @@ void startConfigPortal() {
         // az, amivel az eszköz később csatlakozni fog. A csupa szóközből álló
         // SSID így üresre fogy - azt pedig nem szabad sikerként elfogadni,
         // mert az újraindulás után AP módban kötnénk ki.
-        char candidate[SSID_MAX_LEN + 1];
         strlcpy(candidate, val.c_str(), sizeof(candidate));
         trimInPlace(candidate);
-        if (val.length() <= SSID_MAX_LEN && candidate[0] != '\0') {
+        // A hosszat a VAGAS UTAN merjuk - ugyanugy, mint az IP/gateway agon.
+        // Korabban a nyers val.length() dontott, ezert egy 32 karakteres SSID
+        // egyetlen beillesztett zaro szokozzel (33 bajt) "tul hosszu"-kent
+        // bukott el, holott a vagott ertek tokeletesen ervenyes. A
+        // val.length() feltetel megmarad, de mar csak a CSONKOLAS ellen: egy
+        // a pufferbe sem fero bemenet vege csendben elveszne.
+        if (val.length() < sizeof(candidate)
+            && strlen(candidate) <= SSID_MAX_LEN && candidate[0] != '\0') {
           ssidProvided = true;
           strlcpy(ssidNew, candidate, sizeof(ssidNew));
         } else {
@@ -3144,8 +3171,13 @@ void startConfigPortal() {
           if (failReason == nullptr) failReason = "Ervenytelen SSID (1-32 karakter, nem csak szokoz).";
         }
       } else if (name == PARAM_PASS) {
-        if (val.length() <= PASS_MAX_LEN) {
-          strlcpy(passNew, val.c_str(), sizeof(passNew));
+        strlcpy(candidate, val.c_str(), sizeof(candidate));
+        trimInPlace(candidate);
+        // A hosszat itt is a VAGAS UTAN merjuk (lasd az SSID agat): egy 63
+        // karakteres jelszo egyetlen beillesztett zaro szokozzel korabban
+        // "tul hosszu" hibat adott, pedig a vagas amugy is megtortent volna.
+        if (val.length() < sizeof(candidate) && strlen(candidate) <= PASS_MAX_LEN) {
+          strlcpy(passNew, candidate, sizeof(passNew));
           // TUDATOS KORLAT: a vagas a masolas-beillesztessel bekerult szokozok
           // ellen szol, es a WPA2 szabvany szerint egy jelszo ELEJEN vagy VEGEN
           // allo szokoz onmagaban ervenyes volna. Ilyen jelszo ezzel az
@@ -3154,7 +3186,7 @@ void startConfigPortal() {
           // fajlba, abban nincs szokoz, tehat a kodolas/dekodolas a szokozt
           // hibatlanul visszaadna (ellentetben az SSID-vel, ami sima szovegkent
           // tarolodik, es amit a readConfigValue() beolvasaskor ugyis vag).
-          trimInPlace(passNew);
+          // (A vagas mar a candidate pufferben megtortent.)
           // Összekeverve mentjük, hogy egy flash dumpon a `strings` ne adjon
           // használható jelszót. A visszaolvasásos ellenőrzés érintetlen: a
           // writeConfigValue() a kódolt formát verifikálja.
@@ -3182,7 +3214,6 @@ void startConfigPortal() {
         // egyertelmu. A puffer bovebb a mezonel, hogy a szokozokkel egyutt is
         // beferjen a vagas elott; a vagott ertek hosszat kulon ellenorizzuk.
         // A csupa szokoz uresre fogy = DHCP, nem hibauzenet.
-        char candidate[IPSTR_MAX_LEN * 2 + 2];
         strlcpy(candidate, val.c_str(), sizeof(candidate));
         trimInPlace(candidate);
         IPAddress testIP;
@@ -3205,7 +3236,6 @@ void startConfigPortal() {
         }
       } else if (name == PARAM_GATEWAY) {
         // Ugyanaz a vagas, mint az IP-nel.
-        char candidate[IPSTR_MAX_LEN * 2 + 2];
         strlcpy(candidate, val.c_str(), sizeof(candidate));
         trimInPlace(candidate);
         IPAddress testIP;
@@ -3225,11 +3255,21 @@ void startConfigPortal() {
         }
       }
 
-      // A jelszót soha nem írjuk ki nyíltan a soros portra
+      // CSAK A NEGY ISMERT MEZOT visszhangozzuk, es a hosszat is korlatozzuk.
+      //
+      // MIERT? Korabban a ciklus MINDEN beerkezo parametert kiirt, szo
+      // szerint. Az ismeretlen parametereket amugy sem dolgozzuk fel (a
+      // konfiguraciot nem tudjak atirni), tehat diagnosztikai ertekuk nincs -
+      // egy sok mezos POST viszont annyi sort irt volna a soros portra,
+      // ahany mezot kuldtek, es mindezt az async_tcp taskban, ami kozben a
+      // webszervert is kiszolgalja. A %.64s a tulmeretes ertekeket is
+      // levagja, igy egyetlen sor sem nohet korlatlanul.
+      //
+      // A jelszót soha nem írjuk ki nyíltan a soros portra.
       if (name == PARAM_PASS) {
         Serial.printf("POST[%s]: <%u chars>\n", name.c_str(), (unsigned)val.length());
-      } else {
-        Serial.printf("POST[%s]: %s\n", name.c_str(), val.c_str());
+      } else if (name == PARAM_SSID || name == PARAM_IP || name == PARAM_GATEWAY) {
+        Serial.printf("POST[%s]: %.64s\n", name.c_str(), val.c_str());
       }
     }
 
@@ -3566,8 +3606,8 @@ void loop() {
   // (Mérve: WDT9.)
   //
   // A FELTETEL ALAKJA. Ez volt az EGYETLEN abszolut millis() osszehasonlitas a
-  // programban (a masik 23 mind kulonbseg-alaku). Ket okbol lett belole is
-  // kulonbseg:
+  // programban (az osszes tobbi idozites kulonbseg-alaku). Ket okbol lett
+  // belole is kulonbseg:
   //
   // 1. KORBEFORDULAS. A millis() 49,7 naponta nullara fordul. Abszolut alakban
   //    a feltetel a fordulas utan egy oran at hamis lenne. (Ma nem okozna
