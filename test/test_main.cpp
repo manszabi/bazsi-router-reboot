@@ -4294,9 +4294,13 @@ static void scNV11() {
   CHECK(b.find("1970") == std::string::npos, "sehol nincs 1970-es datum");
   CHECK(b.find("<table") != std::string::npos, "es a tabla ott van");
 
-  // Es a "mentve:" cimke sem hazudik: ora nelkul egyszeruen elmarad.
+  // Es a "mentve" cimke sem hazudik: valos ido nelkul NEM datumot ir, hanem
+  // a mentes akkori UPTIME-jat - az a "melyik esemenysor mikori?" kerdesre
+  // ora nelkul is valasz, es nem talalunk ki egy datumot.
   CHECK(b.find("(mentve:") == std::string::npos,
-        "a 'mentve' idopont ora nelkul elmarad, nem talalunk ki egyet");
+        "ora nelkul nem ir ki datumot");
+  CHECK(b.find("(mentve a bootolas utan") != std::string::npos,
+        "hanem a mentes akkori uptime-jat");
 }
 
 static void scNV12() {

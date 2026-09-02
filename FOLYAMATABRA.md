@@ -288,4 +288,4 @@ számláló és a diagnosztikai napló él túl.
 
 *Az ábrák a `bazsi_router_reboot.ino` aktuális állapotát dokumentálják.
 Módosításkor a kóddal együtt frissítendők – a viselkedést a `test/` alatti
-291 forgatókönyves (1082 ellenőrzéses) tesztkészlet rögzíti.*
+291 forgatókönyves (1083 ellenőrzéses) tesztkészlet rögzíti.*

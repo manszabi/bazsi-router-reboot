@@ -1038,7 +1038,10 @@ szabály:
 | Az RTC-ben már 32 új esemény van | **RTC** | a körpuffer tele van friss adattal, ami időben mindenképp újabb |
 
 A lap **kiírja, melyik forrásból** dolgozik, és ha a fájlé, azt is, mikor
-mentettük. (Mérve: `NV5`.)
+mentettük: valós idővel dátumot, **anélkül pedig a mentés akkori uptime-ját**
+(„mentve a bootolás után 3:12:45-kor"). Így a „melyik eseménysor mikori?"
+kérdésre óra nélkül is van válasz, és nem találunk ki egy dátumot.
+(Mérve: `NV5`, `NV11`.)
 
 **Ha a fájl hiányzik, üres, csonka, rossz a magic-je vagy a fejléce többet ígér,
 mint amennyi ott van** – mind az öt eset ugyanoda vezet: a lap az RTC naplót

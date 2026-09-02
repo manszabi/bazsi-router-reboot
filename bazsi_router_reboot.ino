@@ -2964,8 +2964,6 @@ void startConfigPortal() {
     //  - Ha MINDKETTONEK van valos ideje (NTP), az dont: a nagyobb idobelyeg
     //    nyer. Ez a legpontosabb valasz, ezert ez az elso szabaly.
     //
-    // Ha epp fajliras folyik a masik taskbol, a fajlt NEM olvassuk: az RTC
-    // naplo ilyenkor is ep, es ez az egyszeru kizaras eleg.
     // A dontes CSAK a fejlecbol tortenik, es a bejegyzeseket utana toltjuk be -
     // igy egyszerre csak EGY 384 bajtos puffer all a vermen.
     //
@@ -3020,6 +3018,15 @@ void startConfigPortal() {
         r->print(F("<p><b>Forras:</b> a fajlrendszerre mentett naplo"));
         if (formatEpoch(fej.savedEpoch, mikor, sizeof(mikor))) {
           r->printf(" (mentve: %s)", mikor);
+        } else {
+          // Nincs valos ido - de a mentes UPTIME-ja megvan. Abbol legalabb az
+          // latszik, mennyi ideje futott az eszkoz, amikor a fajl keszult; ez
+          // a "melyik esemenysor mikori?" kerdesre ora nelkul is valasz.
+          // (A mezot eddig kiirtuk a fajlba, de sosem olvastuk vissza.)
+          r->printf(" (mentve a bootolas utan %u:%02u:%02u-kor)",
+                    (unsigned)(fej.savedUptime / 3600),
+                    (unsigned)((fej.savedUptime % 3600) / 60),
+                    (unsigned)(fej.savedUptime % 60));
         }
         r->print(F(" - az RTC naplo ennel regebbi vagy ures "
                    "(pl. aramszunet torolte).</p>"));
