@@ -9,6 +9,10 @@ cd test
 make test
 ```
 
+> A teljes készlet ~2 perc ágonként; a CI-ban a `make test` + `make san` +
+> `make covgate` együtt ~7-8 perc (mindhárom újrafordít és újra lefuttat
+> mind a 294 forgatókönyvet).
+
 **A fordítási modell megegyezik az Arduinóéval**: a `bazsi_router_reboot.ino`
 és a hét modul (`secret.cpp`, `strutil.cpp`, `netprobe.cpp`, `sync.cpp`,
 `eventlog.cpp`, `configstore.cpp`, `webportal.cpp`) **külön fordítási

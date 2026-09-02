@@ -51,7 +51,7 @@ struct ProgramScope {
 };
 
 static void coreLoopStep() {
-  if (g_wdtEnabled) feedLoopWDT();
+  feedLoopWDT_fromCore();   // a core etetese: konyvel, de nem naploz
   ProgramScope sc;
   sketchLoop();
 }

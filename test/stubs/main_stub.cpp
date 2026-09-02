@@ -163,6 +163,21 @@ void feedLoopWDT() {
   g_wdtLastFeed = g_millis;
   simLog("wdt_feed");
 }
+
+// AZ ARDUINO CORE per-iteracios etetese (loopTask). Ugyanaz a watchdog-
+// konyveles, de SZANDEKOSAN nem kerul a g_log-ba. Ket okbol:
+//
+//  1. EZ NEM A SKETCH TETTE, hanem a core. A "wdt_feed" bejegyzeseket szamolo
+//     teszt (WDT4) a SKETCH eteteseit meri egy blokkolo varakozas alatt - a
+//     core hivasai oda nem valok.
+//  2. TELJESITMENY. A harness minden loop() hivas elott etet, es vannak
+//     forgatokonyvek, amik tobb millio iteraciot pörgetnek. Naplozva ez tobb
+//     millio std::string a g_log vektorban: szaz megabajtok es percek, semmiert.
+void feedLoopWDT_fromCore() {
+  if (!g_wdtEnabled) return;
+  g_wdtUnfedMs = 0;
+  g_wdtLastFeed = g_millis;
+}
 // A tesztek ezzel modellezhetik, hogy egy MASIK task (az aszinkron webszerver)
 // kozben vegez valamit - pl. befejezi a fajlirast. Egyszalu szimulatorban ez az
 // egyetlen mod a konkurencia hu abrazolasara.
