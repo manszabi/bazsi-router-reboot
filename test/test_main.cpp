@@ -35,7 +35,8 @@ bool writeConfigValue(fs::FS& fs, const char* path, const char* msg);
 bool clearConfigValue(fs::FS& fs, const char* path);
 bool initLittleFS();
 bool fileMatches(fs::FS& fs, const char* path, const char* value, size_t len);
-extern bool fsReady;
+bool filesystemReady();
+void setFilesystemReady(bool ready);
 extern uint32_t rtcWdtMagic;
 extern uint32_t rtcWdtResets;
 // A sync modul allapota SZANDEKOSAN nem elerheto kivulrol (static a
@@ -646,12 +647,12 @@ static void scWDT4() {
 
 
 static void scFS1() {
-  // Nem csatolható fájlrendszer -> fsReady = false, és végzetes hiba
+  // Nem csatolható fájlrendszer -> filesystemReady() = false, és végzetes hiba
   // (a részletes viselkedést az FT1 fedi)
   coldBoot(false, "", "", "", "");
   g_fsMountOk = false;
   try { setup(); } catch (DeepSleepSignal&) { CHECK(false, "nem szabadna elaludnia"); }
-  CHECK(!fsReady, "fsReady = false");
+  CHECK(!filesystemReady(), "a fajlrendszer nem csatolhato");
   CHECK(deviceMode == (DeviceMode)2, "MODE_FATAL - mentés úgysem lenne lehetséges");
   CHECK(g_wdtEnabled, "a watchdog hibajelzés közben is aktív");
 }
@@ -4542,7 +4543,7 @@ static void scAP6() {
   coldBoot(false, "", "", "", "");
   setup();
   CHECK(deviceMode == (DeviceMode)1, "AP mod, fut a portal");
-  fsReady = false;                        // a fajlrendszer kiesett
+  setFilesystemReady(false);              // a fajlrendszer kiesett
   const int kod = postConfig("Halozat", "jelszo123", "", "");
   CHECK(kod == 500, "csatolatlan fajlrendszernel 500-at ad");
   CHECK(g_fs.find("/ssid.txt") == g_fs.end(), "es tenyleg semmit nem irt ki");

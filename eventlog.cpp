@@ -6,6 +6,7 @@
 #include <time.h>
 
 #include "app_hooks.h"
+#include "configstore.h"
 #include "sync.h"
 
 RTC_NOINIT_ATTR uint32_t rtcEvMagic;
