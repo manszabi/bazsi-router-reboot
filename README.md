@@ -1156,6 +1156,21 @@ jöhet egy áramszünet, ami az RTC naplót elvinné.
 > tüntette el a tartós naplót, amiért az egyáltalán létezik. (Az `NV20` teszt
 > ezt rögzíti.)
 
+> **Mi dönti el, melyik a frissebb – időbélyeg nélkül is?** Semmi: a sorrend
+> **szerkezeti**, nem összehasonlításon alapul. A fájl bejegyzései a
+> legrégebbitől a legújabbig, kiegyenesítve állnak; az RTC-ből pedig csak az
+> jön utánuk, ami a legutóbbi mentés óta keletkezett – az definíció szerint
+> újabb. Ezért **NTP nélkül is helyes a sorrend**, és nincs szükség a korábbi
+> „melyik a frissebb?" heurisztikára.
+>
+> A „meddig mentettünk" jelző viszont **csak akkor mond igazat, ha a fájl
+> tényleg megvan**. Ha elveszett (LittleFS újraformázás, törölt fájl,
+> flash-hiba), a jelző elrejtené azokat az RTC bejegyzéseket, amikről azt
+> hisszük, hogy már mentve vannak – mérve 13 meglévőből 3 látszott. És
+> fordítva: áramszünet után a jelző nulláról indul, miközben a fájl egy
+> régebbi „életből" való nagyobb számot hordoz. A helyes alap ezért a kettő
+> **kisebbike**: így sem elrejteni, sem kettőzni nem tud. (`GAP`, `GAP2`.)
+
 > **Miért korlátos a weblap?** Mert a `/log` az **async_tcp** taskon fut, és a
 > teljes napló egyben 160 sor = **mért 18 KB**. Egy ekkora összefüggő foglalás
 > szembemegy a program elvével: a heap-felügyelet kritikus küszöbe a legnagyobb

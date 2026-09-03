@@ -8331,6 +8331,84 @@ static void scCOV8() {
   CHECK(serialHas("=== ESEMENYNAPLO ==="), "utana viszont lefut");
 }
 
+static void scGAP() {
+  // A FAJL ELVESZ, DE AZ RTC TULELI. (LittleFS ujraformazas, torolt fajl,
+  // flash-hiba.) Ilyenkor a "csak a mentes ota" szabaly ELREJTENE azokat az
+  // RTC bejegyzeseket, amikrol azt HISSZUK, hogy a fajlban vannak - pedig
+  // az a fajl mar nincs meg.
+  //
+  // A SORREND SZAMIT A TESZTBEN: a portalt ELOSZOR inditjuk el, mert a
+  // startConfigPortal() maga is ment (AP modba valtas elott), es igy
+  // ujrairna a fajlt, amit epp eltuntetni akarunk. (Az elso valtozatom ezen
+  // bukott el: 0 sort mert, es nem a hibat merte, hanem a sajat sorrendjet.)
+  coldBoot(false, "", "", "", "");
+  setFilesystemReady(true);
+  startConfigPortal();                       // a /log kezelo alljon rendelkezesre
+  for (int i = 0; i < 10; i++) logEvent((EventCode)2, (uint16_t)(100 + i));
+  CHECK(saveEventLog("mentes"), "10 bejegyzes mentve");
+  const uint32_t mentettEddig = rtcSavedEvNext;
+  CHECK(mentettEddig >= 10, "a jelzo szerint mentettunk");
+  for (int i = 0; i < 3; i++) logEvent((EventCode)3, (uint16_t)(200 + i));
+
+  // ...es most a FAJL eltunik, az RTC viszont ep marad.
+  g_fs.erase("/evlog.bin");
+  AsyncWebServerRequest req; g_handlers["/log#1"](&req);
+  const std::string& b = req._body;
+  size_t rtcSor = 0, p = 0;
+  while ((p = b.find("<td>RTC</td>", p)) != std::string::npos) { rtcSor++; p++; }
+  printf("     [info] az RTC-ben %u bejegyzes van, a lap %zu RTC-sort mutat\n",
+         (unsigned)rtcEvNext, rtcSor);
+  CHECK(b.find("<td>100</td>") != std::string::npos,
+        "a fajl elvesztese utan a REGEBBI RTC bejegyzesek is latszanak");
+  CHECK(rtcSor == rtcEvNext, "mind a meglevo RTC bejegyzes megjelenik");
+
+  // Es ugyanez a soros LOG parancson.
+  g_serialLog.clear();
+  printEventLogs();
+  CHECK(serialHas("-- fajl: nincs, vagy nem olvashato"), "a LOG is latja, hogy nincs fajl");
+  char vart[48];
+  snprintf(vart, sizeof(vart), "-- RTC (a mentes ota): %u bejegyzes", (unsigned)rtcEvNext);
+  CHECK(serialHas(vart), "es a soros kiiras is a TELJES RTC naplot adja");
+}
+
+static void scGAP2() {
+  // A MASIK IRANY: a FAJL eli tul, az RTC nem (aramszunet). Ilyenkor a
+  // rtcSavedEvNext nullarol indul, a fajl viszont egy REGEBBI "eletbol" valo,
+  // NAGYOBB evNextAtSave-et hordoz. Ha a lap a fajl szamat hinne el, a friss
+  // bejegyzeseket rejtene el; ha a jelzot, ketszerezne. A kettobol a KISEBB
+  // az egyetlen helyes alap.
+  coldBoot(false, "", "", "", "");
+  setFilesystemReady(true);
+  startConfigPortal();
+  for (int i = 0; i < 20; i++) logEvent((EventCode)2, (uint16_t)(300 + i));
+  CHECK(saveEventLog("elozo elet"), "20 bejegyzes mentve");
+  EvFileHeader f; memset(&f, 0, sizeof(f));
+  CHECK(loadEventLogHeader(f), "a fajl olvashato");
+  CHECK(f.evNextAtSave >= 20, "a fajl 20-ig tart");
+
+  // --- ARAMSZUNET: a flash tuleli, az RTC nem ---
+  const std::string flash = g_fs["/evlog.bin"];
+  coldBoot(false, "", "", "", "");
+  g_fs["/evlog.bin"] = flash;
+  setFilesystemReady(true);
+  startConfigPortal();
+  rtcEvMagic = 0;                         // az RTC torlodott
+  logEvent((EventCode)1, 42);             // egyetlen friss BOOT
+  CHECK(rtcEvNext == 1, "az RTC-ben egyetlen friss bejegyzes");
+  CHECK(rtcSavedEvNext == 0, "es a 'mar mentettuk' jelzo nullarol indul");
+
+  AsyncWebServerRequest req; g_handlers["/log#1"](&req);
+  const std::string& b = req._body;
+  size_t rtcSor = 0, fajlSor = 0, p = 0;
+  while ((p = b.find("<td>RTC</td>", p)) != std::string::npos) { rtcSor++; p++; }
+  p = 0;
+  while ((p = b.find("<td>fajl</td>", p)) != std::string::npos) { fajlSor++; p++; }
+  printf("     [info] %zu fajl-sor + %zu RTC-sor\n", fajlSor, rtcSor);
+  CHECK(rtcSor == 1, "a friss bejegyzes NEM veszik el (a fajl szama nem nyomja el)");
+  CHECK(b.find("<td>42</td>") != std::string::npos, "es tenyleg ott is van");
+  CHECK(fajlSor == 20, "a fajl 20 sora is megvan - ketszerezes nelkul");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -8655,6 +8733,8 @@ static const Scenario kScenarios[] = {
   { "ILV5: mindket irany egyszerre, veletlen suruseggel", scILV5 },
 
   // --- A maradek hibaagak ---
+  { "GAP: elveszett fajl mellett az RTC teljes tartalma latszik", scGAP },
+  { "GAP2: aramszunet utan sem elrejtes, sem ketszerezes", scGAP2 },
   { "COV7: a naplofajl olvasasi hibaagai", scCOV7 },
   { "COV8: a soros olvasas vedelmi aga", scCOV8 },
   { "CMD1: a soros LOG parancs mindket naplot kiirja", scCMD1 },

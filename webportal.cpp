@@ -579,10 +579,6 @@ static void sendDiagnosticLog(AsyncWebServerRequest* request) {
   memcpy(evCopy, rtcEvents, sizeof(evCopy));
   portEXIT_CRITICAL(&evLogMux);
 
-  // Ami az RTC-ben van, de a fajlban meg nincs.
-  const uint32_t keletkezett = (evTotal > mentettEddig) ? (evTotal - mentettEddig) : 0;
-  const uint16_t ujDb = (uint16_t)(keletkezett < EVLOG_SIZE ? keletkezett : EVLOG_SIZE);
-
   // Ha epp fajliras folyik a masik taskbol, a fajlt NEM olvassuk. Ez a
   // kizaras nem atomi (az iras a kerdes utan is elindulhat), de nem is kell
   // annak lennie: egy felig kiirt fajlon a fejlec ellenorzese bukik, es a lap
@@ -590,6 +586,28 @@ static void sendDiagnosticLog(AsyncWebServerRequest* request) {
   EvFileHeader fej;
   const bool vanFajl = !configWriteInProgress() && loadEventLogHeader(fej);
   const uint16_t fajlDb = vanFajl ? fej.count : 0;
+
+  // MEDDIG BIZHATUNK A "MAR MENTETTUK" JELZOBEN?
+  //
+  // A ket forras sorrendje SZERKEZETI, nem idobelyeg-alapu: a fajl a regebbi
+  // (oldest->newest kiegyenesitve), az RTC uj bejegyzesei pedig definicio
+  // szerint utana kovetkeznek. Ezert nem is kell idobelyeg a rendezeshez -
+  // es ez jo, mert NTP nelkul nem is lenne.
+  //
+  // A jelzo viszont csak akkor mond igazat, ha a FAJL TENYLEG MEGVAN. Ha
+  // elveszett (LittleFS ujraformazas, torolt fajl, flash-hiba), akkor azok a
+  // bejegyzesek, amikrol azt hisszuk, hogy "mar mentve vannak", SEHOL nem
+  // latszanak - pedig az RTC gyuruben ott vannak. Merve: 13 meglevo
+  // bejegyzesbol 3 latszott. (GAP teszt.)
+  //
+  // Es a fajl SAJAT allitasa (evNextAtSave) is szamit: aramszunet utan a
+  // rtcSavedEvNext nullarol indul, mikozben a fajl egy REGEBBI "eletbol" valo
+  // nagyobb szamot hordoz. A kettobol a KISEBB a helyes alap - igy sem
+  // elrejteni, sem ketszerezni nem tudunk.
+  const uint32_t alap = vanFajl
+      ? (mentettEddig < fej.evNextAtSave ? mentettEddig : fej.evNextAtSave) : 0;
+  const uint32_t keletkezett = (evTotal > alap) ? (evTotal - alap) : 0;
+  const uint16_t ujDb = (uint16_t)(keletkezett < EVLOG_SIZE ? keletkezett : EVLOG_SIZE);
 
   if (fajlDb == 0 && ujDb == 0) {
     r->print(F("<p>Nincs rogzitett esemeny.</p>"));
