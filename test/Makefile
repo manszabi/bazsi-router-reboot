@@ -58,7 +58,7 @@ cov: $(BUILD)/run-cov
 # vedi, hogy egy uj, egyetlen forgatokonyv altal sem erintett ag ne csusszon be
 # eszrevetlenul. A kuszob a jelenlegi szint alatt all egy kicsivel, hogy egy
 # jogos, atmeneti visszaeses ne blokkoljon - de a szandekos elhanyagolas igen.
-COV_MIN ?= 97.0
+COV_MIN ?= 98.8
 
 covgate: $(BUILD)/run-cov
 	@rm -f *.gcov $(BUILD)/*.gcda
@@ -148,3 +148,18 @@ fuzz: $(FUZZBINS)
 	done; \
 	if [ $$rc -ne 0 ]; then echo "FUZZING: TALALAT - lasd a crash-* fajlokat"; exit 1; fi; \
 	echo "Fuzzing: mind a negy celpont tisztan futott."
+
+# --- A STUBOK IGAZOLASA A VALODI KONYVTARAK ELLEN --------------------------
+# A teljes host-tesztkeszlet ervenyessege ezen all: ha egy stub teved, a teszt
+# ZOLD, az eszkoz meg hibazik. A gyokereket kivulrol kell megadni, mert a
+# valodi forrasok nem a repoban vannak:
+#   STUBROOTS="$HOME/.arduino15 $HOME/Arduino/libraries" make stubcheck
+# A CI a firmware-build jobban futtatja, ahol a konyvtarak mar telepitve
+# vannak - ott a pontosan kituzott verziok allnak a lemezen.
+.PHONY: stubcheck
+stubcheck:
+	@if [ -z "$(STUBROOTS)" ]; then \
+	  echo "stubcheck: adj meg gyokereket, pl. STUBROOTS=\"\$$HOME/.arduino15\" make stubcheck"; \
+	  exit 2; \
+	fi
+	@python3 ../tools_stubcheck.py $(STUBROOTS)

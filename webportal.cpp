@@ -47,6 +47,17 @@ struct ConfigDraft {
   char ssid[SSID_MAX_LEN + 1]      = { 0 };
   char pass[PASS_MAX_LEN + 1]      = { 0 };
   char passEnc[SECRET_ENC_MAX + 1] = { 0 };
+
+// A KODOLASI AG PREMISSZAJA, FORDITASIDOBEN. A parseConfigPost()-ban van egy
+// ag arra az esetre, ha a kodolt jelszo nem ferne a pufferbe - es az a
+// lefedettsegben SZANDEKOSAN feher marad, mert szerkezetileg elerhetetlen.
+// "Szerkezetileg elerhetetlen" viszont csak addig igaz, amig ez a ket meret
+// egyutt mozog. Eddig ezt csak a komment allitotta; mostantol a FORDITO.
+static_assert(sizeof(ConfigDraft::pass) - 1 <= PASS_MAX_LEN,
+              "a ConfigDraft jelszo-mezoje nem lehet hosszabb PASS_MAX_LEN-nel");
+static_assert(SECRET_ENC_MAX >= SECRET_PREFIX_LEN + 2 * (sizeof(ConfigDraft::pass) - 1),
+              "a kodolt jelszo pufferenek MINDIG elegnek kell lennie - kulonben "
+              "a parseConfigPost() 'nem fert a pufferbe' aga elerhetove valna");
   char ip[IPSTR_MAX_LEN + 1]       = { 0 };
   char gateway[IPSTR_MAX_LEN + 1]  = { 0 };
   bool ssidProvided = false;
