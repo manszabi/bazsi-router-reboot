@@ -188,6 +188,8 @@ void feedLoopWDT_fromCore() {
 // kozben vegez valamit - pl. befejezi a fajlirast. Egyszalu szimulatorban ez az
 // egyetlen mod a konkurencia hu abrazolasara.
 void (*g_onDelay)() = nullptr;
+// A flash-iras mint megszakitasi pont - lasd a magyarazatot a LittleFS.h-ban.
+void (*g_onFsWrite)() = nullptr;
 void delay(uint32_t ms) { const uint32_t d = ms ? ms : 1; g_millis += d; wdtAdvanceTime(d); if (g_onDelay) g_onDelay(); }
 
 HardwareSerial Serial;

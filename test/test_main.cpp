@@ -7118,6 +7118,292 @@ static void scAP8() {
   CHECK(req2._body.size() < meret, "a tipikus eset kisebb a legrosszabbnal");
 }
 
+// ============================================================================
+// A KET TASK TENYLEGES OSSZEFONASA (ILV1-ILV5)
+//
+// A program KET taskon fut. A loop task vegzi a merest, a dontest, az alvast;
+// az async_tcp task futtatja a HTTP kezeloket (a beallito urlapot es a /log
+// oldalt). A ket task KOZOS allapoton dolgozik - savingConfig, restartPending,
+// restartAt, apDeadline -, es epp ezert van a portMUX spinlock.
+//
+// EDDIG AZT BIZONYITOTTUK, hogy a kritikus szakasz sosem agyazodik egymasba
+// (mind a 303 forgatokonyv meri). AZT VISZONT MEG SOHA, hogy a ket task
+// TETSZOLEGES PONTOKON VALTAKOZVA is helyesen viselkedik. Pedig epp ezert
+// letezik a zar.
+//
+// HOL VANNAK A VALODI MEGSZAKITASI PONTOK? Egyetlen magon a taskvaltas nem
+// barhol tortenik, hanem ott, ahol az utemezo szohoz jut:
+//
+//   1. A loop() blokkolo szakaszaiban, a delay()-eknel. Az async_tcp
+//      MAGASABB prioritasu (3) a loop tasknal (1), tehat ott be is vag.
+//      -> ezt a g_onDelay horog modellezi: loop() --megszakit--> HTTP kezelo
+//
+//   2. A HTTP kezelo FLASH-IRASA kozben. A LittleFS muvelet alatt az utemezo
+//      futtathatja a loop taskot - es ekkor az async_tcp MAR megszerezte a
+//      mentesi zarat, de MEG NEM engedte el.
+//      -> ezt a g_onFsWrite horog modellezi: HTTP kezelo --megszakit--> loop()
+//
+// A ketto egyutt a tenyleges osszefonas. A 2. az ERDEKESEBB: pontosan az az
+// ablak, ami ellen a lockConfigBeforeShutdown() vedekezik.
+// ============================================================================
+
+static int  g_ilvDepth   = 0;    // beagyazas-vedelem (a harness vegtelen
+                                 // rekurzioba futna, a valo elet nem)
+static int  g_ilvHits    = 0;    // hanyszor sikerult tenylegesen osszefonni
+static int  g_ilvEvery   = 1;
+static int  g_ilvCounter = 0;
+static int  g_ilvWhich   = 0;    // 0=/ping 1=/log 2=POST
+static int  g_ilvPostSeq = 0;
+
+// A LEGERSEBB TULAJDONSAG: minden kilepesi ut atmegy a mentesi zaron.
+//
+// A lockConfigBeforeShutdown() megszerzi a zarat, es SZANDEKOSAN nem engedi el
+// (aki hivja, mar nem ter vissza). Ha tehat egy alvas vagy ujraindulas ugy
+// kovetkezik be, hogy a zar NINCS megszerezve, akkor az az ut MEGKERULTE a
+// vedelmet - es epp azt a felbevagott fajlirast kaphatjuk, ami ellen az egesz
+// mechanizmus van.
+static bool g_ilvExitLocked = false;
+static bool g_ilvExitSeen   = false;
+
+static void ilvNoteExit() {
+  g_ilvExitSeen = true;
+  g_ilvExitLocked = configWriteInProgress();
+}
+
+// --- 1. IRANY: a loop() blokkolo szakaszaban befut a HTTP kezelo ------------
+static void ilvHttpHook() {
+  if (g_ilvDepth > 0) return;
+  if (g_ilvEvery > 1 && (++g_ilvCounter % g_ilvEvery) != 0) return;
+  g_ilvDepth++;
+  try {
+    AsyncWebServerRequest req;
+    if (g_ilvWhich == 0) {
+      g_handlers["/ping#1"](&req);
+    } else if (g_ilvWhich == 1) {
+      g_handlers["/log#1"](&req);
+    } else {
+      char s[40]; snprintf(s, sizeof(s), "Halo%d", ++g_ilvPostSeq);
+      req.addParam("ssid", s);
+      req.addParam("pass", "jelszo12345");
+      g_handlers["/#2"](&req);
+    }
+    g_ilvHits++;
+  } catch (RestartSignal&) {
+  } catch (DeepSleepSignal&) {
+  }
+  g_ilvDepth--;
+}
+
+// --- 2. IRANY: a HTTP kezelo flash-irasa kozben befut a loop() --------------
+// Ez a veszelyes ablak: a zar MAR a mienk, de meg nem engedtuk el.
+static int  g_ilvLoopBudget = 0;
+// Ha igaz, a beekelt loop() elott lejartra allitjuk az AP hataridot: igy a
+// loop task EPP alvast akar - a zar alatt. Kulonben a POST kezelo
+// touchApDeadline()-ja mindig a jovobe tolja, es a beekelt loop() sosem jut
+// el kilepesi dontesig (az elso valtozatom pont ezen bukott: a legfontosabb
+// allitas URESEN ment at).
+static bool g_ilvForceExit = false;
+static bool g_ilvLockedWhileLooping = false;
+static void ilvLoopHook() {
+  if (g_ilvDepth > 0 || g_ilvLoopBudget <= 0) return;
+  g_ilvLoopBudget--;
+  if (g_ilvForceExit) apDeadline = millis() - 1;
+  if (configWriteInProgress()) g_ilvLockedWhileLooping = true;
+  g_ilvDepth++;
+  g_ilvHits++;
+  try {
+    loop();
+  } catch (RestartSignal&) {
+    ilvNoteExit();
+  } catch (DeepSleepSignal&) {
+    ilvNoteExit();
+  }
+  g_ilvDepth--;
+}
+
+static void ilvReset() {
+  g_ilvDepth = 0; g_ilvHits = 0; g_ilvCounter = 0; g_ilvPostSeq = 0;
+  g_ilvLoopBudget = 0; g_ilvForceExit = false; g_ilvLockedWhileLooping = false;
+  g_ilvExitLocked = false; g_ilvExitSeen = false;
+  g_onDelay = nullptr; g_onFsWrite = nullptr;
+}
+
+// ---------------------------------------------------------------------------
+static void scILV1() {
+  // /ping a loop() minden delay()-eben. A /ping az apDeadline-t irja - a loop
+  // ugyanazt olvassa. Ez a legsurubb lehetseges osszefonas.
+  ilvReset();
+  coldBoot(false, "", "", "", "");     // nincs SSID -> AP mod
+  setup();
+  CHECK(deviceMode == (DeviceMode)1, "AP modban vagyunk (van HTTP felulet)");
+  g_ilvWhich = 0; g_ilvEvery = 1;
+  g_onDelay = ilvHttpHook;
+  bool kilepett = false;
+  int guard = 0;
+  try {
+    while (++guard < 4000) loop();
+  } catch (DeepSleepSignal&) { kilepett = true; ilvNoteExit(); }
+    catch (RestartSignal&)   { kilepett = true; ilvNoteExit(); }
+  g_onDelay = nullptr;
+  printf("     [info] %d osszefonas, %d loop iteracio\n", g_ilvHits, guard);
+  CHECK(g_ilvHits > 100, "a /ping tenylegesen befutott a loop() koze");
+  CHECK(g_criticalMaxDepth <= 1, "a kritikus szakasz nem agyazodott egymasba");
+  // A /ping minden hivasnal kitolja a hataridot, tehat az AP nem jarhat le:
+  // ez maga a keep-alive szerzodese, most a ket task versenyeben merve.
+  CHECK(!kilepett || g_ilvExitLocked,
+        "ha megis kilepett, a mentesi zart megszerezve tette");
+  CHECK(deviceMode == (DeviceMode)1, "vegig AP modban maradt (a keep-alive hatott)");
+}
+
+static void scILV2() {
+  // A /log oldal OLVASSA az esemenynaplot, mikozben a loop task IRHATJA.
+  // A naplo gyuru: egy felolvasott, kozben felulirt bejegyzes itt derulne ki.
+  ilvReset();
+  coldBoot(false, "", "", "", "");
+  setup();
+  g_ilvWhich = 1; g_ilvEvery = 3;
+  g_onDelay = ilvHttpHook;
+  int guard = 0;
+  try {
+    while (++guard < 3000) {
+      loop();
+      if (guard % 200 == 0) logEvent((EventCode)2, (uint16_t)guard);
+    }
+  } catch (DeepSleepSignal&) { ilvNoteExit(); }
+    catch (RestartSignal&)   { ilvNoteExit(); }
+  g_onDelay = nullptr;
+  printf("     [info] %d /log lekeres a naplo irasa kozben\n", g_ilvHits);
+  CHECK(g_ilvHits > 50, "a /log tenylegesen befutott a naplo irasa koze");
+  CHECK(g_criticalMaxDepth <= 1, "a kritikus szakasz nem agyazodott egymasba");
+  CHECK(rtcEvMagic == 0x42415A4DUL, "az esemenynaplo magicje ep maradt");
+}
+
+static void scILV3() {
+  // POST mentes a loop() delay()-eibe ekelve. A mentes ZARAT szerez es
+  // HALASZTOTT ujrainditast ker - mindketto osztott allapot.
+  //
+  // AZ ELSO VALTOZATOM ITT HIBAZOTT: vegig injektalt, es azt varta, hogy
+  // kozben ujrainduljon. Nem indult ujra - de nem a program hibajabol: MINDEN
+  // ujabb mentes elorebb tolja a halasztott ujrainditas hataridejet, es ez
+  // SZANDEKOS (a "dupla koppintas" esete, amit a kod komment ki is mond).
+  // A helyes teszt tehat: egy ideig injektalunk, aztan ABBAHAGYJUK - es
+  // onnantol az ujrainditasnak PONTOSAN EGYSZER kell bekovetkeznie.
+  ilvReset();
+  coldBoot(false, "", "", "", "");
+  setup();
+  g_ilvWhich = 2; g_ilvEvery = 5;
+  g_onDelay = ilvHttpHook;
+  int guard = 0;
+  bool ujraindult = false;
+  const int INJEKTALAS_VEGE = 600;
+  try {
+    while (++guard < 6000) {
+      if (guard == INJEKTALAS_VEGE) {
+        g_onDelay = nullptr;   // innentol a HTTP task hallgat
+        CHECK(restartRequested(), "az injektalas vegen all fuggo ujrainditas");
+      }
+      loop();
+    }
+  } catch (RestartSignal&)   { ujraindult = true; ilvNoteExit(); }
+    catch (DeepSleepSignal&) { ilvNoteExit(); }
+  g_onDelay = nullptr;
+  printf("     [info] %d POST mentes, %d iteracio, ujraindult=%s\n",
+         g_ilvHits, guard, ujraindult ? "igen" : "nem");
+  CHECK(g_ilvHits > 5, "a POST mentes tenylegesen befutott a loop() koze");
+  CHECK(g_criticalMaxDepth <= 1, "a kritikus szakasz nem agyazodott egymasba");
+  // A halasztott ujrainditast a loop task hajtja vegre - es az injektalas
+  // abbahagyasa UTAN, nem elveszve.
+  CHECK(ujraindult, "az injektalas abbahagyasa utan az ujrainditas vegrehajtodott");
+  CHECK(guard > INJEKTALAS_VEGE, "es tenyleg csak azutan, nem kozben");
+  CHECK(g_ilvExitLocked,
+        "az ujrainditas a mentesi zart MEGSZEREZVE tortent (nem vagta fel a mentest)");
+  // A mentett ertek TELJES: nem egy felbevagott iras maradvanya.
+  CHECK(g_fs.count("/ssid.txt") && g_fs["/ssid.txt"].rfind("Halo", 0) == 0,
+        "a mentett SSID teljes ertek, nem csonk");
+}
+
+static void scILV4() {
+  // A FORDITOTT IRANY, ez a lenyeg: a HTTP kezelo flash-irasa KOZBEN fut le a
+  // loop() - vagyis akkor, amikor az async_tcp MAR a zar birtokaban van.
+  //
+  // AMIT MERNI AKARTAM: hogy a beekelt loop() elalszik-e a mentes alatt, es ha
+  // igen, atmegy-e a lockConfigBeforeShutdown()-on. A valasz meglepett: NEM
+  // ALSZIK EL, es nem is jut el a zarig. A handleConfigMode() ugyanis MAR A
+  // DONTESNEL kizarja:
+  //
+  //     if (!configWriteInProgress() && !restartRequested() &&
+  //         (int32_t)(currentMillis - apDeadline) >= 0) { apSleep(); }
+  //
+  // Vagyis a vedelem KET retegu. Az elso reteg itt van: a loop task ra sem
+  // lep az alvas agara, amig mentes folyik. A masodik a
+  // lockConfigBeforeShutdown(), ami azokat az utakat fogja (gomb, watchdog),
+  // amik nem ezen a feltetelen at jonnek.
+  //
+  // Ezert ez a forgatokonyv az ELSO reteget rogziti - es a nem-uressegre
+  // kulon figyel: az ablaknak tenyleg nyitva kell lennie (a zar allt, a
+  // hatarido lejart, a loop tenyleg futott).
+  ilvReset();
+  coldBoot(false, "", "", "", "");
+  setup();
+  CHECK(deviceMode == (DeviceMode)1, "AP mod");
+  g_ilvForceExit = true;      // a hatarido a horogban jar le, a loop() elott
+  g_ilvLoopBudget = 3;
+  g_onFsWrite = ilvLoopHook;
+  AsyncWebServerRequest req;
+  req.addParam("ssid", "OsszefontHalo");
+  req.addParam("pass", "jelszo12345");
+  bool kivetel = false;
+  try {
+    g_handlers["/#2"](&req);
+  } catch (RestartSignal&)   { kivetel = true; ilvNoteExit(); }
+    catch (DeepSleepSignal&) { kivetel = true; ilvNoteExit(); }
+  g_onFsWrite = nullptr;
+  printf("     [info] %d loop() iteracio a flash-iras KOZBEN, zar allt=%s, "
+         "kilepes=%s%s\n", g_ilvHits, g_ilvLockedWhileLooping ? "igen" : "NEM",
+         g_ilvExitSeen ? "igen" : "nem",
+         kivetel ? " (a kezelo maga kivetellel zarult)" : "");
+  // --- a meres ERVENYESSEGE (az ablak tenyleg nyitva volt) ---
+  CHECK(g_ilvHits > 0, "a loop() tenylegesen befutott a flash-iras koze");
+  CHECK(g_ilvLockedWhileLooping,
+        "es a beekelt loop() KOZBEN tenyleg allt a mentesi zar (nyitott ablak)");
+  // --- a tulajdonsag ---
+  CHECK(!g_ilvExitSeen,
+        "a lejart hatarido ELLENERE sem aludt el, amig a mentes folyt");
+  CHECK(g_criticalMaxDepth <= 1, "a kritikus szakasz nem agyazodott egymasba");
+  CHECK(g_fs.count("/ssid.txt") && g_fs["/ssid.txt"] == "OsszefontHalo",
+        "a mentett SSID az osszefonas ellenere is teljes es helyes");
+}
+
+static void scILV5() {
+  // MINDKET IRANY EGYSZERRE, veletlen suruseggel. Itt mar nem egy konkret
+  // sorrendet vizsgalunk, hanem azt, hogy SEMMILYEN sorrend ne rontsa el.
+  ilvReset();
+  coldBoot(false, "", "", "", "");
+  setup();
+  g_onFsWrite = ilvLoopHook;
+  g_onDelay = ilvHttpHook;
+  uint32_t s = 0xC0FFEEu;
+  int guard = 0;
+  bool kilepett = false;
+  try {
+    while (++guard < 2500) {
+      s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+      g_ilvWhich = (int)(s % 3);
+      g_ilvEvery = 1 + (int)((s >> 8) % 9);
+      g_ilvLoopBudget = (int)((s >> 16) % 3);
+      loop();
+    }
+  } catch (RestartSignal&)   { kilepett = true; ilvNoteExit(); }
+    catch (DeepSleepSignal&) { kilepett = true; ilvNoteExit(); }
+  g_onDelay = nullptr; g_onFsWrite = nullptr;
+  printf("     [info] %d osszefonas mindket iranyban, %d iteracio, kilepett=%s\n",
+         g_ilvHits, guard, kilepett ? "igen" : "nem");
+  CHECK(g_ilvHits > 50, "mindket irany tenylegesen osszefonodott");
+  CHECK(g_criticalMaxDepth <= 1, "a kritikus szakasz nem agyazodott egymasba");
+  CHECK(!g_ilvExitSeen || g_ilvExitLocked || serialHas("FIGYELEM: a mentes"),
+        "minden kilepesi ut a zarat megszerezve, vagy kivarva es jelezve tortent");
+}
+
 // ====================================================================
 // VELETLEN ALLAPOTGEP-BEJARAS (property-based testing)
 //
@@ -7812,6 +8098,13 @@ static const Scenario kScenarios[] = {
   { "PROP6: veletlen kornyezeti esemenysorozat - tulajdonsagok (mag 6)", scPROP6 },
   { "PROP7: veletlen kornyezeti esemenysorozat - tulajdonsagok (mag 7)", scPROP7 },
   { "PROP8: veletlen kornyezeti esemenysorozat - tulajdonsagok (mag 8)", scPROP8 },
+
+  // --- A ket task tenyleges osszefonasa ---
+  { "ILV1: /ping a loop() minden delay()-eben (a legsurubb osszefonas)", scILV1 },
+  { "ILV2: /log olvasas a naplo irasa kozben", scILV2 },
+  { "ILV3: POST mentes a loop() koze ekelve - zar es halasztott ujrainditas", scILV3 },
+  { "ILV4: a loop() a flash-iras KOZBEN - a kilepesi ut nem kerulheti meg a zarat", scILV4 },
+  { "ILV5: mindket irany egyszerre, veletlen suruseggel", scILV5 },
 };
 
 

@@ -19,6 +19,18 @@ extern bool   g_fsShortRead;
 extern int    g_fsShortReadSkip;
 extern size_t g_fsUsed();
 
+// A FLASH-IRAS MINT MEGSZAKITASI PONT.
+//
+// Ez a horog azt modellezi, amit a valo eletben a flash-iras jelent: a LittleFS
+// muvelet ideje alatt a FreeRTOS utemezo mas taskot futtathat. A programban
+// pontosan EZ a veszelyes ablak - az async_tcp task ilyenkor MAR megszerezte a
+// mentesi zarat (savingConfig), de meg NEM engedte el, es kozben a loop task
+// eljuthat az alvas vagy az ujraindulas dontesig.
+//
+// A g_onDelay a masik iranyt modellezi (a loop() blokkolo szakaszaiban fut le
+// a HTTP kezelo); ez a ketto egyutt adja ki a ket task tenyleges osszefonasat.
+extern void (*g_onFsWrite)();
+
 class File : public Stream {
 public:
   File() : ok_(false) {}
@@ -48,6 +60,8 @@ public:
   // mint a valóságban egy megtelt fájlrendszernél.
   size_t print(const char* s) {
     if (!ok_) return 0;
+    if (g_onFsWrite) g_onFsWrite();
+
     std::string want(s);
     if (g_fsCapacity) {
       size_t other = 0;
@@ -68,6 +82,8 @@ public:
   // kell kovetnie, mint a print()-nek, kulonben a hibainjektalas nem hatna ra.
   size_t write(const uint8_t* b, size_t n) {
     if (!ok_) return 0;
+    if (g_onFsWrite) g_onFsWrite();
+
     std::string want(reinterpret_cast<const char*>(b), n);
     if (g_fsCapacity) {
       size_t other = 0;

@@ -352,3 +352,53 @@ hataron tuli olvasas, definialatlan viselkedes, vegtelen ciklus - **a sajat
 kodunkban**. Amit nem: a valodi ESPAsyncWebServer / lwIP hibait (nem a mi
 kodunk, es nem is forognak itt), es az `IPAddress::fromString()`-et sem, mert az
 a hoston stub - azt fuzzolni a sajat stubunk teszteles lenne, nem a firmware-e.
+
+## A ket task tenyleges osszefonasa (ILV1-ILV5)
+
+A program **ket taskon** fut: a loop task mer, dont es alszik, az async_tcp
+task futtatja a HTTP kezeloket. A ket task kozos allapoton dolgozik
+(`savingConfig`, `restartPending`, `restartAt`, `apDeadline`), es epp ezert van
+a `portMUX` spinlock. Eddig azt bizonyitottuk, hogy a kritikus szakasz sosem
+agyazodik egymasba - azt viszont soha, hogy a ket task **tetszoleges pontokon
+valtakozva** is helyesen viselkedik.
+
+**Hol vannak a valodi megszakitasi pontok?** Egyetlen magon a taskvaltas nem
+barhol tortenik, hanem ott, ahol az utemezo szohoz jut:
+
+| Horog | Irany | Mit modellez |
+|---|---|---|
+| `g_onDelay` | loop() → HTTP kezelo | a loop blokkolo szakaszai; az async_tcp magasabb prioritasu (3 vs 1), tehat bevag |
+| `g_onFsWrite` | HTTP kezelo → loop() | a flash-iras ideje; ilyenkor az async_tcp **mar a zar birtokaban van**, de meg nem engedte el |
+
+| | Mit rogzit |
+|---|---|
+| ILV1 | `/ping` a loop **minden** `delay()`-eben (3999 osszefonas) - a keep-alive a versenyben is hat |
+| ILV2 | `/log` olvasas a naplo irasa kozben - a gyuru ep marad |
+| ILV3 | POST mentes a loop koze ekelve; az injektalas abbahagyasa utan a halasztott ujrainditas **pontosan egyszer** fut le, a zarat megszerezve |
+| ILV4 | a loop a **flash-iras kozben** - a lejart AP hatarido ellenere sem alszik el |
+| ILV5 | mindket irany egyszerre, veletlen suruseggel |
+
+### Amit az ILV4 megmutatott
+
+Azt akartam merni, hogy a mentes alatt elalvo loop atmegy-e a
+`lockConfigBeforeShutdown()`-on. **Nem alszik el, es nem is jut el a zarig**: a
+`handleConfigMode()` mar a DONTESNEL kizarja.
+
+```cpp
+if (!configWriteInProgress() && !restartRequested() &&
+    (int32_t)(currentMillis - apDeadline) >= 0) { apSleep(); }
+```
+
+A vedelem tehat **ket retegu**: az elso itt van (a loop ra sem lep az alvas
+agara), a masodik a `lockConfigBeforeShutdown()`, ami azokat az utakat fogja
+(gomb, watchdog), amik nem ezen a felteteten at jonnek. Az ILV4 az elso reteget
+rogziti - es kulon ellenorzi, hogy az ablak tenyleg **nyitva volt** (a zar allt,
+a hatarido lejart, a loop tenyleg futott), kulonben az allitas ures lenne.
+
+### Mutacioval igazolva
+
+| Mutacio | Elkapja |
+|---|---|
+| a `!configWriteInProgress()` feltetel kivéve az alvas-dontesbol | **ILV4** (es a kilepes tenyleg bekovetkezik) |
+| a halasztott ujrainditas hatarideje sosem jar le | **ILV3** |
+| beagyazott `portENTER_CRITICAL` a naplozasban | **10 ellenorzes** az ILV-kben |
