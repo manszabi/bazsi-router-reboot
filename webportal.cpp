@@ -71,6 +71,22 @@ static_assert(SECRET_ENC_MAX >= SECRET_PREFIX_LEN + 2 * (sizeof(ConfigDraft::pas
 static AsyncWebServer server(80);
 
 // Search for parameter in HTTP POST request
+// A /log oldal valasz-streamjenek kezdo puffere, es az oldalon mutatott
+// sorok felso korlatja. A kettő EGYUTT jar: a meretet a LOG7 teszt meri.
+//
+// MIERT KORLATOS AZ OLDAL? A naplofajl mostantol 128 bejegyzest orizhet, es
+// az RTC gyuru meg 32-t - egyben kiirva ez 160 sor, MERVE 18 KB. Egy ekkora
+// osszefuggo foglalas az async_tcp taskban szembemegy az egesz program
+// elvevel: a heap-felugyelet KRITIKUS kuszobe a legnagyobb tombre 6000 bajt,
+// vagyis egy 18-24 KB-os keres joval a riasztasi szint elott elbukna egy
+// elaprozodott heapen.
+//
+// Ezert a felosztas: a FAJL orzi a hosszu tortenetet, a LAP a legfrissebb
+// LOG_PAGE_MAX_ROWS sort mutatja, a TELJES naplot pedig a soros "LOG" parancs
+// irja ki - az soronkent kuld, nem pufferel.
+constexpr uint16_t LOG_PAGE_MAX_ROWS = 48;
+constexpr size_t LOG_STREAM_BUFFER = 8192;
+
 const char PARAM_SSID[]    = "ssid";
 const char PARAM_PASS[]    = "pass";
 const char PARAM_IP[]      = "ip";
@@ -477,13 +493,40 @@ static void handleConfigPost(AsyncWebServerRequest* request) {
 }
 
 // A /log kezeloje: a diagnosztikai naplo HTML oldala.
+// Egy naplosor kiirasa. KOZOS a ket forrasra (fajl es RTC), hogy a formatum
+// ne tudjon szetcsuszni koztuk.
+static void printLogRow(AsyncResponseStream* r, const EventEntry& e,
+                        const char* forras) {
+  char mikor[24];
+  r->print(F("<tr><td>"));
+  if (formatEpoch(e.epoch, mikor, sizeof(mikor))) {
+    r->print(mikor);
+  } else {
+    // Nem volt (meg) oraszinkron ennel a bejegyzesnel. Nem hiba - a uptime
+    // oszlop ilyenkor is elmond mindent.
+    r->print(F("-"));
+  }
+  r->printf("</td><td>%u:%02u:%02u</td><td>%s</td><td>%u</td><td>%s</td></tr>",
+            (unsigned)(e.uptimeSec / 3600), (unsigned)((e.uptimeSec % 3600) / 60),
+            (unsigned)(e.uptimeSec % 60), eventName(e.code), (unsigned)e.param,
+            forras);
+}
+
 static void sendDiagnosticLog(AsyncWebServerRequest* request) {
   touchApDeadline();
   // A stream puffere igény szerint nő (resizeAdd), de akkor soronként
   // újraallokálna. Egy bőséges kezdőmérettel ez egyetlen foglalás lesz:
   // fejléc + állapot + 32 sor x ~70 bájt + a ~900 bájtos jelmagyarázat +
   // lábléc alatta marad.
-  AsyncResponseStream* r = request->beginResponseStream("text/html", 6144);
+  // A KEZDO PUFFER MERETE. A stream szukseg eseten no, de akkor soronkent
+  // ujraallokal - epp az async_tcp taskban, ahol a heap a legszukebb. Egy
+  // boseges kezdomeret ezt egyetlen foglalassa teszi.
+  //
+  // A LEGROSSZABB ESET MEGNOTT, amikor a naplofajl sajat, nagyobb gyuruve
+  // valt: 128 fajl-sor + 32 RTC-sor. A LOG7 teszt MEGMERI, es megbukik, ha a
+  // lap eszrevetlenul a puffer fole nőne.
+  AsyncResponseStream* r = request->beginResponseStream("text/html",
+                                                        LOG_STREAM_BUFFER);
   r->print(F("<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
              "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
              "<title>Naplo</title></head><body><h2>Diagnosztikai naplo</h2>"));
@@ -512,120 +555,101 @@ static void sendDiagnosticLog(AsyncWebServerRequest* request) {
   // is olvashatnánk. A kritikus szakasz egy memcpy.
   //
   // EGYETLEN puffert hasznalunk mindkét forráshoz (RTC és fájl): az
-  // async_tcp task veremje véges, és 32 bejegyzés már 384 bájt. Előbb
-  // eldöntjük, melyik forrás kell, és csak azt töltjük be.
-  uint32_t evTotal;
+  // A KET FORRAS MOSTANTOL EGYUTT, NEM EGYMAS HELYETT.
+  //
+  // Korabban a lap valasztott: vagy a fajl, vagy az RTC naplo - amelyik
+  // frissebbnek latszott. Ez azert kellett, mert a fajl az RTC gyuru
+  // PILLANATKEPE volt, tehat a ketto atfedte egymast. Mostantol a mentes
+  // HOZZAFUZ (lasd saveEventLog), igy a ket forras EGYMAST EGESZITI KI:
+  //   - a fajl a HOSSZU tortenet (max EVFILE_SIZE bejegyzes, tobb bootolason
+  //     at, aramszunetet is tulelve),
+  //   - az RTC gyuru pedig csak az, ami a legutobbi sikeres mentes OTA
+  //     tortent (rtcSavedEvNext).
+  // A ketto egymas utan a teljes tortenet, ketszerezes nelkul - es a
+  // "melyik a frissebb?" heurisztikara sincs tobbe szukseg.
+  //
+  // A VEREM: a fajlt NEM toltjuk be egeszben (128 bejegyzes 1536 bajt lenne),
+  // hanem nyolcasaval olvassuk - 96 bajt. Az async_tcp task verme veges, es a
+  // "make stack" 1200 bajtos kerete pontosan ezt vedi.
+  uint32_t evTotal, mentettEddig;
   EventEntry evCopy[EVLOG_SIZE];
   portENTER_CRITICAL(&evLogMux);
   evTotal = (rtcEvMagic == EVLOG_MAGIC) ? rtcEvNext : 0;
+  mentettEddig = rtcSavedEvNext;
   memcpy(evCopy, rtcEvents, sizeof(evCopy));
   portEXIT_CRITICAL(&evLogMux);
 
-  // MELYIK A FRISSEBB? Az RTC naplo vagy a fajlba mentett?
-  //
-  // A fajl mindig az RTC naplo egy KORABBI pillanatkepe. Ebbol kovetkezik a
-  // szabaly:
-  //  - Ha az RTC naplo TULELTE a mentes ota eltelt idot (nem volt
-  //    aramszunet), akkor bovebb is nala: mindent tartalmaz, ami a fajlban
-  //    van, PLUSZ ami azota tortent. Ilyenkor az RTC nyer.
-  //  - Ha az RTC naplot torolte egy aramszunet, a szamlalo nullarol indult,
-  //    tehat a fajl tobb elozmenyt orzott meg. Ilyenkor a fajl nyer - es
-  //    epp ez a mentes ertelme.
-  //  - Ha viszont az RTC ota mar 32 UJ esemeny keletkezett, akkor a
-  //    korpuffer teljesen tele van friss adattal, ami idoben mindenkeppen
-  //    ujabb a fajlnal.
-  //  - Ha MINDKETTONEK van valos ideje (NTP), az dont: a nagyobb idobelyeg
-  //    nyer. Ez a legpontosabb valasz, ezert ez az elso szabaly.
-  //
-  // A dontes CSAK a fejlecbol tortenik, es a bejegyzeseket utana toltjuk be -
-  // igy egyszerre csak EGY 384 bajtos puffer all a vermen.
-  //
+  // Ami az RTC-ben van, de a fajlban meg nincs.
+  const uint32_t keletkezett = (evTotal > mentettEddig) ? (evTotal - mentettEddig) : 0;
+  const uint16_t ujDb = (uint16_t)(keletkezett < EVLOG_SIZE ? keletkezett : EVLOG_SIZE);
+
   // Ha epp fajliras folyik a masik taskbol, a fajlt NEM olvassuk. Ez a
   // kizaras nem atomi (az iras a kerdes utan is elindulhat), de nem is kell
-  // annak lennie: egy felig kiirt fajlon a fejlec ellenorzese bukik, es a
-  // lap ugyanoda jut - az RTC naplohoz.
+  // annak lennie: egy felig kiirt fajlon a fejlec ellenorzese bukik, es a lap
+  // ugyanoda jut - az RTC naplohoz.
   EvFileHeader fej;
-  bool vanFajl = false;
-  if (!configWriteInProgress() && loadEventLogHeader(fej)) {
-    bool rtcNyer;
-    if (evTotal == 0) {
-      rtcNyer = false;                       // nincs mit mutatni az RTC-bol
-    } else {
-      // A fajl sajat idobelyege (mikor mentettuk) a helyes osszehasonlitasi
-      // alap: pontosan azt mondja meg, mikori a tartalma.
-      const uint32_t rtcEpoch = evCopy[(evTotal - 1) % EVLOG_SIZE].epoch;
-      if (rtcEpoch >= NTP_MIN_VALID_EPOCH
-          && fej.savedEpoch >= NTP_MIN_VALID_EPOCH) {
-        rtcNyer = (rtcEpoch >= fej.savedEpoch);   // valos ido dont
-      } else {
-        rtcNyer = (evTotal >= fej.evNextAtSave) || (evTotal >= EVLOG_SIZE);
-      }
-    }
-    if (!rtcNyer) {
-      if (loadEventLogEntries(fej, evCopy)) {
-        // A fajl bejegyzesei mar KIEGYENESITVE vannak (a legregebbitol a
-        // legujabbig), es a puffer elejen allnak; az evTotal a darabszam
-        // lesz, igy a lenti kiiro ciklus mindket forrasra ugyanaz.
-        vanFajl = true;
-        evTotal = fej.count;
-      } else {
-        // A BETOLTES FELUTON BUKOTT. Mivel EGY puffert hasznalunk, az
-        // olvasas addigra mar felulirhatta az RTC pillanatkep elejet -
-        // a puffer most fel fajl, fel RTC adat lenne. Ezert nem eleg
-        // "visszalepni" az RTC-re: UJRA kell venni a pillanatkepet.
-        portENTER_CRITICAL(&evLogMux);
-        evTotal = (rtcEvMagic == EVLOG_MAGIC) ? rtcEvNext : 0;
-        memcpy(evCopy, rtcEvents, sizeof(evCopy));
-        portEXIT_CRITICAL(&evLogMux);
-      }
-    }
-  }
+  const bool vanFajl = !configWriteInProgress() && loadEventLogHeader(fej);
+  const uint16_t fajlDb = vanFajl ? fej.count : 0;
 
-  if (evTotal == 0) {
-    // Sem az RTC-ben, sem a fajlban nincs semmi (vagy a fajl nem letezik,
-    // ures, csonka). Ez nem hiba: egyszeruen nincs mit mutatni.
+  if (fajlDb == 0 && ujDb == 0) {
     r->print(F("<p>Nincs rogzitett esemeny.</p>"));
   } else {
+    r->print(F("<p><b>Forras:</b> "));
     if (vanFajl) {
       char mikor[24];
-      r->print(F("<p><b>Forras:</b> a fajlrendszerre mentett naplo"));
+      r->printf("a fajlrendszerre mentett naplo %u bejegyzese", (unsigned)fajlDb);
       if (formatEpoch(fej.savedEpoch, mikor, sizeof(mikor))) {
-        r->printf(" (mentve: %s)", mikor);
+        r->printf(" (utoljara mentve: %s)", mikor);
       } else {
         // Nincs valos ido - de a mentes UPTIME-ja megvan. Abbol legalabb az
-        // latszik, mennyi ideje futott az eszkoz, amikor a fajl keszult; ez
-        // a "melyik esemenysor mikori?" kerdesre ora nelkul is valasz.
-        // (A mezot eddig kiirtuk a fajlba, de sosem olvastuk vissza.)
-        r->printf(" (mentve a bootolas utan %u:%02u:%02u-kor)",
+        // latszik, mennyi ideje futott az eszkoz, amikor a fajl keszult.
+        r->printf(" (utoljara mentve a bootolas utan %u:%02u:%02u-kor)",
                   (unsigned)(fej.savedUptime / 3600),
                   (unsigned)((fej.savedUptime % 3600) / 60),
                   (unsigned)(fej.savedUptime % 60));
       }
-      r->print(F(" - az RTC naplo ennel regebbi vagy ures "
-                 "(pl. aramszunet torolte).</p>"));
+      r->print(F(", plusz "));
     } else {
-      r->print(F("<p><b>Forras:</b> az RTC memoriaban levo naplo "
-                 "(ez a frissebb).</p>"));
+      r->print(F("nincs olvashato naplofajl, csak "));
     }
+    r->printf("az RTC memoriabol %u, a mentes ota keletkezett bejegyzes.</p>",
+              (unsigned)ujDb);
+
+    // A LAP ABLAKA: a legfrissebb LOG_PAGE_MAX_ROWS sor. Az RTC resz mindig
+    // belefer (legfeljebb 32), a maradek helyet a fajl VEGEROL toltjuk fel.
+    const uint16_t fajlHely = (uint16_t)(ujDb < LOG_PAGE_MAX_ROWS
+                                         ? LOG_PAGE_MAX_ROWS - ujDb : 0);
+    const uint16_t fajlMutat = fajlDb < fajlHely ? fajlDb : fajlHely;
+    const uint32_t fajlKezd = (uint32_t)(fajlDb - fajlMutat);
+    if (fajlKezd > 0) {
+      r->printf("<p><i>A fajl %u legregebbi bejegyzese nem fer a lapra - a "
+                "TELJES naplo a soros porton a \"LOG\" paranccsal olvashato.</i></p>",
+                (unsigned)fajlKezd);
+    }
+
     r->print(F("<table border=1 cellpadding=4><tr><th>Ido</th><th>Uptime</th>"
-               "<th>Esemeny</th><th>Param</th></tr>"));
-    // A legregebbi meg meglevo bejegyzestol indulunk. Fajlbol olvasva a
-    // bejegyzesek mar sorban allnak, tehat a "% EVLOG_SIZE" ott is helyes.
-    const uint32_t shown = evTotal < EVLOG_SIZE ? evTotal : EVLOG_SIZE;
-    for (uint32_t i = evTotal - shown; i < evTotal; i++) {
-      const EventEntry& e = evCopy[i % EVLOG_SIZE];
-      char mikor[24];
-      r->print(F("<tr><td>"));
-      if (formatEpoch(e.epoch, mikor, sizeof(mikor))) {
-        r->print(mikor);
-      } else {
-        // Nem volt (meg) oraszinkron ennel a bejegyzesnel. Nem hiba - a
-        // uptime oszlop ilyenkor is elmond mindent.
-        r->print(F("-"));
+               "<th>Esemeny</th><th>Param</th><th>Forras</th></tr>"));
+
+    // 1. A FAJL vege, nyolcasaval beolvasva.
+    if (fajlMutat > 0) {
+      EventEntry darab[8];
+      uint32_t tol = fajlKezd;
+      while (tol < (uint32_t)fajlKezd + fajlMutat) {
+        const uint16_t hatra = (uint16_t)(fajlKezd + fajlMutat - tol);
+        const uint16_t db = (uint16_t)(hatra < 8 ? hatra : 8);
+        if (!loadEventLogRange(fej, tol, db, darab)) {
+          r->print(F("<tr><td colspan=5>a naplofajl olvasasa megszakadt</td></tr>"));
+          break;
+        }
+        for (uint16_t i = 0; i < db; i++) {
+          printLogRow(r, darab[i], "fajl");
+        }
+        tol += db;
       }
-      r->printf("</td><td>%u:%02u:%02u</td><td>%s</td><td>%u</td></tr>",
-                (unsigned)(e.uptimeSec / 3600), (unsigned)((e.uptimeSec % 3600) / 60),
-                (unsigned)(e.uptimeSec % 60), eventName(e.code), (unsigned)e.param);
+    }
+    // 2. AZ RTC, csak ami meg nincs a fajlban.
+    for (uint16_t i = 0; i < ujDb; i++) {
+      printLogRow(r, evCopy[(evTotal - ujDb + i) % EVLOG_SIZE], "RTC");
     }
     r->print(F("</table>"));
   }

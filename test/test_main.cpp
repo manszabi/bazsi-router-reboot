@@ -154,6 +154,9 @@ void ntpResetForColdBoot();
 constexpr uint8_t EVLOG_SIZE_C = 32;      // eventlog.h EVLOG_SIZE
 constexpr size_t  SSID_MAX_LEN_C = 32;    // limits_config.h SSID_MAX_LEN
 constexpr size_t  IPSTR_MAX_LEN_C = 15;   // limits_config.h IPSTR_MAX_LEN
+constexpr uint16_t EVFILE_SIZE_C = 128;   // eventlog.h EVFILE_SIZE
+constexpr size_t LOG_STREAM_BUFFER_C = 8192;   // webportal.cpp LOG_STREAM_BUFFER
+constexpr uint16_t LOG_PAGE_MAX_ROWS_C = 48;   // webportal.cpp LOG_PAGE_MAX_ROWS
 // Az /evlog.bin fejlece. BAJTROL BAJTRA egyeznie kell az eventlog.h-beli
 // EvFileHeader-rel: a betolto sajat hatarellenorzeset csak igy lehet
 // kozvetlenul, a hivotol fuggetlenul probara tenni.
@@ -179,8 +182,12 @@ const char* eventName(uint8_t code);
 bool saveEventLog(const char* reason);
 bool loadEventLogHeader(EvFileHeader& fej);
 bool loadEventLogEntries(const EvFileHeader& fej, EventEntry* ki);
+bool loadEventLogRange(const EvFileHeader& fej, uint32_t tol, uint16_t db, EventEntry* ki);
+void printEventLogs();
 bool gatewayUnreachable();
 extern std::set<std::string> g_fsDirs;
+extern std::string g_serialIn;
+extern bool g_serialReadLies;
 constexpr uint8_t EV_TEST_FAIL_C = 4;
 constexpr uint8_t EV_FATAL_C = 9;
 void resetbutton();
@@ -1690,7 +1697,12 @@ static void scL2() {
   CHECK(req._body.find(">TEST FAIL<") != std::string::npos, "a friss események láthatók");
   // Pontosan táblázatcellára illesztünk: a "BOOT" szó a magyarázó
   // szövegben is szerepel az oldalon.
-  CHECK(req._body.find(">BOOT<") == std::string::npos,
+  // A REGI BOOT KISZORULT A GYURUBOL - de a fajl megorizte. Ez a valtozas
+  // lenyege: korabban itt egyszeruen elveszett volna.
+  CHECK(req._body.find("<td>fajl</td>") != std::string::npos,
+        "a lap a mentett fajl sorait is mutatja");
+  CHECK(rtcEvNext > EVLOG_SIZE_C, "az RTC gyuru tenyleg tulcsordult");
+  CHECK(req._body.find(">BOOT<") != std::string::npos,
         "a régi BOOT már kicsúszott a körpufferből");
 }
 
@@ -4152,7 +4164,12 @@ static void scLOG3() {
   const std::string& b = req._body;
   size_t sorok = 0, tol = 0;
   while ((tol = b.find("<tr><td>", tol)) != std::string::npos) { sorok++; tol += 8; }
-  CHECK(sorok == 32, "pontosan 32 sor (a korpuffer merete)");
+  // A 32-es korlat az RTC RESZRE ervenyes: a gyuru ekkora. A lap ezen felul a
+  // mentett fajl sorait is mutatja, ezert az OSSZES sor tobb lehet.
+  size_t rtcSor = 0, rp = 0;
+  while ((rp = b.find("<td>RTC</td>", rp)) != std::string::npos) { rtcSor++; rp++; }
+  CHECK(rtcSor <= 32, "az RTC reszbol legfeljebb 32 sor (a korpuffer merete)");
+  CHECK(sorok >= rtcSor, "az osszes sor legalabb ennyi");
   CHECK(b.find("<td>39</td>") != std::string::npos, "a LEGUJABB esemeny benne van");
   CHECK(b.find("<td>7</td>") == std::string::npos, "a kiszorult regi mar nincs");
   CHECK(b.find("</table>") != std::string::npos, "a tabla rendesen lezarul");
@@ -4412,7 +4429,7 @@ static void scNV11() {
   // ora nelkul is valasz, es nem talalunk ki egy datumot.
   CHECK(b.find("(mentve:") == std::string::npos,
         "ora nelkul nem ir ki datumot");
-  CHECK(b.find("(mentve a bootolas utan") != std::string::npos,
+  CHECK(b.find("(utoljara mentve a bootolas utan") != std::string::npos,
         "hanem a mentes akkori uptime-jat");
 }
 
@@ -4434,7 +4451,9 @@ static void scNV12() {
   // amennyi ott van, tehat a lap az RTC naplot mutatja.
   AsyncWebServerRequest req; g_handlers["/log#1"](&req);
   CHECK(req._code == 200, "a /log oldal ettol meg kiszolgalodik");
-  CHECK(req._body.find("RTC memoriaban levo naplo") != std::string::npos,
+  CHECK(req._body.find("nincs olvashato naplofajl") != std::string::npos,
+        "a fel-kesz fajlt elutasitja");
+  CHECK(req._body.find("RTC memoriabol") != std::string::npos,
         "es az ep RTC naplot mutatja");
 }
 
@@ -4480,7 +4499,7 @@ static void scNV14() {
   const std::string& b = req._body;
   CHECK(b.find("fajlrendszerre mentett naplo") != std::string::npos,
         "a fajlbol dolgozik");
-  CHECK(b.find("(mentve: 2026-") != std::string::npos,
+  CHECK(b.find("(utoljara mentve: 2026-") != std::string::npos,
         "es kiirja, MIKOR mentettuk");
 }
 
@@ -4753,25 +4772,39 @@ static void scNV4() {
 }
 
 static void scNV5() {
-  // MELYIK A FRISSEBB? Ez a lap dontese. A fajl mindig az RTC naplo egy
-  // KORABBI pillanatkepe, ezert:
+  // A KET FORRAS EGYUTT, NEM EGYMAS HELYETT.
   //
-  //  (a) ha az RTC naplo tulelte a mentes ota eltelt idot, bovebb is nala ->
-  //      az RTC nyer;
-  //  (b) ha egy aramszunet torolte, a fajl orizte meg az elozmenyt ->
-  //      a fajl nyer (EZ a mentes ertelme).
+  // Korabban a lap VALASZTOTT: vagy a fajl, vagy az RTC naplo - amelyik
+  // frissebbnek latszott. Ez akkor volt helyes, amikor a fajl az RTC gyuru
+  // PILLANATKEPE volt, tehat a ketto atfedte egymast. Mostantol a mentes
+  // HOZZAFUZ, igy a ketto kiegesziti egymast:
+  //   - a fajl a HOSSZU tortenet,
+  //   - az RTC gyuru az, ami a legutobbi sikeres mentes OTA tortent.
+  // A lapnak MINDKETTOT mutatnia kell, KETSZEREZES NELKUL.
   coldBoot(false, "", "", "", "");
   setup();                                 // AP mod -> mentes tortent
   CHECK(g_fs.count("/evlog.bin") == 1, "van mentett naplo");
 
-  // (a) Az RTC naplo el es bovebb: 10 tovabbi esemeny.
+  // (a) Az RTC naplo el: 10 tovabbi esemeny a mentes ota.
   for (int i = 0; i < 10; i++) logEvent((EventCode)2, (uint16_t)(900 + i));
   {
     AsyncWebServerRequest req; g_handlers["/log#1"](&req);
-    CHECK(req._body.find("RTC memoriaban levo naplo") != std::string::npos,
-          "elo RTC naplonal az RTC a forras");
-    CHECK(req._body.find("<td>909</td>") != std::string::npos,
-          "es tenyleg a friss bejegyzesek latszanak");
+    const std::string& b = req._body;
+    CHECK(b.find("fajlrendszerre mentett naplo") != std::string::npos,
+          "a lap a mentett fajlt is mutatja");
+    CHECK(b.find("az RTC memoriabol 10, a mentes ota") != std::string::npos,
+          "es mellette a mentes ota keletkezett 10 bejegyzest");
+    CHECK(b.find("<td>909</td>") != std::string::npos,
+          "a friss bejegyzes tenyleg ott van");
+    // KETSZEREZES ELLENORZESE: a mentesig keletkezett esemenyek CSAK a
+    // fajlbol jonnek, az RTC reszbol nem - kulonben minden sor ketszer allna.
+    size_t fajlSor = 0, rtcSor = 0, pos = 0;
+    while ((pos = b.find("<td>fajl</td>", pos)) != std::string::npos) { fajlSor++; pos++; }
+    pos = 0;
+    while ((pos = b.find("<td>RTC</td>", pos)) != std::string::npos) { rtcSor++; pos++; }
+    printf("     [info] %zu sor a fajlbol, %zu az RTC-bol\n", fajlSor, rtcSor);
+    CHECK(rtcSor == 10, "az RTC reszbol PONTOSAN a 10 uj sor latszik");
+    CHECK(fajlSor > 0, "a fajl resze sem ures");
   }
 
   // (b) ARAMSZUNET: az RTC naplo torlodik, a fajl megmarad.
@@ -4780,7 +4813,9 @@ static void scNV5() {
   {
     AsyncWebServerRequest req; g_handlers["/log#1"](&req);
     CHECK(req._body.find("fajlrendszerre mentett naplo") != std::string::npos,
-          "torolt RTC naplonal a FAJL a forras");
+          "torolt RTC naplonal is megvan a fajl tortenete");
+    CHECK(req._body.find("az RTC memoriabol 0,") != std::string::npos,
+          "es az RTC reszbol nulla sor - nincs mit mutatni");
     CHECK(req._body.find("<table") != std::string::npos,
           "es van is mit mutatnia");
     CHECK(elozoDb > 0, "a fajlban tenyleg volt bejegyzes");
@@ -4812,7 +4847,7 @@ static void scNV6() {
     char msg[96];
     snprintf(msg, sizeof(msg), "%s: a lap az RTC naplot mutatja, hiba nelkul", esetek[e]);
     CHECK(req._code == 200
-          && req._body.find("RTC memoriaban levo naplo") != std::string::npos, msg);
+          && req._body.find("nincs olvashato naplofajl") != std::string::npos, msg);
   }
 
   // ...es ha MINDKETTO ures: egyszeruen nincs naplo a lapon.
@@ -4888,7 +4923,8 @@ static void scNV8() {
   CHECK(req._code == 200, "a lap ettol meg kiszolgalodik");
   CHECK(req._body.find("<td>4242</td>") != std::string::npos,
         "es az RTC bejegyzes EP EGESZBEN latszik (nem kevert puffer)");
-  CHECK(req._body.find("RTC memoriaban levo naplo") != std::string::npos,
+  CHECK(req._body.find("naplofajl olvasasa megszakadt") != std::string::npos
+        || req._body.find("nincs olvashato naplofajl") != std::string::npos,
         "a forras helyesen az RTC naplo");
 }
 
@@ -5279,24 +5315,45 @@ static void scLOG7() {
   // A /log OLDAL MERETE. A lap egy AsyncResponseStream-be megy, aminek van egy
   // kezdo pufferemerete; a stream szukseg eseten NO, de akkor soronkent
   // ujraallokalna - epp az async_tcp taskban, ahol a heap a legszukebb.
-  // Egy boseges kezdomeret ezt egyetlen foglalassa teszi.
   //
-  // A lap MEGNOTT: uj Ido oszlop (soronkent ~30 bajt), "Forras" sor, es ket uj
-  // esemenykod a jelmagyarazatban. Ezert MEGMERJUK a legrosszabb esetet - tele
-  // korpuffer, mind a 32 sor valos idobelyeggel -, hogy a kezdomeret tenyleg
-  // elegendo legyen.
+  // A LEGROSSZABB ESET MEGNOTT. Amig a fajl az RTC gyuru pillanatkepe volt, a
+  // lap legfeljebb 32 sor lehetett. Mostantol a fajl SAJAT, nagyobb gyuru
+  // (EVFILE_SIZE = 128), es a lap a fajlt ES az RTC-bol a mentes ota
+  // keletkezetteket is mutatja: 128 + 32 = 160 sor. Ezt MEGMERJUK, mert a
+  // valtozas ara epp itt jelentkezik.
   coldBoot(false, "", "", "", "");
   g_epochNow = 1780000000UL;              // van oraszinkron -> hosszabb sorok
   setup();
-  for (int i = 0; i < 40; i++) logEvent((EventCode)5, (uint16_t)(60000 + i));
+  // 1. A FAJL gyurujenek teletoltese: 6 korben 32-32 esemeny, kozte mentessel.
+  for (int kor = 0; kor < 6; kor++) {
+    for (int i = 0; i < EVLOG_SIZE_C; i++) {
+      logEvent((EventCode)5, (uint16_t)(60000 + i));
+    }
+    saveEventLog("LOG7 toltes");
+  }
+  // 2. ...es utana az RTC gyuru is teljen meg, mentes NELKUL.
+  for (int i = 0; i < EVLOG_SIZE_C; i++) logEvent((EventCode)5, (uint16_t)(60000 + i));
+
   AsyncWebServerRequest req; g_handlers["/log#1"](&req);
   const size_t meret = req._body.size();
-  printf("     [info] a /log oldal legrosszabb esetben %u bajt\n", (unsigned)meret);
+  size_t sorok = 0, tol = 0, fajlSor = 0, rtcSor = 0, p2 = 0;
+  while ((tol = req._body.find("<tr><td>", tol)) != std::string::npos) { sorok++; tol += 8; }
+  while ((p2 = req._body.find("<td>fajl</td>", p2)) != std::string::npos) { fajlSor++; p2++; }
+  p2 = 0;
+  while ((p2 = req._body.find("<td>RTC</td>", p2)) != std::string::npos) { rtcSor++; p2++; }
+  printf("     [info] a /log legrosszabb esetben %u bajt, %zu sor "
+         "(%zu fajl + %zu RTC)\n", (unsigned)meret, sorok, fajlSor, rtcSor);
   CHECK(req._code == 200, "a lap kiszolgalodik");
-  CHECK(meret < 6144, "es belefer a stream 6144 bajtos kezdo pufferebe");
-  { size_t sorok = 0, tol = 0;
-    while ((tol = req._body.find("<tr><td>", tol)) != std::string::npos) { sorok++; tol += 8; }
-    CHECK(sorok == 32, "mind a 32 sor ott van"); }
+  CHECK(rtcSor == EVLOG_SIZE_C, "mind a 32 RTC-sor ott van");
+  CHECK(sorok == LOG_PAGE_MAX_ROWS_C, "a lap a legfrissebb 48 sorra korlatozodik");
+  CHECK(fajlSor == LOG_PAGE_MAX_ROWS_C - EVLOG_SIZE_C,
+        "a maradek helyet a fajl VEGE tolti fel");
+  CHECK(req._body.find("a soros porton") != std::string::npos,
+        "es a lap kimondja, hogy a teljes naplo a soros porton van");
+  // A KEZDO PUFFER. A meret alapjan allitjuk be a webportal.cpp-ben; ez a
+  // CHECK azt vedi, hogy a lap ne nojon eszrevetlenul a puffer fole.
+  CHECK(meret < LOG_STREAM_BUFFER_C,
+        "es belefer a stream kezdo pufferebe (egyetlen foglalas)");
 }
 
 static void scLOG8() {
@@ -6267,7 +6324,9 @@ static void scLOG6() {
   size_t sorok = 0, tol = 0;
   while ((tol = b.find("<tr><td>", tol)) != std::string::npos) { sorok++; tol += 8; }
   CHECK(req._code == 200, "a /log a fordulas utan is 200-at ad");
-  CHECK(sorok == 24, "a fordulas utan atmenetileg csak evTotal sor latszik");
+  size_t rtcSor6 = 0, rp6 = 0;
+  while ((rp6 = b.find("<td>RTC</td>", rp6)) != std::string::npos) { rtcSor6++; rp6++; }
+  CHECK(rtcSor6 == 24, "a fordulas utan az RTC reszbol atmenetileg csak evTotal sor");
   CHECK(b.find("</table>") != std::string::npos, "a tabla rendesen lezarul");
 
   // A lastEventWas() sem indexel ki: a rtcEvNext == 0 pillanataban a
@@ -7196,14 +7255,14 @@ static void scCOV2() {
   g_fs["/evlog.bin"] = std::string(sizeof(EvFileHeader) + 4096 * sizeof(EventEntry), '\xA5');
 
   const uint8_t ORSZEM = 0x5A;
-  EventEntry puffer[EVLOG_SIZE_C + 8];
+  EventEntry puffer[EVFILE_SIZE_C + 8];
   memset(puffer, 0, sizeof(puffer));
-  memset(&puffer[EVLOG_SIZE_C], ORSZEM, 8 * sizeof(EventEntry));
+  memset(&puffer[EVFILE_SIZE_C], ORSZEM, 8 * sizeof(EventEntry));
 
   EvFileHeader fej;
   memset(&fej, 0, sizeof(fej));
   auto orszemEp = [&]() {
-    const uint8_t* p = (const uint8_t*)&puffer[EVLOG_SIZE_C];
+    const uint8_t* p = (const uint8_t*)&puffer[EVFILE_SIZE_C];
     for (size_t i = 0; i < 8 * sizeof(EventEntry); i++) if (p[i] != ORSZEM) return false;
     return true;
   };
@@ -7213,12 +7272,12 @@ static void scCOV2() {
   fej.count = 0xFFFF;
   CHECK(!loadEventLogEntries(fej, puffer), "count = 65535 -> elutasitva");
   CHECK(orszemEp(), "es NEM irt tul: a puffer mogotti orszemek epek (65535)");
-  fej.count = EVLOG_SIZE_C + 1;
-  CHECK(!loadEventLogEntries(fej, puffer), "count = gyuru+1 -> elutasitva");
-  CHECK(orszemEp(), "es NEM irt tul (gyuru+1) - EGY elemmel sem");
+  fej.count = EVFILE_SIZE_C + 1;
+  CHECK(!loadEventLogEntries(fej, puffer), "count = fajlgyuru+1 -> elutasitva");
+  CHECK(orszemEp(), "es NEM irt tul (fajlgyuru+1) - EGY elemmel sem");
   // A hataron levo ertek viszont ATMEGY a hatarellenorzesen: a modul nem
   // tulzottan ovatos, csak pontos.
-  fej.count = EVLOG_SIZE_C;
+  fej.count = EVFILE_SIZE_C;
   loadEventLogEntries(fej, puffer);
   CHECK(orszemEp(), "a megengedett maximumnal sem lep at a hataron");
 }
@@ -7977,6 +8036,301 @@ PROP_SCENARIO(1) PROP_SCENARIO(2) PROP_SCENARIO(3) PROP_SCENARIO(4)
 PROP_SCENARIO(5) PROP_SCENARIO(6) PROP_SCENARIO(7) PROP_SCENARIO(8)
 #undef PROP_SCENARIO
 
+static void scNV20() {
+  // A LITTLEFS NAPLO NEM VESZITHETI EL A TORTENETET EGY ARAMSZUNETBEN.
+  //
+  // A hiba, amit ez a teszt rogzit: korabban a mentes FELULIRTA a fajlt az
+  // RTC gyuru pillanatnyi tartalmaval. Aramszunetkor viszont az RTC (NOINIT)
+  // terulet torlodik, tehat a rtcSavedEvNext is nullazodik - es az elso
+  // mentes egyetlen friss, meg idobelyeg nelkuli BOOT bejegyzest irt a
+  // korabbi 32 helyere. Merve: 404 bajt / 32 bejegyzes -> 32 bajt / 1.
+  // Vagyis EPP AZ AZ ESEMENY tuntette el a tartos naplot, amiert az letezik.
+  //
+  // FONTOS a modellezes pontossaga: aramszunetkor a FLASH TULELI, az RTC nem.
+  // A coldBoot() a g_fs-t is torli - az "uj eszkoz"-t modellez, nem
+  // aramszunetet -, ezert a fajlt kezzel visszatesszuk.
+  coldBoot(false, "", "", "", "");
+  setFilesystemReady(true);
+  // 1780000000 = 2026 - az NTP_MIN_VALID_EPOCH (2025-01-01) FOLOTT. Az elso
+  // valtozatom 1700000000-t (2023) hasznalt, amit a program helyesen
+  // ervenytelennek tekint: nem a kod hibazott, hanem a teszt beallitasa.
+  g_epochNow = 1780000000UL;
+  for (int i = 0; i < 40; i++) logEvent((EventCode)((i % 13) + 1), (uint16_t)i);
+  CHECK(saveEventLog("teli naplo"), "a teli naplo mentve");
+  EvFileHeader f1; memset(&f1, 0, sizeof(f1));
+  CHECK(loadEventLogHeader(f1), "a mentett fajl olvashato");
+  CHECK(f1.count == EVLOG_SIZE_C, "32 bejegyzes van benne (a gyuru tele volt)");
+  EventEntry regi[EVLOG_SIZE_C];
+  CHECK(loadEventLogEntries(f1, regi), "es a bejegyzesek beolvashatok");
+
+  // --- ARAMSZUNET ---
+  const std::string flash = g_fs["/evlog.bin"];
+  coldBoot(false, "", "", "", "");
+  g_fs["/evlog.bin"] = flash;          // a FLASH tuleli
+  setFilesystemReady(true);
+  rtcEvMagic = 0;                      // az RTC NEM (NOINIT: csak az aram torli)
+  g_epochNow = 0;                      // az NTP meg nem szinkronizalt
+
+  logEvent((EventCode)1, 7);           // BOOT, idobelyeg nelkul
+  CHECK(rtcEvNext == 1, "az RTC naploban egyetlen friss bejegyzes van");
+  CHECK(saveEventLog("aramszunet utani elso mentes"), "a mentes lefutott");
+
+  EvFileHeader f2; memset(&f2, 0, sizeof(f2));
+  CHECK(loadEventLogHeader(f2), "a fajl tovabbra is olvashato");
+  printf("     [info] %u -> %u bejegyzes, %u -> %u bajt\n",
+         (unsigned)f1.count, (unsigned)f2.count,
+         (unsigned)flash.size(), (unsigned)g_fs["/evlog.bin"].size());
+  CHECK(f2.count == f1.count + 1,
+        "a fajl EGGYEL nott - a tortenet megmaradt, az uj hozzafuzodott");
+
+  EventEntry most[EVFILE_SIZE_C];
+  CHECK(loadEventLogEntries(f2, most), "az uj fajl beolvashato");
+  bool egyezik = true;
+  for (uint16_t i = 0; i < f1.count; i++) {
+    if (memcmp(&most[i], &regi[i], sizeof(EventEntry)) != 0) egyezik = false;
+  }
+  CHECK(egyezik, "a REGI bejegyzesek valtozatlanul, ugyanabban a sorrendben allnak");
+  CHECK(most[f1.count].code == 1 && most[f1.count].param == 7,
+        "es a legvegen az aramszunet utani BOOT all");
+  CHECK(most[0].epoch >= 1780000000UL,
+        "a regi bejegyzesek NTP idobelyege is megmaradt");
+}
+
+static void scNV21() {
+  // A FAJL GYURUJE: ha megtelik, a LEGREGEBBIEKET ejti, nem a frisseket.
+  coldBoot(false, "", "", "", "");
+  setFilesystemReady(true);
+  // Tobb korben toltjuk: minden korben 32 uj esemeny, kozte mentes.
+  for (int kor = 0; kor < 6; kor++) {
+    for (int i = 0; i < EVLOG_SIZE_C; i++) {
+      logEvent((EventCode)((kor % 13) + 1), (uint16_t)(kor * 100 + i));
+    }
+    saveEventLog("kor");
+  }
+  EvFileHeader fej; memset(&fej, 0, sizeof(fej));
+  CHECK(loadEventLogHeader(fej), "a fajl olvashato");
+  printf("     [info] 6 x 32 = 192 esemeny utan a fajlban %u bejegyzes van\n",
+         (unsigned)fej.count);
+  CHECK(fej.count == EVFILE_SIZE_C, "a fajl a gyuru meretenel megall (128)");
+  EventEntry e[EVFILE_SIZE_C];
+  CHECK(loadEventLogEntries(fej, e), "beolvashato");
+  // A legutolso esemeny a legfrissebb kor utolso darabja.
+  CHECK(e[EVFILE_SIZE_C - 1].param == 5 * 100 + (EVLOG_SIZE_C - 1),
+        "a legvegen a LEGFRISSEBB esemeny all");
+  CHECK(e[0].param > 100, "es az elejerol a legregebbiek estek ki");
+}
+
+static void scNV22() {
+  // Ha nincs uj esemeny, a flasht nem koptatjuk - ez a viselkedes az
+  // osszefuzes utan is ervenyes marad.
+  coldBoot(false, "", "", "", "");
+  setFilesystemReady(true);
+  logEvent((EventCode)1, 1);
+  CHECK(saveEventLog("elso"), "az elso mentes lefut");
+  const std::string elso = g_fs["/evlog.bin"];
+  CHECK(!saveEventLog("masodik, uj esemeny nelkul"),
+        "uj esemeny nelkul NINCS mentes");
+  CHECK(g_fs["/evlog.bin"] == elso, "es a fajl bajtra valtozatlan");
+  // Ures RTC naplo sem irhat felul semmit.
+  rtcEvMagic = 0;
+  CHECK(!saveEventLog("ures RTC naploval"), "ures RTC naplo nem ir");
+  CHECK(g_fs["/evlog.bin"] == elso, "a fajl tovabbra is valtozatlan");
+}
+
+static void scCMD1() {
+  // A SOROS "LOG" PARANCS. Ez az EGYETLEN ut a TELJES naplohoz: az AP portal
+  // csak konfig modban fut, a /log lap pedig szandekosan korlatos.
+  coldBoot(false, "", "", "", "");
+  g_epochNow = 1780000000UL;
+  setup();
+  // Legyen mit mutatni: a fajlban is, es az RTC-ben is a mentes ota.
+  for (int i = 0; i < 5; i++) logEvent((EventCode)2, (uint16_t)(500 + i));
+  saveEventLog("CMD1");
+  for (int i = 0; i < 3; i++) logEvent((EventCode)3, (uint16_t)(600 + i));
+
+  const size_t elotte = g_serialLog.size();
+  g_serialIn = "LOG\n";
+  loop();
+  CHECK(g_serialIn.empty(), "a parancs elfogyott a bemeneti pufferbol");
+  CHECK(g_serialLog.size() > elotte, "a parancs kiirt valamit");
+  CHECK(serialHas("=== ESEMENYNAPLO ==="), "a naplo fejlece megjelent");
+  CHECK(serialHas("-- fajl"), "a FAJL resze megvan");
+  CHECK(serialHas("-- RTC (a mentes ota): 3 bejegyzes"),
+        "es az RTC reszbol pontosan a mentes ota keletkezett 3");
+  CHECK(serialHas("=== NAPLO VEGE ==="), "a kiiras rendesen lezarul");
+}
+
+static void scCMD2() {
+  // A parancs-feldolgozas NEM BLOKKOL es nem ragad be.
+  coldBoot(false, "", "", "", "");
+  setup();
+  // (a) Felig beirt sor: a kovetkezo iteracioban folytatodik.
+  g_serialIn = "LO";
+  loop();
+  CHECK(!serialHas("=== ESEMENYNAPLO ==="), "felig beirt parancs nem fut le");
+  g_serialIn = "G\n";
+  loop();
+  CHECK(serialHas("=== ESEMENYNAPLO ==="), "a folytatas utan viszont igen");
+
+  // (b) Ismeretlen parancs: szol, de nem all meg.
+  g_serialLog.clear();
+  g_serialIn = "MITTUDOMEN\n";
+  loop();
+  CHECK(serialHas("Ismeretlen parancs"), "ismeretlen parancsra szol");
+  CHECK(serialHas("HELP"), "es a HELP-re iranyit");
+
+  // (c) TUL HOSSZU sor: ELDOBJUK, nem csonkolva vegrehajtjuk.
+  //
+  // AZ ELSO VALTOZATOM ITT GYENGET ALLITOTT: csak azt nezte, hogy a KOVETKEZO
+  // parancs mukodik-e - az viszont ugy is igaz, ha a puffert nem nullazzuk,
+  // mert a sorveg amugy is nullazza. Mutacioval derult ki: a nullazas
+  // eltavolitasa utan a teszt valtozatlanul atment. A valodi tulajdonsag az,
+  // hogy egy tul hosszu sorbol NEM lesz csonkolt parancs.
+  g_serialLog.clear();
+  g_serialIn = std::string(200, 'X') + "\n";
+  loop();
+  CHECK(!serialHas("Ismeretlen parancs"),
+        "a tul hosszu sor eldobodik, NEM lesz belole csonkolt parancs");
+  CHECK(serialHas("Tul hosszu parancs, eldobva"), "es ezt ki is mondja");
+  g_serialIn = "HELP\n";
+  loop();
+  CHECK(serialHas("Parancsok:"), "es utana a kovetkezo parancs mukodik");
+
+  // (d) Kis- es nagybetu egyarant jo.
+  g_serialLog.clear();
+  g_serialIn = "log\n";
+  loop();
+  CHECK(serialHas("=== ESEMENYNAPLO ==="), "a parancs kis-nagybetu fuggetlen");
+}
+
+static void scCMD3() {
+  // MODE_FATAL-ban IS mukodnie kell: epp ott a legnagyobb szukseg a naplora,
+  // es a fatal ag a loop()-ban KORABBAN visszater.
+  coldBoot(false, "", "", "", "");
+  setup();
+  enterFatal("teszt");
+  CHECK(deviceMode == (DeviceMode)2, "MODE_FATAL");
+  g_serialLog.clear();
+  g_serialIn = "LOG\n";
+  loop();
+  CHECK(serialHas("=== ESEMENYNAPLO ==="),
+        "a LOG parancs MODE_FATAL-ban is kiszolgalodik");
+}
+
+static void scCOV7() {
+  // A NAPLOFAJL OLVASASI HIBAAGAI. Ezek akkor futnak, amikor a flash mar
+  // romlik - epp amikor a naplora a legnagyobb szukseg lenne. Mindegyik
+  // helyes valasza ugyanaz: NE omoljunk ossze, es NE mutassunk szemetet.
+
+  // (a) A soros LOG parancs naplofajl NELKUL.
+  coldBoot(false, "", "", "", "");
+  setFilesystemReady(true);
+  logEvent((EventCode)1, 1);
+  g_serialIn = "LOG\n";
+  loop();
+  CHECK(serialHas("-- fajl: nincs, vagy nem olvashato"),
+        "fajl nelkul a LOG kimondja, hogy nincs fajl");
+  CHECK(serialHas("-- RTC"), "es az RTC reszt attol meg kiirja");
+
+  // (b) A fajl a FEJLEC utan valik olvashatatlanna: a LOG kiirasa megszakad,
+  //     de a program nem all meg.
+  coldBoot(false, "", "", "", "");
+  setFilesystemReady(true);
+  for (int i = 0; i < 10; i++) logEvent((EventCode)2, (uint16_t)i);
+  CHECK(saveEventLog("COV7"), "van mentett naplo");
+  g_serialLog.clear();
+  g_fsShortRead = true; g_fsShortReadSkip = 3;   // a fejlecet meg atengedjuk
+  g_serialIn = "LOG\n";
+  loop();
+  g_fsShortRead = false; g_fsShortReadSkip = 0;
+  CHECK(serialHas("(a fajl olvasasa megszakadt)"),
+        "a felbeszakadt olvasast a LOG kimondja");
+  CHECK(serialHas("=== NAPLO VEGE ==="), "es a kiiras attol meg lezarul");
+
+  // (c) A MENTES olyan fajlt talal, amit nem tud beolvasni: az UJ bejegyzesek
+  //     ettol meg mentendok - csak az elozmeny vesz el, es errol szolunk.
+  coldBoot(false, "", "", "", "");
+  setFilesystemReady(true);
+  for (int i = 0; i < 10; i++) logEvent((EventCode)2, (uint16_t)i);
+  CHECK(saveEventLog("elozmeny"), "van elozmeny a fajlban");
+  logEvent((EventCode)3, 99);
+  g_serialLog.clear();
+  // A rovid olvasas CSAK az elozmeny beolvasasara vonatkozzon - a mentes
+  // vegen a visszaolvaso ellenorzesre mar ne. (Az elso valtozatom vegig
+  // bekapcsolva hagyta, ezert a verify is elbukott, es a teszt "bizonyitotta"
+  // volna, hogy az uj bejegyzesek elvesznek - holott csak a modell volt rossz.)
+  // A g_onFsWrite az elso IRASNAL sul el, vagyis pontosan az olvasasok utan.
+  g_fsShortRead = true; g_fsShortReadSkip = 2;   // a fejlec meg atmegy
+  g_onFsWrite = []() { g_fsShortRead = false; g_fsShortReadSkip = 0; };
+  const bool mentett = saveEventLog("serult elozmennyel");
+  g_onFsWrite = nullptr;
+  g_fsShortRead = false; g_fsShortReadSkip = 0;
+  CHECK(serialHas("a korabbi naplofajl nem olvashato"),
+        "a mentes szol, ha az elozmeny olvashatatlan");
+  CHECK(mentett, "de az UJ bejegyzeseket ettol meg elmenti");
+
+  // (d) loadEventLogRange: a kert szakasz kilog a fajlbol.
+  coldBoot(false, "", "", "", "");
+  setFilesystemReady(true);
+  for (int i = 0; i < 5; i++) logEvent((EventCode)2, (uint16_t)i);
+  saveEventLog("range");
+  EvFileHeader fej; memset(&fej, 0, sizeof(fej));
+  CHECK(loadEventLogHeader(fej), "van fajl");
+  EventEntry ki[8];
+  CHECK(!loadEventLogRange(fej, 0, 0, ki), "nulla darab -> elutasitva");
+  CHECK(!loadEventLogRange(fej, fej.count, 1, ki), "a fajl vege utan -> elutasitva");
+  CHECK(!loadEventLogRange(fej, 1, (uint16_t)fej.count, ki),
+        "a fajlbol kilogo szakasz -> elutasitva");
+  CHECK(loadEventLogRange(fej, 1, (uint16_t)(fej.count - 1), ki),
+        "a pontosan a vegeig tarto szakasz viszont jo");
+
+  // (e) A fejlec sajat ervenyessege - a hivotol fuggetlenul.
+  EvFileHeader rossz = fej;
+  rossz.count = 0;
+  CHECK(!loadEventLogRange(rossz, 0, 1, ki), "count = 0 -> elutasitva");
+  rossz.count = (uint16_t)(EVFILE_SIZE_C + 1);
+  CHECK(!loadEventLogRange(rossz, 0, 1, ki), "count > fajlgyuru -> elutasitva");
+
+  // (f) Nincs fajlrendszer, illetve a letezo fajl sem nyithato.
+  setFilesystemReady(false);
+  CHECK(!loadEventLogRange(fej, 0, 1, ki), "fajlrendszer nelkul -> hamis");
+  setFilesystemReady(true);
+  g_fsReadable = false;
+  CHECK(!loadEventLogRange(fej, 0, 1, ki), "nem nyithato fajl -> hamis");
+  CHECK(!loadEventLogEntries(fej, ki), "a teljes betoltes is hamisat ad");
+  g_fsReadable = true;
+
+  // (g) Az olvasas a KIHAGYANDO szakasz kozben szakad meg. A fejlec meg
+  //     atmegy, az elso atugrando bejegyzes mar nem.
+  g_fsShortRead = true; g_fsShortReadSkip = 1;
+  CHECK(!loadEventLogRange(fej, 2, 1, ki),
+        "a kihagyas kozben megszakadt olvasas -> hamis, nem szemet");
+  g_fsShortRead = false; g_fsShortReadSkip = 0;
+
+  // (h) Es ugyanez a teljes betoltonel: mar a fejlec olvasasa elbukik.
+  g_fsShortRead = true; g_fsShortReadSkip = 0;
+  CHECK(!loadEventLogEntries(fej, ki), "a fejlec olvasasa elbukik -> hamis");
+  g_fsShortRead = false;
+}
+
+static void scCOV8() {
+  // A SOROS OLVASAS VEDELMI AGA. Az available() > 0 meg nem garantalja, hogy
+  // a read() ad is bajtot: valodi UART-on a FIFO-t egy megszakitas a ket
+  // hivas KOZOTT is kiuritheti. A vedelmi ag ezt fogja.
+  coldBoot(false, "", "", "", "");
+  setup();
+  g_serialLog.clear();
+  g_serialReadLies = true;    // available() > 0, de a read() -1-et ad
+  g_serialIn = "LOG\n";
+  loop();
+  g_serialReadLies = false;
+  CHECK(!serialHas("=== ESEMENYNAPLO ==="),
+        "a hazudos available() nem futtat parancsot");
+  // ...es a kovetkezo korben, rendes olvasassal, mukodik.
+  loop();
+  CHECK(serialHas("=== ESEMENYNAPLO ==="), "utana viszont lefut");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -8301,6 +8655,14 @@ static const Scenario kScenarios[] = {
   { "ILV5: mindket irany egyszerre, veletlen suruseggel", scILV5 },
 
   // --- A maradek hibaagak ---
+  { "COV7: a naplofajl olvasasi hibaagai", scCOV7 },
+  { "COV8: a soros olvasas vedelmi aga", scCOV8 },
+  { "CMD1: a soros LOG parancs mindket naplot kiirja", scCMD1 },
+  { "CMD2: a parancs-feldolgozas nem blokkol es nem ragad be", scCMD2 },
+  { "CMD3: a LOG parancs MODE_FATAL-ban is mukodik", scCMD3 },
+  { "NV20: aramszunet utan a naplofajl tortenete megmarad", scNV20 },
+  { "NV21: a naplofajl gyuruje a legregebbieket ejti", scNV21 },
+  { "NV22: uj esemeny nelkul nincs iras (a flash kopasa)", scNV22 },
   { "COV1: eventName() ismeretlen kodra", scCOV1 },
   { "COV2: a naplo-betolto sajat hatarellenorzese (a hivotol fuggetlenul)", scCOV2 },
   { "COV3: a naplofajl eltunik a fejlec es a bejegyzesek olvasasa kozott", scCOV3 },

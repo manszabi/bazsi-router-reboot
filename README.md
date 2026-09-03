@@ -1141,9 +1141,26 @@ jöhet egy áramszünet, ami az RTC naplót elvinné.
 | Mikor | router reset előtt, AP módba váltás előtt, és **minden alvás előtt** (egyetlen közös ponton, az `enterDeepSleep()` elején) |
 | Írás közben | nincs alvás, újraindulás és másik írás – ugyanaz a **konfigurációs zár**, amit a webes mentés használ; foglalt zárnál a mentés **kimarad**, nem blokkol |
 | Sikeresség | **visszaolvasással** ellenőrizve; a sikertelenség **nem végzetes**, az RTC napló ettől még ép |
-| A `/log` oldal | a **frissebbet** tölti be, és kiírja, melyik forrásból dolgozik |
+| Hogyan | **hozzáfűz, nem ír felül**: a fájl megőrzi a régi tartalmát, és a végére kerül, ami a legutóbbi mentés óta keletkezett |
+| Mennyit őriz | a fájl **saját, 128 bejegyzéses gyűrű** – négyszerese az RTC naplónak, több áramszünet története is elfér benne |
+| A `/log` oldal | **mindkét forrást** mutatja: a fájlt, majd az RTC-ből azt, ami még nincs benne (kettőzés nélkül); a lap a legfrissebb **48 sorra** korlátozódik |
+| A teljes napló | a soros porton a **`LOG`** paranccsal |
 | Hiányzó / üres / hibás fájl | nem hiba: az RTC naplót mutatja |
 | Ha mindkettő üres | egyszerűen nincs napló a lapon |
+
+> **Miért hozzáfűz?** Mert korábban felülírt – és pontosan az áramszünetnél
+> tette a legrosszabbat. Az `RTC_NOINIT` terület ilyenkor törlődik, tehát a
+> „meddig mentettünk" jelző is nullázódik, és az első mentés az **egyetlen
+> friss, még időbélyeg nélküli BOOT** bejegyzést írta a korábbi 32 helyére.
+> Mérve: 404 bájt / 32 bejegyzés → 32 bájt / 1. Vagyis épp az az esemény
+> tüntette el a tartós naplót, amiért az egyáltalán létezik. (Az `NV20` teszt
+> ezt rögzíti.)
+
+> **Miért korlátos a weblap?** Mert a `/log` az **async_tcp** taskon fut, és a
+> teljes napló egyben 160 sor = **mért 18 KB**. Egy ekkora összefüggő foglalás
+> szembemegy a program elvével: a heap-felügyelet kritikus küszöbe a legnagyobb
+> tömbre 6000 bájt. A lap ezért a legfrissebb 48 sort mutatja (**6,9 KB**), és
+> kiírja, hogy a teljes napló a soros porton érhető el.
 
 **Valós idő:** amint van kapcsolat – **bármelyik úton** jött is létre –, elindul
 az óraszinkron (`hu.pool.ntp.org`, magyar időzóna a nyári időszámítással). **Ha

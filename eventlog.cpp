@@ -276,6 +276,115 @@ bool stuckCycleAlreadyLogged(uint16_t which) {
 // (router reset, alvás), és a következő fontos pillanatban úgyis próbáljuk.
 //
 // A zárat a végén FELOLDJUK - eltérően a leállási úttól, ami már nem tér vissza.
+// A fajl egy SZAKASZANAK beolvasasa. A "tol" a legregebbi bejegyzestol
+// szamitott 0-alapu index.
+//
+// SAJAT HATARELLENORZES, a hivotol fuggetlenul - ugyanaz az elv, mint a
+// loadEventLogEntries()-nel: a fej.count FAJLBOL szarmazo ertek.
+bool loadEventLogRange(const EvFileHeader& fej, uint32_t tol, uint16_t db,
+                       EventEntry* ki) {
+  if (fej.count == 0 || fej.count > EVFILE_SIZE) {
+    return false;
+  }
+  if (db == 0 || tol > fej.count || (uint32_t)db > (uint32_t)fej.count - tol) {
+    return false;   // a kert szakasz kilogna a fajlbol
+  }
+  if (!filesystemReady() || !LittleFS.exists(evLogPath)) {
+    return false;
+  }
+  File f = LittleFS.open(evLogPath, "r");
+  if (!f) {
+    return false;
+  }
+  // A stream nem kereshet, ezert atolvassuk (es eldobjuk) a fejlecet es a
+  // kihagyando bejegyzeseket. Fix meretu, apro pufferrel: ez a fuggveny epp
+  // azert van, hogy a hivonak NE kelljen nagy puffert tartania.
+  EventEntry szemet;
+  EvFileHeader eldobando;
+  if (f.read((uint8_t*)&eldobando, sizeof(eldobando)) != sizeof(eldobando)) {
+    f.close();
+    return false;
+  }
+  for (uint32_t i = 0; i < tol; i++) {
+    if (f.read((uint8_t*)&szemet, sizeof(szemet)) != sizeof(szemet)) {
+      f.close();
+      return false;
+    }
+  }
+  const size_t kell = sizeof(EventEntry) * db;
+  const size_t olvasott = f.read((uint8_t*)ki, kell);
+  f.close();
+  return olvasott == kell;
+}
+
+// MINDKET naplo a soros portra. A soros "LOG" parancs hivja.
+//
+// MIERT KELL, HA VAN /log OLDAL? Mert az AP portál csak akkor fut, ha az
+// eszkoz konfig modba kerult - egy normalisan mukodo eszkoztol viszont a
+// soros kabel az egyetlen ut a naplohoz. Es mert a ket forras EGYUTT a
+// teljes tortenet: a fajl a hosszu mult, az RTC gyuru az azota eltelt ido.
+static void printOneEntry(uint16_t sorszam, const EventEntry& e) {
+  char ido[24];
+  if (e.epoch >= NTP_MIN_VALID_EPOCH && formatEpoch(e.epoch, ido, sizeof(ido))) {
+    Serial.print(ido);
+  } else {
+    Serial.print("        -          ");
+  }
+  Serial.printf("  %3u  %3u:%02u:%02u  %-14s %u\n",
+                (unsigned)sorszam,
+                (unsigned)(e.uptimeSec / 3600), (unsigned)((e.uptimeSec % 3600) / 60),
+                (unsigned)(e.uptimeSec % 60), eventName(e.code), (unsigned)e.param);
+}
+
+void printEventLogs() {
+  Serial.println();
+  Serial.println("=== ESEMENYNAPLO ===");
+  Serial.println("valos ido            sor   uptime    esemeny        param");
+
+  // 1. A FAJL - a hosszu tortenet. Nyolcasaval olvassuk: a puffer igy 96
+  //    bajt, nem 1536. (A soros parancs a loop taskon fut, de a szuk
+  //    keret elve itt is ervenyes.)
+  uint16_t sorszam = 0;
+  EvFileHeader fej;
+  if (loadEventLogHeader(fej)) {
+    Serial.printf("-- fajl (%s): %u bejegyzes\n", evLogPath, (unsigned)fej.count);
+    EventEntry darab[8];
+    uint32_t tol = 0;
+    while (tol < fej.count) {
+      const uint16_t db = (uint16_t)((fej.count - tol < 8) ? (fej.count - tol) : 8);
+      if (!loadEventLogRange(fej, tol, db, darab)) {
+        Serial.println("   (a fajl olvasasa megszakadt)");
+        break;
+      }
+      for (uint16_t i = 0; i < db; i++) {
+        printOneEntry(++sorszam, darab[i]);
+      }
+      tol += db;
+    }
+  } else {
+    Serial.println("-- fajl: nincs, vagy nem olvashato");
+  }
+
+  // 2. AZ RTC GYURU - csak ami MEG NINCS a fajlban. Igy nincs ketszerezes,
+  //    es pontosan latszik, mi tortent a legutobbi mentes ota.
+  uint32_t evTotal, mentettEddig;
+  EventEntry masolat[EVLOG_SIZE];
+  portENTER_CRITICAL(&evLogMux);
+  evTotal = (rtcEvMagic == EVLOG_MAGIC) ? rtcEvNext : 0;
+  mentettEddig = rtcSavedEvNext;
+  memcpy(masolat, rtcEvents, sizeof(masolat));
+  portEXIT_CRITICAL(&evLogMux);
+
+  const uint32_t keletkezett = (evTotal > mentettEddig) ? (evTotal - mentettEddig) : 0;
+  const uint16_t ujDb = (uint16_t)(keletkezett < EVLOG_SIZE ? keletkezett : EVLOG_SIZE);
+  Serial.printf("-- RTC (a mentes ota): %u bejegyzes\n", (unsigned)ujDb);
+  for (uint16_t i = 0; i < ujDb; i++) {
+    printOneEntry(++sorszam, masolat[(evTotal - ujDb + i) % EVLOG_SIZE]);
+  }
+  Serial.println("=== NAPLO VEGE ===");
+  Serial.println();
+}
+
 bool saveEventLog(const char* reason) {
   if (!filesystemReady()) {
     return false;   // nincs hova irni; ez nem hiba, csak nincs mentes
@@ -304,33 +413,68 @@ bool saveEventLog(const char* reason) {
     return false;
   }
 
+  // ---------------------------------------------------------------------
+  // OSSZEFUZES, nem felulíras.
+  //
+  // A fajl a HOSSZU tortenet, az RTC gyuru pedig csak a legutobbi sikeres
+  // mentes ota eltelt ido. Az uj fajl tartalma tehat:
+  //     [a regi fajl vege] + [az RTC uj bejegyzesei]
+  // a legregebbieket ejtve, ha nem fernek bele az EVFILE_SIZE-ba.
+  //
+  // Enelkul egy aramszunet utani elso mentes egyetlen friss bejegyzest irt a
+  // korabbi 32 helyere - lasd az indoklast az eventlog.h-ban.
+  // ---------------------------------------------------------------------
+
   // Pillanatkep a mux alatt, ugyanugy, mint a /log oldalon: a naploba az
   // async_tcp task is ir, tehat a pozicio es a tartalom egyutt nem olvashato
   // atomian.
-  EvFileHeader fej;
   EventEntry masolat[EVLOG_SIZE];
+  uint32_t evNextMost;
   portENTER_CRITICAL(&evLogMux);
-  fej.evNextAtSave = rtcEvNext;
+  evNextMost = rtcEvNext;
   memcpy(masolat, rtcEvents, sizeof(masolat));
   portEXIT_CRITICAL(&evLogMux);
 
+  // Hany RTC bejegyzes UJ a legutobbi mentes ota? Ha kozben tobb mint
+  // EVLOG_SIZE esemeny tortent, a gyuru korbefordult: csak az utolso
+  // EVLOG_SIZE mentheto, a tobbi menthetetlenul elveszett.
+  const uint32_t keletkezett = evNextMost - mentettEddig;
+  const uint16_t ujDb = (uint16_t)(keletkezett < EVLOG_SIZE ? keletkezett : EVLOG_SIZE);
+
+  // A MUNKAPUFFER. A loop task vermen all (~8 KB), NEM az async_tcp-en.
+  EventEntry uj[EVFILE_SIZE];
+  uint16_t osszes = 0;
+
+  // 1. A regi fajl vege - annyi, amennyi az uj bejegyzesek mellett elfer.
+  EvFileHeader regi;
+  if (loadEventLogHeader(regi)) {
+    const uint16_t ferohely = (uint16_t)(EVFILE_SIZE - ujDb);
+    const uint16_t megtart = regi.count < ferohely ? regi.count : ferohely;
+    const uint32_t ettol = (uint32_t)(regi.count - megtart);   // a legregebbieket ejtjuk
+    if (megtart > 0 && !loadEventLogRange(regi, ettol, megtart, uj)) {
+      // A regi fajl olvashatatlan. NEM ez az utolso szo: az uj bejegyzesek
+      // igy is mentheto k, csak az elozmeny vesz el - ugyanaz, mint a regi
+      // (felulíro) viselkedes. Szolunk rola, mert ez flash-hibara utal.
+      Serial.println("- a korabbi naplofajl nem olvashato, csak az ujakat mentjuk");
+    } else {
+      osszes = megtart;
+    }
+  }
+
+  // 2. Az RTC uj bejegyzesei, a legregebbitol a legujabbig kiegyenesitve.
+  for (uint16_t i = 0; i < ujDb; i++) {
+    const uint32_t sorszam = evNextMost - ujDb + i;
+    uj[osszes + i] = masolat[sorszam % EVLOG_SIZE];
+  }
+  osszes = (uint16_t)(osszes + ujDb);
+
+  EvFileHeader fej;
   fej.magic = EVFILE_MAGIC;
   fej.version = EVFILE_VERSION;
-  fej.count = (uint16_t)(fej.evNextAtSave < EVLOG_SIZE ? fej.evNextAtSave : EVLOG_SIZE);
+  fej.count = osszes;
+  fej.evNextAtSave = evNextMost;
   fej.savedEpoch = nowEpoch();
   fej.savedUptime = (uint32_t)(esp_timer_get_time() / 1000000);
-
-  // A bejegyzeseket a LEGREGEBBITOL a legujabbig irjuk ki, kiegyenesitve -
-  // igy az olvasonak nem kell tudnia, hol tartott a korpuffer. Ehhez NEM
-  // masolunk egy ujabb 384 bajtos verempuffert: a korpuffer legfeljebb ket
-  // OSSZEFUGGO szakaszra bomlik (a kezdoponttol a tomb vegeig, majd a tomb
-  // elejetol), es ezt a kettot irjuk ki egymas utan. A loop task verme igy
-  // 384 bajttal kevesebbet visz.
-  const uint32_t elso = fej.evNextAtSave - fej.count;
-  const uint16_t kezdet = (uint16_t)(elso % EVLOG_SIZE);
-  const uint16_t elsoDb = (uint16_t)((kezdet + fej.count <= EVLOG_SIZE)
-                                     ? fej.count : (EVLOG_SIZE - kezdet));
-  const uint16_t masodikDb = (uint16_t)(fej.count - elsoDb);
 
   printUptime();
   Serial.print("Naplo mentese a fajlrendszerre (");
@@ -342,16 +486,10 @@ bool saveEventLog(const char* reason) {
   if (!f) {
     Serial.println("- a naplofajl nem nyithato irasra");
   } else {
+    // Egyetlen osszefuggo tomb: a kiegyenesitest mar az osszefuzes elvegezte.
     const size_t fejBytes = f.write((const uint8_t*)&fej, sizeof(fej));
-    size_t adatBytes = 0;
-    if (elsoDb) {
-      adatBytes += f.write((const uint8_t*)&masolat[kezdet],
-                           sizeof(EventEntry) * elsoDb);
-    }
-    if (masodikDb) {
-      adatBytes += f.write((const uint8_t*)&masolat[0],
-                           sizeof(EventEntry) * masodikDb);
-    }
+    const size_t adatBytes = fej.count
+        ? f.write((const uint8_t*)uj, sizeof(EventEntry) * fej.count) : 0;
     f.flush();
     f.close();
     const size_t vart = sizeof(fej) + sizeof(EventEntry) * fej.count;
@@ -389,7 +527,9 @@ bool saveEventLog(const char* reason) {
     rtcSavedEvNext = fej.evNextAtSave;
     Serial.print("- naplo mentve, ");
     Serial.print((unsigned)fej.count);
-    Serial.println(" bejegyzes");
+    Serial.print(" bejegyzes (ebbol ");
+    Serial.print((unsigned)ujDb);
+    Serial.println(" uj)");
   } else {
     // A SIKERTELENSEG NEM VEGZETES. A naplo diagnosztika: ha nem sikerul
     // kiirni, az RTC-ben tovabbra is ott van, es a program dolga (router
@@ -427,7 +567,7 @@ bool loadEventLogHeader(EvFileHeader& fej) {
   }
   f.close();
   if (fej.magic != EVFILE_MAGIC || fej.version != EVFILE_VERSION
-      || fej.count == 0 || fej.count > EVLOG_SIZE) {
+      || fej.count == 0 || fej.count > EVFILE_SIZE) {
     return false;
   }
   // A fejlec tobbet igerhet, mint amennyi tenyleg ott van (megtelt fajlrendszer,
@@ -443,7 +583,7 @@ bool loadEventLogEntries(const EvFileHeader& fej, EventEntry* ki) {
   // egy MASIK fuggveny - ha valaha kozvetlenul hivnak minket, egy 0xFFFF-es
   // count a hivo 384 bajtos vermet irna tul. Egy sor, es a modul a hivotol
   // fuggetlenul is biztonsagos.
-  if (fej.count == 0 || fej.count > EVLOG_SIZE) {
+  if (fej.count == 0 || fej.count > EVFILE_SIZE) {
     return false;
   }
   File f = LittleFS.open(evLogPath, "r");

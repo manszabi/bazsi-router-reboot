@@ -192,6 +192,8 @@ void (*g_onDelay)() = nullptr;
 // A flash-iras mint megszakitasi pont - lasd a magyarazatot a LittleFS.h-ban.
 void (*g_onFsWrite)() = nullptr;
 std::set<std::string> g_fsDirs;
+std::string g_serialIn;
+bool g_serialReadLies = false;
 void delay(uint32_t ms) { const uint32_t d = ms ? ms : 1; g_millis += d; wdtAdvanceTime(d); if (g_onDelay) g_onDelay(); }
 
 HardwareSerial Serial;
