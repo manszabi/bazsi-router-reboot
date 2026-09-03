@@ -4,6 +4,8 @@ tartott be.
 
 1. Minden BLOKKOLO ciklus etesse a watchdogot.
 2. A program NE allokaljon dinamikusan.
+3. Az IDO-OSSZEHASONLITAS legyen atfordulas-biztos (a millis() 49,7 naponta
+   korbefordul).
 
 MIERT KELL, HA MAR VAN FUTASIDEJU INVARIANS? Mert az csak azokat az utakat
 meri, amiket egy forgatokonyv tenylegesen bejar. Egy uj, meg teszteletlen
@@ -164,3 +166,95 @@ if alloc_hibak:
     sys.exit(1)
 
 print("2. Dinamikus foglalas: rendben, egy sincs.")
+
+
+# ---------------------------------------------------------------------------
+# 3. IDO-OSSZEHASONLITAS: CSAK ATFORDULAS-BIZTOS ALAKBAN
+#
+# A millis() 32 bites, es 49,7 nap utan KORBEFORDUL. Ket helyes alak van:
+#
+#   a) ELTELT-ALAK:    (most - kezdet) < idotartam
+#      Elojel nelkuli kivonas, ez maga atfordulas-biztos: a kulonbseg akkor is
+#      helyes, ha a "most" mar korbefordult, a "kezdet" pedig meg nem.
+#
+#   b) HATARIDO-ALAK:  (int32_t)(most - hatarido) >= 0
+#      Amikor egy ABSZOLUT idopontot kell elerni. Az elojeles kulonbseg
+#      helyesen mondja meg, melyik van elorebb.
+#
+# A HIBAS alak ket abszolut idopont KOZVETLEN osszehasonlitasa:
+#
+#      if (most >= hatarido)          // HIBAS
+#
+# Ez 49,7 naponta EGYSZER hibazik, kiszamithatatlan pillanatban, es a hiba
+# semmilyen teszten nem latszik, ami rovidebb ideig fut. Egy ilyen sor
+# eszrevetlenul bekerulhet - ma ket hatarido-osszehasonlitas van a programban,
+# es MINDKETTO helyes, de eddig ezt is csak a fegyelem tartotta be.
+#
+# MIT NEZ. Minden <, >, <=, >= osszehasonlitast, aminek MINDKET oldala
+# ido-erteku (millis()-bol szarmazo valtozo vagy maga a millis()). Ha ilyenkor
+# nincs (int32_t) jelolés, az hiba. Az eltelt-alak igy nem akad fenn: ott a
+# jobb oldal idotartam (konstans), nem idopont.
+#
+# Az == es a != SZANDEKOSAN nincs benne: azok atfordulastol fuggetlenul
+# helyesek, mert nem rendezest kerdeznek.
+# ---------------------------------------------------------------------------
+
+# Az ido-valtozok. A lista nagy resze GEPILEG all elo (minden X, amire valahol
+# "X = millis()" vagy "X = millis() + ..." all), a curated resz azokat fogja
+# meg, amik struktura-tagkent vagy parameterkent kapjak az erteket.
+IDO_KEZI = {'millis', 'now', 'currentMillis', 'apDeadline', 'restartAt',
+            'lastProbe', 'startMillis', 'stateStart', 'resetPulseStart',
+            'fatalStart', 'blinkLast', 'heapCheckLast', 'heapLogLast',
+            'resetDelayProbeLast', 'firstStartProbeLast', 'btnResetDownAt',
+            'btnWifiResetDownAt', 'resetBtnDownSince', 'wifiResetBtnDownSince'}
+
+ido_nevek = set(IDO_KEZI)
+for f in FORRASOK:
+    p3 = pathlib.Path(f)
+    if not p3.exists():
+        continue
+    szoveg3 = p3.read_text(encoding='utf-8')
+    for m in re.finditer(r'\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*millis\s*\(\s*\)', szoveg3):
+        ido_nevek.add(m.group(1))
+
+IDO_MINTA = re.compile(r'\b(' + '|'.join(sorted(ido_nevek)) + r')\b')
+
+def ido_erteku(kif):
+    """Ido-ERTEKU-e ez a reszkifejezes? A kivonas (a - b) mar IDOTARTAM, nem
+    idopont, ezert az nem szamit annak - epp ez teszi az eltelt-alakot
+    szabalyossa."""
+    mag = kif.strip()
+    if not mag:
+        return False
+    if re.search(r'[A-Za-z0-9_\)\]]\s*-\s*[A-Za-z_(]', mag):
+        return False          # kulonbseg -> idotartam
+    return bool(IDO_MINTA.search(mag))
+
+ido_hibak = []
+for f in FORRASOK:
+    p3 = pathlib.Path(f)
+    if not p3.exists():
+        continue
+    for n, sor in enumerate(p3.read_text(encoding='utf-8').split('\n'), 1):
+        mag = re.sub(r'//.*', '', sor)
+        if 'int32_t' in mag or 'TIME-OK:' in sor:
+            continue
+        for m in re.finditer(r'([^<>=!&|]+?)\s*(<=|>=|<|>)\s*([^<>=&|;\)]+)', mag):
+            if ido_erteku(m.group(1)) and ido_erteku(m.group(3)):
+                ido_hibak.append(f"{f}:{n}: ket abszolut idopont kozvetlen "
+                                 f"osszehasonlitasa -> {sor.strip()[:70]}")
+                break
+
+if ido_hibak:
+    print("\nAz ido-osszehasonlitas ellenorzese MEGBUKOTT:")
+    for h in ido_hibak:
+        print("  " + h)
+    print("\nA millis() 49,7 nap utan korbefordul. Ket abszolut idopontot NEM")
+    print("szabad kozvetlenul osszehasonlitani - hasznald a hatarido-alakot:")
+    print("    if ((int32_t)(most - hatarido) >= 0) { ... }")
+    print("vagy az eltelt-alakot:  if (most - kezdet >= idotartam) { ... }")
+    print("Ha egy eset MEGIS helyes, irj a sorra \"// TIME-OK: <indok>\".")
+    sys.exit(1)
+
+print(f"3. Ido-osszehasonlitas: rendben, mind atfordulas-biztos "
+      f"({len(ido_nevek)} ido-valtozot figyelve).")

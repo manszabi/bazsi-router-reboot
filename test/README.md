@@ -144,7 +144,7 @@ lefordított kódot nézi. Mindhárom mutációval igazolva.
 
 | Cél | Mit tart be | Miért nem volt eddig kikényszerítve |
 |---|---|---|
-| `make lint` | **(1)** minden `delay()`-t tartalmazó `while`/`for`/`do` ciklus etessen, térjen vissza a `loop()`-ba, vagy kapjon `// WDT-OK: <indok>` jelölést · **(2)** nincs dinamikus foglalás (`malloc`, `new`, STL tároló, érték szerinti `String`) | a (2) a README és a MUKODES **állítása** volt, nulla ellenőrzéssel |
+| `make lint` | **(1)** minden `delay()`-t tartalmazó `while`/`for`/`do` ciklus etessen, térjen vissza a `loop()`-ba, vagy kapjon `// WDT-OK: <indok>` jelölést · **(2)** nincs dinamikus foglalás (`malloc`, `new`, STL tároló, érték szerinti `String`) · **(3)** két abszolút időpontot tilos közvetlenül összehasonlítani – csak `(int32_t)(most - határidő)` vagy `(most - kezdet) < időtartam` | a (2) a README és a MUKODES **állítása** volt, nulla ellenőrzéssel; a (3) 49,7 naponta **egyszer** hibázna, és semmilyen rövidebb teszten nem látszana |
 | `make warn` | `-Wformat-truncation=2`, `-Wformat-overflow=2`, `-Wstringop-*`, `-Werror` | ezek **csak `-O2` mellett** futnak, a fő teszt-build viszont `-O0` (a pontos lefedettségért) – így csendben kimaradtak |
 | `make stack` | az async_tcp taskon futó HTTP kezelők veremkerete (`handleConfigPost` 720 B, `sendDiagnosticLog` 592 B, küszöb 1200 B) | a kód több helyen **épp a véges veremre hivatkozva** választ közös puffert – de a számot semmi nem mérte |
 
