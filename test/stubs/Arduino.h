@@ -158,6 +158,7 @@ extern bool     g_wdtReconfigureFails;  // az esp_task_wdt_reconfigure() hibazzo
 extern uint32_t g_wdtFeedNotSubscribed; // ennyi log_e() sor menne ki
 extern bool     g_wdtTrack;
 extern bool g_wdtInProgram;        // a setup()/loop() belsejeben vagyunk?
+void feedLoopWDT_fromCore();       // a core per-iteracios etetese (nem naploz)
 void wdtAdvanceTime(uint32_t ms);  // eltelt ido bejelentese az etetes-meresnek
 void wdtNoteTime();
 int64_t esp_timer_get_time();

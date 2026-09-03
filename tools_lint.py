@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Statikus ellenorzes: minden BLOKKOLO ciklus etesse a watchdogot.
+"""Forras-szintu ellenorzesek: olyan szabalyok, amiket eddig csak a fegyelem
+tartott be.
+
+1. Minden BLOKKOLO ciklus etesse a watchdogot.
+2. A program NE allokaljon dinamikusan.
 
 MIERT KELL, HA MAR VAN FUTASIDEJU INVARIANS? Mert az csak azokat az utakat
 meri, amiket egy forgatokonyv tenylegesen bejar. Egy uj, meg teszteletlen
@@ -116,4 +120,47 @@ if hibak:
     print("  egy \"// WDT-OK: <indok>\" sort, ami kimondja, MIERT nem kell etetnie.")
     sys.exit(1)
 
-print("A blokkolo ciklusok ellenorzese rendben: mind etet.")
+print("1. Blokkolo ciklusok: rendben, mind etet.")
+
+# ---------------------------------------------------------------------------
+# 2. NINCS DINAMIKUS FOGLALAS.
+#
+# A README es a MUKODES.md is ALLITJA ezt ("a sketch maga semmit nem allokal
+# dinamikusan"), es igaz is - de eddig SEMMI nem tartotta be. Egy heap-foglalas
+# egy honapokig futo eszkozon toredezettseget okoz, es epp azt a hibat hozza be,
+# ami ellen a heap-felugyelet vedeni probal.
+#
+# A String NEM tiltott onmagaban: a webszerver a parametereket String-ben adja,
+# es azokat REFERENCIAKENT vesszuk at (const String&) - masolas, tehat foglalas
+# nelkul. Egy ERTEK szerinti String valtozo viszont mar foglal, ezert azt is
+# nezzuk.
+# ---------------------------------------------------------------------------
+TILTOTT = [
+    (r'\b(malloc|calloc|realloc|strdup|strndup)\s*\(', 'C heap-foglalas'),
+    (r'\bnew\s+[A-Za-z_]',                            'operator new'),
+    (r'\bstd::(vector|string|map|set|list|deque)\b',   'dinamikusan foglalo STL tarolo'),
+    (r'^\s*String\s+\w+\s*[=;]',                     'ertek szerinti String (masolat = foglalas)'),
+]
+
+alloc_hibak = []
+for f in FORRASOK:
+    p2 = pathlib.Path(f)
+    if not p2.exists():
+        continue
+    for n, sor in enumerate(p2.read_text(encoding='utf-8').split('\n'), 1):
+        mag = re.sub(r'//.*', '', sor)
+        if 'LINT-OK:' in sor:
+            continue
+        for minta, mit in TILTOTT:
+            if re.search(minta, mag):
+                alloc_hibak.append(f"{f}:{n}: {mit} -> {sor.strip()[:70]}")
+
+if alloc_hibak:
+    print("\nA dinamikus foglalas ellenorzese MEGBUKOTT:")
+    for h in alloc_hibak:
+        print("  " + h)
+    print("\nA program fix meretu pufferekkel dolgozik - a meret egyben validacio is.")
+    print("Ha egy eset MEGIS indokolt, irj a sor vegere \"// LINT-OK: <indok>\".")
+    sys.exit(1)
+
+print("2. Dinamikus foglalas: rendben, egy sincs.")

@@ -55,7 +55,6 @@ struct ConfigDraft {
   bool gwSet        = false;
 };
 
-// Create AsyncWebServer object on port 80
 // A webszerver. STATIC: a modulon kivul senki nem nyulhat hozza - az
 // inditasa es a leallitasa a ket publikus fuggvenyen at megy.
 static AsyncWebServer server(80);
@@ -135,7 +134,18 @@ static void printHtmlEscaped(AsyncResponseStream* r, const char* s) {
 // A JELSZÓT SOHA NEM töltjük elő: az az egyetlen titok ezen a lapon, és a
 // portál WPA2 kulcsa nyilvános, tehát a lap tartalma nem tekinthető védettnek.
 static void sendConfigForm(AsyncWebServerRequest* request) {
-  AsyncResponseStream* r = request->beginResponseStream("text/html", 1024);
+  // A KEZDO PUFFERMERET MERT ERTEK, nem becsles (AP8 forgatokonyv):
+  //   tipikus eset ("MyHomeNetwork" + ket valodi IP):     903 bajt
+  //   legrosszabb eset (32+15+15 karakter, mind escape-elve): 1238 bajt
+  // Az utobbi nem elmeleti: az SSID barmi lehet, es a printHtmlEscaped() egy
+  // idezojelbol HAT bajtot csinal (&quot;); a cimmezoket pedig egy serult
+  // /ip.txt is feltoltheti tetszoleges karakterekkel.
+  //
+  // A korabbi 1024 MINDKET esetnel szuk volt (a tipikusnal is csak 121 bajt
+  // tartalek), tehat a stream ujraallokalt volna - epp az async_tcp taskban,
+  // ahol a heap a legszukebb, es epp azt kerulnenk el a kezdomerettel.
+  // 1536 a mert maximum folott ~24% tartalekot ad.
+  AsyncResponseStream* r = request->beginResponseStream("text/html", 1536);
   r->print(FORM_HEAD);
 
   r->print(F("SSID <input name=\"ssid\" maxlength=\"32\" required value=\""));
@@ -170,10 +180,11 @@ void touchApDeadline() {
 // Igaz, ha MINDEN mezo ervenyes. Hamis eseten a failReason az ELSO hiba oka.
 // Ez a fuggveny sem fajlt nem ir, sem globalist nem modosit.
 static bool parseConfigPost(AsyncWebServerRequest* request, ConfigDraft& d,
-                     const char*& failReason) {
+                            const char*& failReason) {
   bool saveOk = true;
   failReason = nullptr;
 
+  // KOZOS jelolt-puffer mind a negy mezohoz, a legnagyobbhoz (jelszo)
   // meretezve, es a mezo hatarnal BOVEBBRE: igy a masolas-beillesztes
   // szokozeit le tudjuk vagni MIELOTT a hosszat merjuk. Egy puffer, mert az
   // async_tcp task verme veges, es igy a negy ag nem rakodik egymasra.
@@ -623,6 +634,8 @@ static void sendDiagnosticLog(AsyncWebServerRequest* request) {
              "<li>ROUTER RESET: hanyadik ujrainditas (1-4)</li>"
              "<li>AP MODE: 1 = nincs SSID, 2 = rossz jelszo, "
              "3 = letelt a 2 nap, 4 = a gateway sem erheto el</li>"
+             "<li>CONFIG SAVED: mindig 0 - itt maga a bejegyzes az "
+             "informacio, parametere nincs</li>"
              "<li>GW UNREACH: 1 = a router reset elott, 2 = utana is</li>"
              "<li>SLEEP: 1 = ujraprobalkozas, 2 = tartos internetkieses, "
              "3 = AP idotullepes, 4 = vegzetes hiba</li>"
@@ -695,7 +708,8 @@ void startWebPortal() {
     handleConfigPost(request);
   });
 
-  server.begin();}
+  server.begin();
+}
 
 void stopWebPortal() {
   server.end();

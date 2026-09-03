@@ -51,7 +51,7 @@ struct ProgramScope {
 };
 
 static void coreLoopStep() {
-  if (g_wdtEnabled) feedLoopWDT();
+  feedLoopWDT_fromCore();   // a core etetese: konyvel, de nem naploz
   ProgramScope sc;
   sketchLoop();
 }
@@ -240,6 +240,7 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   // a kulonbseg elojel nelkul alulcsordulna (~4,29 milliard) - vagyis a globalis
   // res-invarians hamisan bukna. (A merest ez a ket sor teszi ertelmezhetove.)
   g_wdtLastFeed = 0; g_wdtMaxFeedGap = 0;
+  g_criticalMaxDepth = 0;
   // A heap modellje is hidegindul: egy valodi bekapcsolas tiszta heappel
   // indul. Enelkul egy korabbi forgatokonyv alacsony heapje atszivarogna a
   // kovetkezobe, es ott VARATLAN onkentes ujraindulast okozna.
@@ -4454,7 +4455,16 @@ static void scNV15() {
   // AZ INDULAS OKANAK EMBERI NEVE. A /log oldal ezt irja ki szovegesen; ha egy
   // cimke elcsuszna, a naplo felrevezetne. A lefedettseg szerint eddig csak
   // harom ok fordult elo a tesztekben (POWERON, DEEPSLEEP, TASK_WDT), a tobbi
-  // kilenc cimke sora sosem futott le.
+  // cimke sora sosem futott le.
+  //
+  // AZ IDF 5.x TOVABBI OKAI is nevet kaptak. Kettonek KONKRET oka van itt:
+  //   USB        - a XIAO ESP32-C3 nativ USB-t hasznal, tehat egy firmware
+  //                feltoltes vagy egy soros monitor megnyitasa IDE fut be. Ez
+  //                a leggyakoribb "nem magatol indult ujra" eset a fejlesztes
+  //                alatt, es "ismeretlen (11)"-kent zavarba ejto volt.
+  //   PWR GLITCH - tapfeszultseg-tuske. Egy relevel halozati aramot kapcsolgato
+  //                eszkoznel ez a legfontosabb diagnosztikai jelzes: sajat
+  //                magat zavarja-e meg a kapcsolas.
   struct Eset { esp_reset_reason_t ok; const char* resz; };
   const Eset esetek[] = {
     { ESP_RST_POWERON,    "bekapcsolas" },
@@ -4467,6 +4477,11 @@ static void scNV15() {
     { ESP_RST_DEEPSLEEP,  "deep sleep" },
     { ESP_RST_BROWNOUT,   "BROWNOUT" },
     { ESP_RST_CPU_LOCKUP, "CPU lefagyas" },
+    { ESP_RST_SDIO,       "SDIO" },
+    { ESP_RST_USB,        "USB reset" },
+    { ESP_RST_JTAG,       "JTAG reset" },
+    { ESP_RST_EFUSE,      "eFuse" },
+    { ESP_RST_PWR_GLITCH, "TAPFESZULTSEG-TUSKE" },
   };
   bool mind = true;
   for (const Eset& e : esetek) {
@@ -4480,19 +4495,19 @@ static void scNV15() {
       printf("     [info] hianyzik a(z) %d okhoz: '%s'\n", (int)e.ok, e.resz);
     }
   }
-  CHECK(mind, "mind a 10 indulasi ok EMBERI nevet kap a /log oldalon");
+  CHECK(mind, "mind a 15 nevesitett indulasi ok EMBERI nevet kap a /log oldalon");
 
-  // Es a NEM NEVESITETT okok sem dobnak el semmit: "ismeretlen"-t irunk.
+  // Es a NEM NEVESITETT ok sem dob el semmit: "ismeretlen"-t irunk.
   //
-  // Ez nem elmeleti eset: az ESP32-C3-on letezik ESP_RST_USB es ESP_RST_JTAG
-  // is, es a firmware ezeket szandekosan nem nevesiti kulon - a naplo szamara
-  // "ismeretlen indulasi ok, a szam zarojelben" pontosan eleg.
+  // A nevesites utan EGYETLEN ilyen ertek maradt: az ESP_RST_UNKNOWN (0) - a
+  // default ag tehat tovabbra is vedelmi celu, egy JOVOBELI IDF-ben megjeleno
+  // uj ok ellen. Epp ezert kell merni: a lap akkor sem hallgathat el.
   //
   // FONTOS, hogy VALODI enum erteket hasznaljunk: az elso valtozat 99-et irt
   // a valtozoba, ami kivul esik az enum abrazolhato tartomanyan (0..15), es
   // ezzel definialatlan viselkedest okozott. Az UBSan el is kapta.
   coldBoot(false, "", "", "", "");
-  g_resetReason = ESP_RST_USB;
+  g_resetReason = ESP_RST_UNKNOWN;
   setup();
   AsyncWebServerRequest req; g_handlers["/log#1"](&req);
   CHECK(req._body.find("ismeretlen") != std::string::npos,
@@ -7060,6 +7075,46 @@ static void scSYNC3() {
   CHECK(beginConfigWrite(), "es ujra megszerezheto");
 }
 
+
+static void scAP8() {
+  // AZ URLAP MERETE - a /log oldal LOG7-es meresenek parja.
+  //
+  // MIERT KELL? Az urlap ugyanugy egy AsyncResponseStream-be megy, ugyanolyan
+  // FIX kezdo pufferrel (1024 bajt) - de erre eddig NEM volt meres. A stream
+  // szukseg eseten no, tehat a tullepes nem hiba; a kezdomeret viszont epp
+  // azert van, hogy egyetlen foglalas legyen az async_tcp taskban, ahol a heap
+  // a legszukebb. Ha eszrevetlenul tullep, a cel csendben elvesz.
+  //
+  // A LEGROSSZABB ESET NEM ELMELETI. Az SSID barmi lehet (a POST kezelo 32
+  // karaktert enged), es a printHtmlEscaped() egy idezojelbol HAT bajtot csinal
+  // (&quot;). Az IP/gateway mezot a validalas ugyan IPv4-re szoritja, de a
+  // fajlbol beolvasott ertek nem megy at rajta - egy serult /ip.txt tetszoleges
+  // 15 karaktert adhat. Vagyis a felso korlat: 32+15+15 karakter, mind escape-elve.
+  coldBoot(false, "", "", "", "");
+  setup();
+  // A mentett ertekek kozvetlen felulirasa: ezt egy serult fajl is eloallithatja.
+  for (int i = 0; i < 32; i++) ssid[i] = '"';
+  ssid[32] = '\0';
+  for (int i = 0; i < 15; i++) { ipStr[i] = '"'; gatewayStr[i] = '"'; }
+  ipStr[15] = '\0'; gatewayStr[15] = '\0';
+
+  AsyncWebServerRequest req; g_handlers["/#1"](&req);
+  const size_t meret = req._body.size();
+  printf("     [info] az urlap legrosszabb esetben %u bajt (a puffer 1536)\n",
+         (unsigned)meret);
+  CHECK(req._code == 200, "az urlap kiszolgalodik");
+  CHECK(meret < 1536, "es belefer a stream 1536 bajtos kezdo pufferebe");
+  // A szokasos, valosagos eset legyen boven alatta - ez a kezdomeret indoklasa.
+  // A pufferek merete itt nem latszik (extern char[]), a bemasolt ertekek
+  // viszont bizonyithatoan belefernek: 13 < 33, 13 < 16, 11 < 16.
+  strcpy(ssid, "MyHomeNetwork");
+  strcpy(ipStr, "192.168.1.200");
+  strcpy(gatewayStr, "192.168.1.1");
+  AsyncWebServerRequest req2; g_handlers["/#1"](&req2);
+  printf("     [info] tipikus esetben %u bajt\n", (unsigned)req2._body.size());
+  CHECK(req2._body.size() < meret, "a tipikus eset kisebb a legrosszabbnal");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -7287,12 +7342,13 @@ static const Scenario kScenarios[] = {
   { "NV12: megtelt fajlrendszer a naplo mentese kozben", scNV12 },
   { "NV13: valtozas nelkul nem irunk ujra (flash kimeles)", scNV13 },
   { "NV14: a lap kiirja, MIKOR mentettuk a naplot", scNV14 },
-  { "NV15: mind a 10 indulasi ok emberi nevet kap", scNV15 },
+  { "NV15: mind a 15 nevesitett indulasi ok emberi nevet kap", scNV15 },
   { "NV16: olvashatatlan fajlrendszer a naplo korul", scNV16 },
   { "AP6: mentes csatolatlan fajlrendszerrel -> tiszta 500", scAP6 },
   { "WF11: a router reset utan sem jon vissza a WiFi", scWF11 },
   { "AP5: aposztrof es tarsai az SSID-ben - HTML escape", scAP5 },
   { "AP7: mind a negy mezo egyformán turi a beillesztett szokozoket", scAP7 },
+  { "AP8: a beallito urlap befer a stream kezdo pufferebe", scAP8 },
   { "LOG7: a /log oldal a legrosszabb esetben is befer a pufferbe", scLOG7 },
   { "LOG8: firmware frissites utan a regi elrendezesu naplo ervenytelen", scLOG8 },
   { "LOG9: a wifireset a naplofajlt szandekosan NEM torli", scLOG9 },
@@ -7409,6 +7465,33 @@ static Result runIsolated(const Scenario& sc) {
     // mert erteke kiirhato - igy lehet megkeresni, MELYIK ut a leghosszabb.
     // ------------------------------------------------------------------
     if (getenv("WDTGAP")) fprintf(stderr, "WDTGAP %s | %u\n", sc.name, (unsigned)g_wdtMaxFeedGap);
+    // Diagnosztikai riport (PROBE=1): forgatokonyvenkent a kritikus szakasz
+    // melysege, a soros sorok es a naplobejegyzesek szama, a szimulalt ido.
+    // Ezzel lehet megkeresni, MELYIK ut a legterheltebb.
+    if (getenv("PROBE")) fprintf(stderr, "PROBE|%s|crit=%d|ser=%zu|ev=%u|ms=%u\n",
+        sc.name, g_criticalMaxDepth, g_serialLog.size(), (unsigned)rtcEvNext,
+        (unsigned)g_millis);
+
+    // ------------------------------------------------------------------
+    // GLOBALIS INVARIANS: a kritikus szakasz SOSEM agyazodik egymasba.
+    //
+    // MIERT VESZELYES A BEAGYAZAS? A portENTER_CRITICAL az ESP32-n egy NEM
+    // rekurziv spinlockot vesz fel. Ha ugyanaz a task masodszor is belep,
+    // magara var - vagyis azonnali, teljes megallas, amibol csak a watchdog
+    // hoz ki. Es mivel a szakasz a megszakitasokat is tiltja, meg a watchdog
+    // interruptja sem futna: az eszkoz nemán fagyna le.
+    //
+    // Ez ma HELYES: a merés szerint 280 forgatokonyv eri el az 1-es melyseget
+    // es EGY SEM a 2-est. De eddig csak HAROM forgatokonyv nezte - egy uj,
+    // zaron beluli hivas (pl. egy logEvent() egy mar nyitott szakaszban)
+    // eszrevetlen maradt volna, es csak az eszkozon derult volna ki, a
+    // legrosszabb pillanatban.
+    //
+    // Ugyanaz a minta, mint a watchdog-etetesi resnel: harom kezzel valasztott
+    // eset helyett MINDEN forgatokonyv meri.
+    // ------------------------------------------------------------------
+    CHECK(g_criticalMaxDepth <= 1,
+          "a kritikus szakasz sosem agyazodott egymasba");
     if (g_wdtGapWaiver != nullptr) {
       printf("     [info] a watchdog-res invarians alol felmentve: %s\n", g_wdtGapWaiver);
     } else {

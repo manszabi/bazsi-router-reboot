@@ -29,6 +29,16 @@ static bool ntpStarted = false;
 // Bejelentettuk-e mar a soros porton ebben a bootban? (Lasd startNtp().)
 static bool ntpAnnounced = false;
 
+// Mit jelent ennek a modulnak egy BEKAPCSOLAS? A RAM-beli jelzoi alaphelyzetbe
+// kerulnek (az RTC memoriaban levo naplo viszont NEM - epp az a lenyege, hogy
+// tulelje). Valodi eszkozon ezt a C futtatokornyezet vegzi el, ezert a program
+// maga sosem hivja; a host tesztek viszont EGY processzen belul tobb
+// bekapcsolast is modelleznek. Lasd a header reszletesebb indoklasat.
+void ntpResetForColdBoot() {
+  ntpStarted = false;
+  ntpAnnounced = false;
+}
+
 // Az SNTP kliens elinditasa. CSAK elinditja: a valasz a hatterben erkezik, a
 // hivas nem var ra. Tobbszor is hivhato (ujracsatlakozasnal), a kliens
 // ujraindul. A rendszeroraval egyutt a nyari idoszamitas kezelese is beall.
@@ -37,11 +47,6 @@ static bool ntpAnnounced = false;
 // ebredeskor nullarol indul, a gettimeofday() alapu rendszerora viszont az RTC
 // orabol jon, tehat egy 1 oras alvas utan is jo idot mutat - epp ezert
 // hasznalhato a naplo bejegyzesek rendezesere bootolasokon at.
-void ntpResetForColdBoot() {
-  ntpStarted = false;
-  ntpAnnounced = false;
-}
-
 static void startNtp() {
   configTzTime(NTP_TZ, NTP_SERVER);
   // A KIIRAS CSAK AZ ELSO ALKALOMMAL. Az SNTP klienst minden
@@ -170,6 +175,20 @@ const char* resetReasonName(esp_reset_reason_t r) {
     case ESP_RST_DEEPSLEEP:  return "ebredes deep sleepbol";
     case ESP_RST_BROWNOUT:   return "BROWNOUT - leesett a tapfeszultseg";
     case ESP_RST_CPU_LOCKUP: return "CPU lefagyas";
+    // Az IDF 5.x tovabbi okai. Ketto koztuk EPP EZEN A LAPKAN es EPP EZNEL A
+    // KESZULEKNEL szamit igazan:
+    //   USB        - a XIAO ESP32-C3 natív USB-t hasznal, tehat egy firmware
+    //                feltoltes vagy egy soros monitor megnyitasa IDE fut be.
+    //                "ismeretlen (11)"-kent ez zavarba ejto volt.
+    //   PWR GLITCH - tapfeszultseg-tuske. Egy olyan eszkoznel, aminek a dolga
+    //                EPPEN a halozati aram kapcsolgatasa egy relevel, ez az
+    //                egyik legfontosabb diagnosztikai jelzes: sajat magat
+    //                zavarja-e meg a kapcsolas.
+    case ESP_RST_SDIO:       return "SDIO reset";
+    case ESP_RST_USB:        return "USB reset (feltoltes vagy soros monitor)";
+    case ESP_RST_JTAG:       return "JTAG reset (hibakereso)";
+    case ESP_RST_EFUSE:      return "eFuse hiba";
+    case ESP_RST_PWR_GLITCH: return "TAPFESZULTSEG-TUSKE";
     default:                 return "ismeretlen";
   }
 }
@@ -218,14 +237,25 @@ bool lastEventWas(uint8_t code) {
 // Igaz, ha a napló legutóbbi két bejegyzése már pontosan ez a beragadt-gomb
 // kör (BOOT, majd STUCK BUTTON ugyanazzal a gombbal) - vagyis a mostani
 // ébredés csak a 60 mp-es alvás-ébredés kör ismétlése.
+//
+// A MUX itt is kell, ugyanazert, mint a lastEventWas()-ban. MA ez a fuggveny
+// csak a setup()-bol fut, ahol a webszerver meg el sem indult, tehat masik iro
+// nincs - de ezt SEHOL nem mondja ki semmi, es a szomszedos lastEventWas()
+// kulon kommentben indokolja, miert zarol. Ket egymas melletti, azonos dolgot
+// olvaso fuggveny, ketfele szabaly szerint: a kovetkezo olvaso nem tudna
+// eldonteni, melyik a helyes. Az ar egyetlen rovid szakasz, bootolasonkent
+// egyszer.
 bool stuckCycleAlreadyLogged(uint16_t which) {
-  if (rtcEvMagic != EVLOG_MAGIC || rtcEvNext < 2) {
-    return false;
+  bool egyezik = false;
+  portENTER_CRITICAL(&evLogMux);
+  if (rtcEvMagic == EVLOG_MAGIC && rtcEvNext >= 2) {
+    const EventEntry& last = rtcEvents[(rtcEvNext - 1) % EVLOG_SIZE];
+    const EventEntry& prev = rtcEvents[(rtcEvNext - 2) % EVLOG_SIZE];
+    egyezik = last.code == EV_STUCK_BUTTON && last.param == which
+              && prev.code == EV_BOOT;
   }
-  const EventEntry& last = rtcEvents[(rtcEvNext - 1) % EVLOG_SIZE];
-  const EventEntry& prev = rtcEvents[(rtcEvNext - 2) % EVLOG_SIZE];
-  return last.code == EV_STUCK_BUTTON && last.param == which
-         && prev.code == EV_BOOT;
+  portEXIT_CRITICAL(&evLogMux);
+  return egyezik;
 }
 
 // A napló kiírása a fájlrendszerre.
@@ -247,11 +277,18 @@ bool saveEventLog(const char* reason) {
 
   // Nincs mit menteni? Akkor a flasht sem koptatjuk. Ez nem optimalizacio,
   // hanem a kopas es a tenyleges esemenyek osszehangolasa.
+  // A ket erteket EGYUTT olvassuk ki: az "van-e uj esemeny?" kerdes a kettejuk
+  // VISZONYA. Kulon olvasva a logEvent() magic-inicializalasa (ami mindkettot
+  // nullazza) beeshetne koze, es egy elavult evTotal-t hasonlitanank egy friss
+  // rtcSavedEvNext-hez. Ugyanaz az elv, mint a sync modul hatarido-jelzo
+  // paranal - csak ott a kovetkezmeny sulyosabb.
   uint32_t evTotal;
+  uint32_t mentettEddig;
   portENTER_CRITICAL(&evLogMux);
   evTotal = (rtcEvMagic == EVLOG_MAGIC) ? rtcEvNext : 0;
+  mentettEddig = rtcSavedEvNext;
   portEXIT_CRITICAL(&evLogMux);
-  if (evTotal == 0 || evTotal == rtcSavedEvNext) {
+  if (evTotal == 0 || evTotal == mentettEddig) {
     return false;
   }
 
@@ -365,7 +402,7 @@ bool saveEventLog(const char* reason) {
 //
 // MIERT KULON A FEJLEC ES A TARTALOM? Az async_tcp task verme veges, es 32
 // bejegyzes mar 384 bajt. Ha itt is puffert kernenk, a /log kezelo EGYSZERRE
-// ket ilyet tartana (az RTC pillanatkepet es a fajlet). Igy viszont eloszb
+// ket ilyet tartana (az RTC pillanatkepet es a fajlet). Igy viszont eloszor
 // eldontjuk a fejlecbol, melyik forras kell - es csak azt toltjuk be, EGY
 // pufferbe.
 bool loadEventLogHeader(EvFileHeader& fej) {
@@ -394,6 +431,15 @@ bool loadEventLogHeader(EvFileHeader& fej) {
 
 // A bejegyzesek betoltese - csak akkor, ha a fejlec mar rendben volt.
 bool loadEventLogEntries(const EvFileHeader& fej, EventEntry* ki) {
+  // SAJAT HATARELLENORZES, nem csak a hivo szerzodesere hagyatkozva. A
+  // fej.count egy FAJLBOL szarmazo ertek: egy serult vagy idegen kezzel irt
+  // /evlog.bin barmit mondhat. A hivo (loadEventLogHeader) ma ellenorzi, de az
+  // egy MASIK fuggveny - ha valaha kozvetlenul hivnak minket, egy 0xFFFF-es
+  // count a hivo 384 bajtos vermet irna tul. Egy sor, es a modul a hivotol
+  // fuggetlenul is biztonsagos.
+  if (fej.count == 0 || fej.count > EVLOG_SIZE) {
+    return false;
+  }
   File f = LittleFS.open(evLogPath, "r");
   if (!f) {
     return false;

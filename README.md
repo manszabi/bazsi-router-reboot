@@ -416,7 +416,7 @@ bazsi-router-reboot/
 ├── webportal.h/.cpp          # az AP beállító portál HTTP felülete
 │
 ├── partitions_custom.csv     # Egyedi partíciós tábla: OTA nélkül, 512 KiB LittleFS
-├── test/                     # host tesztkészlet (294 forgatókönyv)
+├── test/                     # host tesztkészlet (295 forgatókönyv)
 └── LICENSE                   # MIT License
 ```
 
@@ -428,7 +428,7 @@ négy konfigurációs fájl és a mentett napló kerül (`/ssid.txt`, `/pass.txt
 
 ### A program felépítése
 
-**Nyolc fordítási egység**, ~4640 sor, **98 függvény**, 43%-a komment. A gerinc
+**Nyolc fordítási egység**, ~4700 sor, **98 függvény**, 44%-a komment. A gerinc
 három üzemmód (`MODE_MONITOR` / `MODE_CONFIG` / `MODE_FATAL`) és három állapot
 (`TESTING` → `SUCCESS`, vagy `TESTING` → `FAILURE`). `MODE_MONITOR`-ból van út
 a másik kettőbe, **visszaút nincs**.
@@ -481,6 +481,21 @@ Teljes függvénylistával és a határhúzás indoklásával:
    modulokat **ugyanabban a mappában** kell hagyni – az Arduino a sketch mappa
    minden forrását lefordítja és hozzálinkeli (a szerkesztőben külön fülként
    jelennek meg).
+
+   > **A mappanévnek egyeznie kell a `.ino` nevével.** A klónozott repó mappája
+   > `bazsi-router-reboot` (kötőjellel), a sketch viszont
+   > `bazsi_router_reboot.ino` (alulvonással) – ezt az Arduino nem fogadja el
+   > (`main file missing from sketch`). Másold a `.ino`-t, az összes `.h`/`.cpp`
+   > modult és a partíciós táblát egy `bazsi_router_reboot` nevű mappába:
+   >
+   > ```bash
+   > mkdir -p bazsi_router_reboot
+   > cp bazsi_router_reboot.ino *.h *.cpp bazsi_router_reboot/
+   > cp partitions_custom.csv bazsi_router_reboot/partitions.csv
+   > ```
+   >
+   > (Az Arduino IDE 2.x fel is ajánlja a másolást, amikor megnyitod a fájlt.)
+   > A CI ugyanezt teszi a fordítás előtt.
 5. Másold a `partitions_custom.csv`-t a sketch mappájába **`partitions.csv`**
    néven – a core a sketch melletti `partitions.csv`-t automatikusan használja.
    (Ha inkább gyári sémát választanál a `Tools` → `Partition Scheme` menüből,
@@ -601,8 +616,12 @@ ismétlődő események szűrése tartja fenn (`TEST FAIL`, `WIFI LOST`,
 
 ## 🧠 Heap felügyelet
 
-A sketch maga semmit nem allokál dinamikusan, de az ESPAsyncWebServer, az
-AsyncTCP és a Wi-Fi driver igen. Egy lassú szivárgás hónapokig észrevétlen
+A sketch **saját kódja** nem allokál dinamikusan – ezt a `make lint` ki is
+kényszeríti. (Néhány *könyvtári* hívás azonban `String`-et ad vissza érték
+szerint, és az heapről dolgozik: `http.begin()`, `http.header()`, `WiFi.SSID()`.
+Rövid életű foglalások, de foglalások.) A heapet érdemben az
+ESPAsyncWebServer, az AsyncTCP, a HTTPClient és a Wi-Fi driver használja.
+Egy lassú szivárgás hónapokig észrevétlen
 marad, aztán az eszköz „csak úgy" nem működik – **allokációs hibánál a legtöbb
 könyvtár csendben elbukik, nem panikol, tehát a watchdog sem fogja meg.**
 
