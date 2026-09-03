@@ -81,17 +81,42 @@ extern RTC_NOINIT_ATTR EventEntry rtcEvents[EVLOG_SIZE];
 // pontok, ahol vagy hosszabb ido kovetkezik, vagy az eszkoz beavatkozik -
 // mindketto olyan, amit egy kesobbi vizsgalat latni akar.
 //
-// A fajl a teljes korpuffer pillanatkepe, tehat mindig "az utolso 32 esemeny,
-// ahogy a legutobbi fontos pillanatban allt".
+// A FAJL SAJAT, NAGYOBB GYURU - NEM az RTC naplo pillanatkepe.
+//
+// KORABBAN pillanatkep volt: minden mentes FELULIRTA a fajlt az RTC gyuru
+// aktualis tartalmaval. Ez egy esetben pontosan a legrosszabbat tette. Egy
+// ARAMSZUNET utan ugyanis az RTC (NOINIT) terulet torlodik, tehat a
+// rtcSavedEvNext is nullazodik - es az elso mentes egyetlen friss, meg
+// idobelyeg nelkuli BOOT bejegyzest irt a korabbi 32 helyere. Merve:
+// 404 bajt / 32 bejegyzes -> 32 bajt / 1 bejegyzes. Vagyis EPP AZ AZ ESEMENY
+// tuntette el a tartos naplot, amiert az egyaltalan letezik. (Merve: NV20.)
+//
+// MOSTANTOL a mentes HOZZAFUZ: a fajl megorzi a regi tartalmat, es a vegere
+// keruinek azok az RTC bejegyzesek, amik a legutobbi sikeres mentes ota
+// keletkeztek (rtcSavedEvNext). A fajl igy a HOSSZU tortenet, az RTC gyuru
+// pedig csak az azota eltelt ido - a ketto egyutt teljes.
+//
+// MIERT 128? A fajl 128 * 12 + 20 = 1556 bajt, a LittleFS particio 512 KB -
+// a meret nem szempont. A korlat a MENTES verme: az osszefuzeshez egy
+// EVFILE_SIZE meretu puffer kell a loop task vermen (1536 bajt a ~8 KB-bol).
+// A 128 igy negyszerese az RTC gyurunek - eleg ahhoz, hogy tobb aramszunet
+// tortenete is megmaradjon -, es meg boven belefer. A /log oldal EZT A
+// PUFFERT NEM hasznalja: az async_tcp task verme szuk, ezert ott a fajl
+// FOLYAMKENT olvasodik (lasd loadEventLogRange).
+constexpr uint16_t EVFILE_SIZE = 128;
 constexpr char evLogPath[] = "/evlog.bin";
 constexpr uint32_t EVFILE_MAGIC = 0x42415A46UL;   // "BAZF"
+// A VERZIO NEM VALTOZIK. Az elrendezes ugyanaz maradt - csak a "count" mezo
+// vehet fel nagyobb erteket. Egy REGI (max 32 bejegyzeses) fajlt az uj
+// firmware valtozatlanul beolvas, es az elso mentesnel egyszeruen kiegesziti:
+// a firmware-frissites igy nem dob el tortenetet.
 constexpr uint16_t EVFILE_VERSION = 1;
 
 // A fajl fejlece. Fix meretu, es a struktura elrendezese a formatum resze.
 struct EvFileHeader {
   uint32_t magic;
   uint16_t version;
-  uint16_t count;        // hany bejegyzes kovetkezik (0..EVLOG_SIZE)
+  uint16_t count;        // hany bejegyzes kovetkezik (0..EVFILE_SIZE)
   uint32_t evNextAtSave; // az rtcEvNext erteke a mentes pillanataban
   uint32_t savedEpoch;   // mikor mentettuk (0 ha nem volt NTP)
   uint32_t savedUptime;  // uptime a mentes pillanataban
@@ -162,3 +187,20 @@ bool loadEventLogHeader(EvFileHeader& fej);
 // A bejegyzesek beolvasasa a mar ellenorzott fejlec alapjan, KIEGYENESITVE
 // (a legregebbitol a legujabbig), a puffer elejere.
 bool loadEventLogEntries(const EvFileHeader& fej, EventEntry* ki);
+
+// A fajl egy SZAKASZANAK beolvasasa - a folyamkent valo feldolgozashoz.
+// A "tol" a legregebbi bejegyzestol szamitott 0-alapu index, a "db" pedig a
+// kert darabszam. A hivo puffere legalabb "db" elemu kell legyen.
+//
+// MIERT KELL EZ A loadEventLogEntries() MELLE? Mert a /log oldal az async_tcp
+// taskon fut, aminek a verme veges. Egy 128 elemu fajlhoz ott 1536 bajtos
+// puffer kellene - ez a fuggveny viszont nyolcasaval is beolvashato, 96
+// bajtbol. A loadEventLogEntries() a mentes utjan marad, ahol a loop task
+// nagyobb verme all rendelkezesre.
+bool loadEventLogRange(const EvFileHeader& fej, uint32_t tol, uint16_t db,
+                       EventEntry* ki);
+
+// MINDKET naplo kiirasa a soros portra: eloszor a fajlbol (a hosszu tortenet),
+// utana az RTC gyurubol az, ami meg nincs a fajlban. A soros "LOG" parancs
+// hivja - lasd a fomodul serialCommands() fuggvenyet.
+void printEventLogs();

@@ -718,6 +718,79 @@ void checkHeap(uint32_t now) {
 
 // Watchdog/panic miatti újraindulások figyelése. Ha a program ismételten
 // megakad, az újraindítgatás önmagában nem megoldás - inkább jelezzünk.
+// SOROS PARANCSOK.
+//
+// MIERT KELL, HA VAN /log OLDAL? Mert az AP portal csak akkor fut, ha az
+// eszkoz konfig modba kerult - egy normalisan mukodo eszkoztol viszont a
+// soros kabel az egyetlen ut a naplohoz. Es a lap SZANDEKOSAN korlatos (a
+// legfrissebb 48 sor, hogy az async_tcp taskban ne kelljen nagy osszefuggo
+// puffert kerni); a TELJES naplot csak itt lehet megnezni.
+//
+// NEM BLOKKOL. Csak azt olvassuk ki, ami epp a pufferben van; egy felig
+// beirt sor a kovetkezo loop() iteracioban folytatodik. Igy a watchdog-etetes
+// rendje sem valtozik.
+constexpr size_t CMD_BUF_LEN = 16;
+static char cmdBuf[CMD_BUF_LEN];
+static uint8_t cmdLen = 0;
+// Tul hosszu sor: a SORVEGIG mindent eldobunk.
+//
+// Az elso valtozatom itt hibazott: a puffert a tulcsordulasnal nullazta, de a
+// tovabbi karakterek utan UJRA gyujteni kezdett - vagyis a hosszu sor VEGEBOL
+// lett egy csonkolt parancs. A szandek az volt, hogy a TELJES sor essen el.
+// (Mutacioval derult ki: a "nem lesz belole csonkolt parancs" allitas a
+// tiszta kodon is megbukott.)
+static bool cmdOverflow = false;
+
+static void runSerialCommand(const char* cmd) {
+  if (strcasecmp(cmd, "LOG") == 0) {
+    printEventLogs();
+  } else if (strcasecmp(cmd, "HELP") == 0 || strcasecmp(cmd, "?") == 0) {
+    Serial.println();
+    Serial.println("Parancsok:");
+    Serial.println("  LOG   - a teljes esemenynaplo (fajl + RTC) kiirasa");
+    Serial.println("  HELP  - ez a lista");
+    Serial.println();
+  } else if (cmd[0] != '\0') {
+    Serial.print("Ismeretlen parancs: ");
+    Serial.println(cmd);
+    Serial.println("Probald a HELP-et.");
+  }
+}
+
+void serialCommands() {
+  // A ciklus KORLATOS: csak a mar megerkezett bajtokat dolgozza fel, es
+  // Serial.available() minden korben csokken. Nincs benne delay(), nem var
+  // semmire - ezert nem is kell etetnie a watchdogot.
+  while (Serial.available() > 0) {
+    const int c = Serial.read();
+    if (c < 0) {
+      break;
+    }
+    if (c == '\n' || c == '\r') {
+      if (cmdOverflow) {
+        // A sor tul hosszu volt: EGESZBEN eldobjuk. Igy nem lehet belole
+        // veletlenul ervenyes parancs, es a kovetkezo sor tiszta lappal indul.
+        Serial.println("Tul hosszu parancs, eldobva.");
+      } else if (cmdLen > 0) {
+        cmdBuf[cmdLen] = '\0';
+        runSerialCommand(cmdBuf);
+      }
+      cmdLen = 0;
+      cmdOverflow = false;
+    } else if (cmdLen < CMD_BUF_LEN - 1) {
+      cmdBuf[cmdLen++] = (char)c;
+    } else {
+      // A sor tul hosszu. A DONTEST a cmdOverflow hozza meg a sorvegnel: ez a
+      // jelzo az egyetlen, ami szamit. A cmdLen nullazasa csak azert van itt,
+      // hogy a puffer ne maradjon felig teleirva. (Egy kulon "mar eldobjuk"
+      // ag felesleges volt: mutacioval igazolva viselkedesileg azonos, es egy
+      // teherhordonak LATSZO, de nem az ag rosszabb a semminel.)
+      cmdOverflow = true;
+      cmdLen = 0;
+    }
+  }
+}
+
 void checkWatchdogResets() {
   const esp_reset_reason_t reason = esp_reset_reason();
 
@@ -2355,6 +2428,10 @@ void runMonitorStateMachine(uint32_t currentMillis) {
 
 void loop() {
   const uint32_t currentMillis = millis();
+
+  // Soros parancsok. MINDEN uzemmodban - epp a MODE_FATAL az, ahol a
+  // diagnosztikara a legnagyobb szukseg van, es az az ag lentebb visszater.
+  serialCommands();
 
   // Az AP-módú beállító oldal kérésére halasztott újraindítás.
   //

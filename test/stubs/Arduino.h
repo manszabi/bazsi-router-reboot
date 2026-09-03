@@ -256,12 +256,28 @@ extern uint32_t g_serialFirstWriteMs;   // az elso kiirt sor ideje
 extern int      g_serialWritesAfterEnd; // end() utani irasok szama
 extern bool     g_serialFlushedAll;     // az utolso iras ota volt-e flush
 
+// A SOROS BEMENET. A parancs-feldolgozashoz (serialCommands) modellezni kell
+// azt is, ami a portra ERKEZIK - eddig a stub csak a kimenetet ismerte. A
+// teszt a g_serialIn-be teszi a bejovo bajtokat.
+extern std::string g_serialIn;
+// Az available() > 0, de a read() -1-et ad. Valodi UART-on ez elofordulhat:
+// a FIFO-t egy megszakitas a ket hivas KOZOTT is kiuritheti.
+extern bool g_serialReadLies;
+
 class HardwareSerial : public Print {
 public:
   void begin(unsigned long b) { g_serialOn = true; g_serialBaud = b; }
   void end();
   void flush();
   operator bool() const { return true; }
+  int available() { return (int)g_serialIn.size(); }
+  int read() {
+    if (g_serialReadLies) return -1;
+    if (g_serialIn.empty()) return -1;
+    const int c = (unsigned char)g_serialIn[0];
+    g_serialIn.erase(0, 1);
+    return c;
+  }
 };
 extern HardwareSerial Serial;
 
