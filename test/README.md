@@ -402,3 +402,56 @@ a hatarido lejart, a loop tenyleg futott), kulonben az allitas ures lenne.
 | a `!configWriteInProgress()` feltetel kivéve az alvas-dontesbol | **ILV4** (es a kilepes tenyleg bekovetkezik) |
 | a halasztott ujrainditas hatarideje sosem jar le | **ILV3** |
 | beagyazott `portENTER_CRITICAL` a naplozasban | **10 ellenorzes** az ILV-kben |
+
+## A stubok igazolasa: `make stubcheck`
+
+**A teljes host-tesztkeszlet ervenyessege ezen all.** Az 1761 ellenorzes mind a
+`test/stubs/` alatti modelleken keresztul lat: ha egy stub teved, a teszt
+**zold**, az eszkoz meg hibazik - es semmi nem szolna. Ez volt a tesztelesi
+piramis egyetlen meg nem vizsgalt alapja.
+
+Mennyire eles ez? A rele a **D10**-en van. Ha a XIAO_ESP32C3 variansaban a D10
+szama valaha megvaltozik, a sketch tovabbra is lefordul, minden teszt zold marad
+(a teszt is a sajat konstansat hasznalja) - es az eszkoz **egy masik labat**
+kapcsolgatna.
+
+Amit osszevet (40 allitas):
+
+| | |
+|---|---|
+| labkiosztas | D0/D1/D3/D4/D10 a valodi `variants/XIAO_ESP32C3/pins_arduino.h`-bol |
+| `wl_status_t` | a modellezett ertekek a valodi `WiFiType.h`-bol |
+| `esp_reset_reason_t` | a felsorolas **sorrendje** (az ertekek implicitek, egy beszurt elem mindent elcsusztatna) |
+| `esp_task_wdt_config_t` | mezonevek es tipusok, sorrendben |
+| `ESP_OK` / `ESP_FAIL` / `ESP_ERR_*` | a modellezett kodok |
+| `HTTPClient` | `setTimeout(uint16_t)`, `setConnectTimeout(int32_t)` |
+| `ESPAsyncWebServer` | `params()`, `getParam(size_t)`, `name()`/`value()` **referenciat** ad, `isPost()` |
+| **viselkedes** | `STA.cpp`: az AUTH_FAIL ag `!first_connect` feltetele - a `WifiSim::authFail` modellje ezen all |
+| **viselkedes** | `main.cpp`: a loopTask minden iteracioban etet, ha fel van iratkozva - a `coreLoopStep()` ezt modellezi |
+
+Az utolso ketto azert van benne, mert a **forraskod kommentjei nev szerint
+hivatkoznak rajuk**. Ha azok elmozdulnak, a rajuk epulo indoklas is ervenyet
+veszti.
+
+A CI a **firmware-build** jobban futtatja: az az egyetlen hely, ahol a pontosan
+kituzott verziok a lemezen vannak. Helyben:
+
+```
+STUBROOTS="$HOME/.arduino15 $HOME/Arduino/libraries" make stubcheck
+```
+
+**Mutacioval igazolva** - hat kulonbozo elcsuszast kap el:
+
+| Mutacio | Elkapja |
+|---|---|
+| a rele laba 10 → 11 a tesztben | igen |
+| `WL_CONNECT_FAILED` 4 → 5 a stubban | igen |
+| egy `ESP_RST_` elem kiesik (a tobbi elcsuszik) | igen, a **2.** indextol |
+| `bool trigger_panic` → `int` | igen |
+| az `isPost()` eltunik a stubbol | igen |
+| a **valodi** header formaja valtozik (a minta nem illeszkedik) | igen - "NEM SIKERULT KIOLVASNI", nem csendes atmenet |
+| hianyzo valodi forras (rossz gyoker) | igen - "NEM TALALHATO" |
+
+Ezen felul **uresseg-vedelem**: 24 allitas alatt a futas megbukik. Ket
+ellenorzo mar volt ebben a projektben, ami azert volt "tiszta", mert nem
+vizsgalt semmit; harmadik ne legyen.

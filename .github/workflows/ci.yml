@@ -161,3 +161,11 @@ jobs:
             --fqbn esp32:esp32:XIAO_ESP32C3 \
             --warnings all \
             sketchdir/bazsi_router_reboot
+
+      # A STUBOK IGAZOLASA. Itt, ES CSAK ITT tehetjuk meg: ez az egyetlen job,
+      # ahol a PONTOSAN KITUZOTT konyvtarverziok a lemezen vannak. A teljes
+      # host-tesztkeszlet ervenyessege ezen all - ha egy stub elteved a valodi
+      # konyvtartol, az 1761 ellenorzes zold marad, az eszkoz meg hibazik.
+      - name: A stubok igazolasa a valodi konyvtarak ellen
+        working-directory: test
+        run: STUBROOTS="$HOME/.arduino15 $HOME/Arduino/libraries" make stubcheck
