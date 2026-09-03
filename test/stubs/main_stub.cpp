@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <set>
 #include <cstdarg>
 #include <WiFi.h>
 #include <LittleFS.h>
@@ -190,6 +191,7 @@ void feedLoopWDT_fromCore() {
 void (*g_onDelay)() = nullptr;
 // A flash-iras mint megszakitasi pont - lasd a magyarazatot a LittleFS.h-ban.
 void (*g_onFsWrite)() = nullptr;
+std::set<std::string> g_fsDirs;
 void delay(uint32_t ms) { const uint32_t d = ms ? ms : 1; g_millis += d; wdtAdvanceTime(d); if (g_onDelay) g_onDelay(); }
 
 HardwareSerial Serial;

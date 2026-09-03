@@ -106,6 +106,12 @@ bool formatEpoch(uint32_t epoch, char* out, size_t outSize) {
   }
   const time_t t = (time_t)epoch;
   struct tm tmv;
+  // VEDELMI AG, a lefedettsegben szandekosan feher. Az "epoch" uint32_t, tehat
+  // legfeljebb 4 294 967 295 masodperc = 2106. februar - azt a localtime_r()
+  // minden tamogatott platformon ertelmezni tudja, tehat ez az ag ma nem
+  // erheto el. Megis itt marad: ha a mezo valaha 64 bitesre no (az EventEntry
+  // epoch mezoje mar most is a fajlformatum resze), a hibakezeles keszen all,
+  // es a /log oldal nem egy inicializalatlan pufferbol olvasna.
   if (localtime_r(&t, &tmv) == nullptr) {
     return false;
   }

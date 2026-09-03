@@ -1,4 +1,5 @@
 #pragma once
+#include <set>
 #include <Arduino.h>
 #define FILE_WRITE "w"
 
@@ -31,6 +32,12 @@ extern size_t g_fsUsed();
 // a HTTP kezelo); ez a ketto egyutt adja ki a ket task tenyleges osszefonasat.
 extern void (*g_onFsWrite)();
 
+// KONYVTAR EGY KONFIG UTVONALON. A LittleFS-en ez valos eset (egy korabbi
+// firmware, egy kezi feltoltes), es a configstore kezeli is - de a stub eddig
+// nem tudta eloallitani, ezert az az ag lefedetlen maradt. Egy stub, ami egy
+// valos allapotot nem tud modellezni, csendben csokkenti a tesztek erejet.
+extern std::set<std::string> g_fsDirs;
+
 class File : public Stream {
 public:
   File() : ok_(false) {}
@@ -38,7 +45,7 @@ public:
     if (ok_) data_ = g_fs[path];
   }
   operator bool() const { return ok_; }
-  bool isDirectory() { return false; }
+  bool isDirectory() { return g_fsDirs.count(path_) != 0; }
   void close() {}
   size_t size() { return data_.size(); }
   size_t read(uint8_t* b, size_t n) {

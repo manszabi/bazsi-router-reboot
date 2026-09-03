@@ -58,7 +58,7 @@ cov: $(BUILD)/run-cov
 # vedi, hogy egy uj, egyetlen forgatokonyv altal sem erintett ag ne csusszon be
 # eszrevetlenul. A kuszob a jelenlegi szint alatt all egy kicsivel, hogy egy
 # jogos, atmeneti visszaeses ne blokkoljon - de a szandekos elhanyagolas igen.
-COV_MIN ?= 97.0
+COV_MIN ?= 98.8
 
 covgate: $(BUILD)/run-cov
 	@rm -f *.gcov $(BUILD)/*.gcda

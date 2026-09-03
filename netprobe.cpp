@@ -118,6 +118,11 @@ static size_t readChunked(WiFiClient& stream, char* buf, size_t maxLen, uint32_t
       if (c == '\n') break;
     }
   }
+  // SZERKEZETILEG ELERHETETLEN, ezert a lefedettsegben feher marad: minden nem
+  // ures darab legalabb egy bajtot ad a pufferbe, tehat a fenti maxLen-korlat
+  // (HTTP_MAX_PAYLOAD) mindig elobb ut, mint a HTTP_MAX_CHUNKS. A fordito is
+  // ezt allitja - lasd a static_assertet a netprobe.h-ban. A sor megis kell:
+  // a ciklus utan a fuggvenynek vissza kell adnia valamit.
   return n;
 }
 

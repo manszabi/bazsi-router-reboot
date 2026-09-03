@@ -455,3 +455,60 @@ STUBROOTS="$HOME/.arduino15 $HOME/Arduino/libraries" make stubcheck
 Ezen felul **uresseg-vedelem**: 24 allitas alatt a futas megbukik. Ket
 ellenorzo mar volt ebben a projektben, ami azert volt "tiszta", mert nem
 vizsgalt semmit; harmadik ne legyen.
+
+## A maradek hibaagak (COV1-COV6)
+
+A lefedettseg 98,71% volt. A hianyzo resz nagy reszet olyan fuggvenyek zaro
+kapcsos zarojele adta, amik **sosem ternek vissza normalisan** (alszanak vagy
+ujrainditanak) - az nem hianyossag. Maradt viszont nehany **valodi hibaag**,
+amit egyetlen forgatokonyv sem erintett. Ezek epp azok, amik akkor futnak le,
+amikor mar amugy is baj van.
+
+| | Mit fed le |
+|---|---|
+| COV1 | `eventName()` ismeretlen kodra (`"?"`) - a naplo tuleli a firmware-frissitest is |
+| COV2 | a naplo-betolto **sajat** hatarellenorzese, a hivotol fuggetlenul |
+| COV3 | a naplofajl eltunik a fejlec es a bejegyzesek olvasasa **kozott** |
+| COV4 | **konyvtar** egy konfig utvonalon |
+| COV5 | a wifireset foglalt zarnal nem torol es nem indit ujra |
+| COV6 | a gateway-ellenorzes vedelmi aga ertelmezhetetlen cimnel |
+
+A COV4 kedveert a stub megtanult **konyvtarat** modellezni (`g_fsDirs`). Egy
+stub, ami egy valos allapotot nem tud eloallitani, csendben csokkenti a
+tesztek erejet: az az ag addig lefedhetetlen volt.
+
+**Lefedettseg: 98,71% -> 99,08%**, a kapu kuszobe 97,0% -> 98,8%.
+
+### Ami szandekosan feher marad - es mostantol a FORDITO tartja igy
+
+Nyolc sor maradt, mindegyik **szerkezetileg elerhetetlen**. Eddig ezt csak
+kommentek allitottak; harom premissza mostantol `static_assert`:
+
+| Sor | Miert elerhetetlen | Mi tartja |
+|---|---|---|
+| `webportal` - "a jelszo kodolasa nem fert a pufferbe" (3 sor) | a `ConfigDraft::pass` legfeljebb `PASS_MAX_LEN`, a kodolt alak pedig pontosan ekkora pufferbe megy | **2 `static_assert`** a `webportal.cpp`-ben |
+| `netprobe` - a `readChunked()` zaro `return n` | minden nem ures darab legalabb egy bajtot ad, tehat a hasznos-teher korlat mindig elobb ut a darabszam-korlatnal | **`static_assert`** a `netprobe.h`-ban |
+| `netprobe` - a ping zaro `return` | 4 probaval es 2-es kuszobbel a ciklus mindig korabban lep ki | komment (a fordito koveteli meg a sort) |
+| `eventlog` - `localtime_r` hibaja | az `epoch` `uint32_t`, tehat legfeljebb 2106 - azt minden platform ertelmezi | komment (ha a mezo 64 bitesre no, a kezeles keszen all) |
+| `sketch` - ket "csak a ket task kozotti valodi verseny vezet ide" ag | a fenti kapu ugyanazt a jelzot nezi mikromasodpercekkel korabban | komment |
+
+### Amit ez a kor megtanitott
+
+**Ket sajat hibat az ASan talalt meg, a sima build atengedte:**
+
+1. A COV2/COV3 ujradeklaralta az `EvFileHeader`-t - **12 bajtosra a valodi 20
+   helyett**. Ket forditasi egyseg, ugyanaz a nev, elteroformatum: az
+   egydefinicios szabaly serult, es a valodi kod tulirta a teszt pufferet.
+   Mostantol `static_assert(sizeof(EvFileHeader) == 20)` all mellette.
+2. A COV6 egy 18 bajtos szoveget masolt a 16 bajtos `gatewayStr`-be.
+
+**Es egy teszt jo eredmenyt kapott rossz uton.** A COV2 elso valtozata csak
+azt allitotta, hogy a betolto hamisat ad - de fajl hijan a **hianyzo fajl**
+miatt adott hamisat, nem a hatarellenorzes miatt. Mutacioval derult ki: a
+felso korlat kivetele utan a teszt **valtozatlanul atment**. Most van ervenyes,
+nagy naplofajl, es a puffer moge **orszemek** kerulnek - igy nem a
+visszateresi erteken mulik.
+
+Mutacioval igazolva mind a negy: a naplo-betolto felso korlatja, a
+konyvtar-ellenorzes, a wifireset zarszerzese es a gateway-cim ellenorzese -
+mindegyik kivetele megbuktatja a hozza tartozo forgatokonyvet.

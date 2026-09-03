@@ -151,6 +151,36 @@ extern bool     heapWarnActive;
 // Az NTP jelzoi a modulon BELUL vannak (static). Egy bekapcsolast a
 // szerzodesen at modellezunk, ugyanugy, mint a sync modul allapotat.
 void ntpResetForColdBoot();
+constexpr uint8_t EVLOG_SIZE_C = 32;      // eventlog.h EVLOG_SIZE
+constexpr size_t  SSID_MAX_LEN_C = 32;    // limits_config.h SSID_MAX_LEN
+constexpr size_t  IPSTR_MAX_LEN_C = 15;   // limits_config.h IPSTR_MAX_LEN
+// Az /evlog.bin fejlece. BAJTROL BAJTRA egyeznie kell az eventlog.h-beli
+// EvFileHeader-rel: a betolto sajat hatarellenorzeset csak igy lehet
+// kozvetlenul, a hivotol fuggetlenul probara tenni.
+// FIGYELEM: BAJTROL BAJTRA egyeznie kell az eventlog.h-beli definicioval -
+// ugyanaz a szabaly, mint az EventEntry-nel. Ez nem stilus kerdese: a ket
+// forditasi egyseg UGYANAZT a nevet hasznalja, tehat ha eltérnek, az egydefinicios
+// szabalyt sertjuk, es a valodi kod TULIRJA a teszt pufferet.
+//
+// Az elso valtozatom pontosan ezt hibazta el: kihagyta az utolso ket mezot
+// (20 bajt helyett 12), es a loadEventLogHeader() 20 bajtot irt a 12 bajtos
+// lokalisba. A SIMA BUILD ATENGEDTE - csak az ASan mutatta meg
+// (stack-buffer-overflow es global-buffer-overflow, ket forgatokonyvben).
+struct EvFileHeader {
+  uint32_t magic;
+  uint16_t version;
+  uint16_t count;
+  uint32_t evNextAtSave;
+  uint32_t savedEpoch;
+  uint32_t savedUptime;
+};
+static_assert(sizeof(EvFileHeader) == 20, "az EvFileHeader merete a fajlformatum resze");
+const char* eventName(uint8_t code);
+bool saveEventLog(const char* reason);
+bool loadEventLogHeader(EvFileHeader& fej);
+bool loadEventLogEntries(const EvFileHeader& fej, EventEntry* ki);
+bool gatewayUnreachable();
+extern std::set<std::string> g_fsDirs;
 constexpr uint8_t EV_TEST_FAIL_C = 4;
 constexpr uint8_t EV_FATAL_C = 9;
 void resetbutton();
@@ -7112,10 +7142,174 @@ static void scAP8() {
   // viszont bizonyithatoan belefernek: 13 < 33, 13 < 16, 11 < 16.
   strcpy(ssid, "MyHomeNetwork");
   strcpy(ipStr, "192.168.1.200");
-  strcpy(gatewayStr, "192.168.1.1");
+  strlcpy(gatewayStr, "192.168.1.1", IPSTR_MAX_LEN_C + 1);
   AsyncWebServerRequest req2; g_handlers["/#1"](&req2);
   printf("     [info] tipikus esetben %u bajt\n", (unsigned)req2._body.size());
   CHECK(req2._body.size() < meret, "a tipikus eset kisebb a legrosszabbnal");
+}
+
+// ============================================================================
+// A MARADEK HIBAAGAK (COV1-COV6)
+//
+// A lefedettseg 98,7% volt; a hianyzo 1,3% nagy resze olyan fuggvenyek zaro
+// kapcsos zarojele, amik SOSEM ternek vissza normalisan (alszanak vagy
+// ujrainditanak) - az nem hianyossag. Maradt viszont nehany VALODI hibaag,
+// amit egyetlen forgatokonyv sem erintett. Ezek pont azok, amik akkor futnak
+// le, amikor mar amugy is baj van - tehat epp ott a legdragabb, ha rosszak.
+//
+// AMI SZANDEKOSAN FEHER MARAD, es a forras ki is mondja:
+//   webportal  a jelszo kodolasa nem fer a pufferbe - szerkezetileg
+//              elerhetetlen; mostantol KET static_assert tartja igy
+//   netprobe   a ping fuggveny zaro return-je - 4 probaval es 2-es kuszobbel
+//              a ciklus mindig korabban lep ki, de a fordito megkoveteli
+//   sketch     ket "csak a ket task kozotti valodi verseny vezet ide" ag
+// ============================================================================
+
+static void scCOV1() {
+  // eventName() ismeretlen kodra. A /log oldal ezt irna ki, ha a naplo egy
+  // olyan bejegyzest tartalmaz, amit ez a firmware mar nem ismer - pl. egy
+  // regebbi verzio hagyta ott. Nem elmeleti: az RTC naplo tuleli a szoftveres
+  // frissitest is.
+  coldBoot(false, "", "", "", "");
+  CHECK(strcmp(eventName(0), "?") == 0, "a 0-as kod ismeretlen -> \"?\"");
+  CHECK(strcmp(eventName(200), "?") == 0, "egy jovobeli kod is \"?\"");
+  CHECK(strcmp(eventName(1), "BOOT") == 0, "az ismert kod tovabbra is helyes");
+}
+
+static void scCOV2() {
+  // A naplo-betolto SAJAT hatarellenorzese - a hivotol FUGGETLENUL.
+  // A forras kimondja: "ha valaha kozvetlenul hivnak minket, egy 0xFFFF-es
+  // count a hivo 384 bajtos vermet irna tul".
+  //
+  // AZ ELSO VALTOZATOM JO EREDMENYT KAPOTT ROSSZ UTON: csak azt allitotta,
+  // hogy a hivas hamisat ad - de fajl hijan a betolto a HIANYZO FAJL miatt
+  // adott hamisat, nem a hatarellenorzes miatt. Mutacioval derult ki: a felso
+  // korlat kivetele utan a teszt VALTOZATLANUL atment.
+  //
+  // Most tehat (a) van ervenyes, NAGY naplofajl, tehat az olvasas tenyleg
+  // elindulna, es (b) a puffer moge ORSZEMEKET teszunk. Igy nem a
+  // visszateresi erteken mulik: ha a betolto tulir, azt kozvetlenul latjuk -
+  // sanitizer nelkul is.
+  coldBoot(false, "", "", "", "");
+  setFilesystemReady(true);
+  // Akkora fajl, hogy egy hatarellenorzes nelkuli betolto BOVEN tulirna.
+  g_fs["/evlog.bin"] = std::string(sizeof(EvFileHeader) + 4096 * sizeof(EventEntry), '\xA5');
+
+  const uint8_t ORSZEM = 0x5A;
+  EventEntry puffer[EVLOG_SIZE_C + 8];
+  memset(puffer, 0, sizeof(puffer));
+  memset(&puffer[EVLOG_SIZE_C], ORSZEM, 8 * sizeof(EventEntry));
+
+  EvFileHeader fej;
+  memset(&fej, 0, sizeof(fej));
+  auto orszemEp = [&]() {
+    const uint8_t* p = (const uint8_t*)&puffer[EVLOG_SIZE_C];
+    for (size_t i = 0; i < 8 * sizeof(EventEntry); i++) if (p[i] != ORSZEM) return false;
+    return true;
+  };
+
+  fej.count = 0;
+  CHECK(!loadEventLogEntries(fej, puffer), "count = 0 -> elutasitva");
+  fej.count = 0xFFFF;
+  CHECK(!loadEventLogEntries(fej, puffer), "count = 65535 -> elutasitva");
+  CHECK(orszemEp(), "es NEM irt tul: a puffer mogotti orszemek epek (65535)");
+  fej.count = EVLOG_SIZE_C + 1;
+  CHECK(!loadEventLogEntries(fej, puffer), "count = gyuru+1 -> elutasitva");
+  CHECK(orszemEp(), "es NEM irt tul (gyuru+1) - EGY elemmel sem");
+  // A hataron levo ertek viszont ATMEGY a hatarellenorzesen: a modul nem
+  // tulzottan ovatos, csak pontos.
+  fej.count = EVLOG_SIZE_C;
+  loadEventLogEntries(fej, puffer);
+  CHECK(orszemEp(), "a megengedett maximumnal sem lep at a hataron");
+}
+
+static void scCOV3() {
+  // A naplo-betolto akkor is helyesen jar el, ha a fajl a fejlec beolvasasa
+  // UTAN valik olvashatatlanna. Ez a valo eletben egy flash-hiba vagy egy
+  // felbeszakadt iras - epp az az eset, amikor a diagnosztikai naplora a
+  // legnagyobb szukseg lenne.
+  coldBoot(false, "", "", "", "");
+  setFilesystemReady(true);
+  // Ervenyes naplot mentunk a sajat utjan.
+  logEvent((EventCode)1, 1);
+  logEvent((EventCode)2, 2);
+  CHECK(saveEventLog("COV3"), "a naplo mentese sikerult");
+  EvFileHeader fej;
+  memset(&fej, 0, sizeof(fej));
+  CHECK(loadEventLogHeader(fej), "a fejlec beolvashato");
+  CHECK(fej.count >= 2, "a fejlec a bejegyzesek szamat mondja");
+  // ...es most a fajl eltunik a ket olvasas kozott.
+  g_fs.erase("/evlog.bin");
+  EventEntry puffer[EVLOG_SIZE_C];
+  memset(puffer, 0, sizeof(puffer));
+  CHECK(!loadEventLogEntries(fej, puffer),
+        "a ket olvasas kozott eltunt fajl nem omlik ossze, csak hamisat ad");
+}
+
+static void scCOV4() {
+  // KONYVTAR EGY KONFIG UTVONALON. A LittleFS-en ez valos eset: egy korabbi
+  // firmware vagy egy kezi feltoltes hagyhat ott konyvtarat. A configstore
+  // kezeli is - de eddig SEMMI nem probalta ki, mert a stub nem tudott
+  // konyvtarat modellezni.
+  coldBoot(false, "", "", "", "");
+  setFilesystemReady(true);
+  g_fs["/ssid.txt"] = "";           // letezzen az utvonal
+  g_fsDirs.insert("/ssid.txt");     // ...de konyvtarkent
+  char puffer[SSID_MAX_LEN_C + 1];
+  const int st = (int)readConfigValue(LittleFS, "/ssid.txt", puffer, sizeof(puffer));
+  CHECK(st == 2, "konyvtar a konfig utvonalon -> CONFIG_ERROR, nem osszeomlas");
+  CHECK(serialHas("failed to open /ssid.txt"), "es a soros porton meg is mondja");
+  g_fsDirs.clear();
+  // A rendes eset valtozatlanul mukodik - a modell nem romlott el.
+  g_fs["/ssid.txt"] = "RendesHalo";
+  CHECK((int)readConfigValue(LittleFS, "/ssid.txt", puffer, sizeof(puffer)) == 0,
+        "a konyvtar eltavolitasa utan a rendes olvasas valtozatlan");
+  CHECK(strcmp(puffer, "RendesHalo") == 0, "es a helyes erteket adja");
+}
+
+static void scCOV5() {
+  // A wifireset ZART szerez, mielott torol. Ha a zar epp foglalt (a masik
+  // task ment), a helyes valasz: NEM torlunk, es a kovetkezo kor ujra probal.
+  // A fo utat a gomb-agak mar merik; ez a modul SZERZODESET meri, a hivotol
+  // fuggetlenul - ugyanaz az elv, mint a naplo-betolto sajat
+  // hatarellenorzesenel.
+  coldBoot(false, "", "", "", "");
+  setup();
+  g_fs["/ssid.txt"] = "TorlendoHalo";
+  CHECK(beginConfigWrite(), "a zarat mi szereztuk meg (mentes indul)");
+  bool ujraindult = false;
+  try { doWifiReset(); } catch (RestartSignal&) { ujraindult = true; }
+  CHECK(!ujraindult, "foglalt zarnal a wifireset NEM indit ujra");
+  CHECK(g_fs.count("/ssid.txt") && g_fs["/ssid.txt"] == "TorlendoHalo",
+        "es NEM is torol - a mentest nem vagja fel");
+  // A zar felszabadulasa utan viszont elvegzi a dolgat.
+  endConfigWrite();
+  try { doWifiReset(); } catch (RestartSignal&) { ujraindult = true; }
+  CHECK(ujraindult, "a zar felszabadulasa utan a wifireset ujraindit");
+  CHECK(!g_fs.count("/ssid.txt") || g_fs["/ssid.txt"].empty(),
+        "es ekkor tenyleg torolt");
+}
+
+static void scCOV6() {
+  // A gateway-ellenorzes VEDELMI aga: statikus konfiguracio mellett a
+  // gatewayStr ertelmezhetetlen. A forras szerint ez a gyakorlatban nem
+  // fordulhat elo (a POST kezelo ujraindit) - de a vedelmi ag akkor er
+  // valamit, ha bizonyitottan mukodik is.
+  coldBoot(false, "", "", "", "");
+  staticConfigActive = false;
+  CHECK(!gatewayUnreachable(), "statikus konfig nelkul nincs mit ellenorizni");
+  staticConfigActive = true;
+  // A gatewayStr pontosan IPSTR_MAX_LEN + 1 = 16 bajt. Az elso valtozatom egy
+  // 18 bajtos szoveget masolt bele - a sima build atengedte, az ASan nem.
+  strlcpy(gatewayStr, "nem-ip-cim", IPSTR_MAX_LEN_C + 1);
+  CHECK(!gatewayUnreachable(),
+        "ertelmezhetetlen gateway -> nem allitja, hogy elerhetetlen (nem pingel vakon)");
+  CHECK(pingSim.calls == 0, "es tenyleg nem is pingelt");
+  // A rendes eset: ervenyes gateway, ami nem valaszol.
+  strlcpy(gatewayStr, "192.168.1.1", IPSTR_MAX_LEN_C + 1);
+  pingSim.ok = false;
+  CHECK(gatewayUnreachable(), "ervenyes, de nem valaszolo gateway -> elerhetetlen");
+  CHECK(pingSim.calls > 0, "ott mar tenylegesen pingelt");
 }
 
 // ============================================================================
@@ -8105,6 +8299,14 @@ static const Scenario kScenarios[] = {
   { "ILV3: POST mentes a loop() koze ekelve - zar es halasztott ujrainditas", scILV3 },
   { "ILV4: a loop() a flash-iras KOZBEN - a kilepesi ut nem kerulheti meg a zarat", scILV4 },
   { "ILV5: mindket irany egyszerre, veletlen suruseggel", scILV5 },
+
+  // --- A maradek hibaagak ---
+  { "COV1: eventName() ismeretlen kodra", scCOV1 },
+  { "COV2: a naplo-betolto sajat hatarellenorzese (a hivotol fuggetlenul)", scCOV2 },
+  { "COV3: a naplofajl eltunik a fejlec es a bejegyzesek olvasasa kozott", scCOV3 },
+  { "COV4: konyvtar egy konfig utvonalon", scCOV4 },
+  { "COV5: a wifireset foglalt zarnal nem torol es nem indit ujra", scCOV5 },
+  { "COV6: a gateway-ellenorzes vedelmi aga ertelmezhetetlen cimnel", scCOV6 },
 };
 
 
