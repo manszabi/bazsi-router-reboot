@@ -253,3 +253,51 @@ elérhetetlen – ezeket **nem** kell tesztelni:
 A stubok **nem** emulálják az ESP32-t. Azt ellenőrzik, hogy a firmware
 vezérlési logikája, időzítései és API-használata helyes-e. A valódi rádió,
 lwIP, LittleFS és a relé viselkedését hardveren kell igazolni.
+
+## Veletlen allapotgep-bejaras (PROP1-PROP8)
+
+A tobbi 295 forgatokonyv **kezzel irt**: pontosan azokat az utakat jarja be,
+amikre a szerzo gondolt. A PROP forgatokonyvek forditva dolgoznak - veletlen
+kornyezeti esemenysorozatot generalnak (WiFi-szakadas, gombnyomas tetszoleges
+pillanatban, HTTP-valasz, heap-eses, fajlrendszer-hiba), es nem azt allitjak,
+hogy MI TORTENJEN, hanem hogy mi **nem tortenhet soha**:
+
+| | Tulajdonsag |
+|---|---|
+| P1 | a rele sosem marad behuzva a pulzusnal tovabb (a router aram nelkul) |
+| P2 | a `cycleIndex` sosem lep ki a `TEST_ENDPOINTS[]` tablabol |
+| P3 | `resetEvents` / `rtcRetryRounds` a sajat korlatjuk alatt |
+| P4 | az esemenynaploban csak ervenyes esemenykod all |
+| P5 | a nyilt szovegu jelszo soha nincs egyetlen fajlban sem |
+| P6 | a nyilt szovegu jelszo soha nem kerul a soros kimenetre |
+| P7 | a `MODE_CONFIG` / `MODE_FATAL` terminalis (csak ujraindulassal van kiut) |
+
+**Determinisztikus**: a magok fixek, a CI-ban mindig ugyanaz a nyolc bejaras fut.
+Egy veletlenszeruen bukdacsolo teszt hasznalhatatlan lenne. Helyben tovabb lehet
+keresni ugyanezzel a keszlettel:
+
+```
+RNDSEED=12345 RNDSTEPS=2000000 build/run-idf5 PROP
+```
+
+**Az ELERES is merve van** (`[eleres]` sor), es kovetelve: minden bejarasnak el
+kell jutnia a program valamelyik erdemi againak. Ez nem oncel - a fejlesztes
+kozben **ketszer** fordult elo, hogy egy tulajdonsag URESEN ment at:
+
+1. Az elso valtozat a `loop()` hivasok **kozott** mintavetelezte a rele labat -
+   es igy sosem latta HIGH-on, mert a 90 mp-es pulzus egyetlen `loop()`
+   iteracion belul zajlik le. A meres ezert a stubba kerult (`g_relayMaxHighMs`),
+   ugyanoda, ahova a watchdog-rese.
+2. Ket tulajdonsag maga volt hibas: az `rtcEvNext` **monoton szamlalo**, nem
+   gyuruindex, a `terminalSeen` jelzot pedig nem nullazta az ujraindulas.
+   Nyolcbol nyolc, illetve nyolcbol ot bejaras "bukott" - egyik sem a program
+   miatt.
+
+Mutacioval igazolva, mind a negy a **helyes** tulajdonsagot buktatja:
+
+| Mutacio | Elkapja |
+|---|---|
+| `RESET_PULSE` 90 -> 200 mp | P1, 8/8 bejaras |
+| `MAX_CYCLE_INDEX` 4 -> 5 | P2, 8/8 |
+| a jelszo kiirasa a soros portra | P6, 8/8 |
+| a jelszo kiirasa egy fajlba | P5, 8/8 |

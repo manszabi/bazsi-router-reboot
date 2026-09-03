@@ -138,10 +138,16 @@ esp_err_t esp_task_wdt_status(void*) {
 //
 //    Ezert a merest a harness a setup() es a loop() koré armolja: ami ezeken
 //    kivul tortenik, az a tesztkeszlet allvanyzata, nem a firmware utja.
+void relayTrackTime();
 static uint32_t g_wdtUnfedMs = 0;
 bool g_wdtInProgram = false;   // a setup()/loop() belsejeben vagyunk?
 
 void wdtAdvanceTime(uint32_t ms) {
+  // A rele merese ELOTTE all: az fuggetlen attol, el-e mar a watchdog es hogy
+  // a program vezerlesi agan vagyunk-e. Minden idot leptető stub (delay,
+  // yield, http.GET, Ping.ping, LittleFS.begin) ide fut be, tehat ez az
+  // egyetlen hely, ahonnan egy behuzott rele ideje nem szokhet meg.
+  relayTrackTime();
   if (!g_wdtEnabled || !g_wdtInProgram) {
     // A watchdog meg nem el (vagy szandekosan nincs feliratkozas), vagy epp nem
     // a program vezerlesi agan vagyunk: ilyenkor egy hosszu szakasz nem hiba.
@@ -231,9 +237,41 @@ void Print::flushLine() {
 
 uint32_t millis() { return g_millis; }   // lasd a megjegyzest az Arduino.h-ban
 void pinMode(uint8_t p, uint8_t m) { (void)m; g_pinState[p] = -1; }
+// A RELE BEHUZOTT ALLAPOTANAK HOSSZA. Ugyanaz az elv, mint a
+// g_wdtMaxFeedGap-nel: a merest ODA kell tenni, ahol az esemeny tortenik.
+//
+// MIERT NEM ELEG KIVULROL MINTAVETELEZNI? Mert a 90 mp-es rele-pulzus
+// EGYETLEN loop() iteracion belul zajlik le (a routerResetAndRetry() vegig
+// blokkol). Aki a loop() hivasok KOZOTT nezi a lab allapotat, az sosem latja
+// HIGH-on - vagyis a "a rele sosem ragad be" allitas URESEN menne at.
+// Behuzott relenel a router ARAM NELKUL van: ez az eszkoz legsulyosabb
+// lehetseges hibaja, tehat epp ezt nem szabad meretlenul hagyni.
+uint32_t g_relayMaxHighMs = 0;
+uint32_t g_relayHighSince = 0;
+bool     g_relayIsHigh    = false;
+static const int RELAY_PIN_STUB = 10;   // D10 - lasd a sketch relayPin-jet
+
 void digitalWrite(uint8_t p, uint8_t v) {
   if (g_pinState[p] != v) simLog("pin" + std::to_string(p) + "=" + (v ? "HIGH" : "LOW"));
+  if ((int)p == RELAY_PIN_STUB) {
+    if (v && !g_relayIsHigh) {
+      g_relayIsHigh = true; g_relayHighSince = g_millis;
+    } else if (!v && g_relayIsHigh) {
+      g_relayIsHigh = false;
+      const uint32_t hold = g_millis - g_relayHighSince;
+      if (hold > g_relayMaxHighMs) g_relayMaxHighMs = hold;
+    }
+  }
   g_pinState[p] = v;
+}
+
+// Az idomulas kozben is frissul: egy VEGTELEN behuzas kulonben sosem zarodna
+// le, tehat sosem szamolodna ki. A delay() es a blokkolo stubok hivjak.
+void relayTrackTime() {
+  if (g_relayIsHigh) {
+    const uint32_t hold = g_millis - g_relayHighSince;
+    if (hold > g_relayMaxHighMs) g_relayMaxHighMs = hold;
+  }
 }
 // A GOMBOK mintavetelezesi koze. Ugyanaz az elv, mint a g_wdtMaxFeedGap-nel:
 // enelkul nem lehetne kimutatni, hogy egy blokkolo konyvtarhivas (http.GET,

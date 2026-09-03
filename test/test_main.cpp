@@ -240,6 +240,9 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   // a kulonbseg elojel nelkul alulcsordulna (~4,29 milliard) - vagyis a globalis
   // res-invarians hamisan bukna. (A merest ez a ket sor teszi ertelmezhetove.)
   g_wdtLastFeed = 0; g_wdtMaxFeedGap = 0;
+  // A rele-mero is: a g_millis nullarol indul, egy nyitott HIGH szakasz
+  // kulonben ~4,29 milliardot mutatna.
+  g_relayMaxHighMs = 0; g_relayHighSince = 0; g_relayIsHigh = false;
   g_criticalMaxDepth = 0;
   // A heap modellje is hidegindul: egy valodi bekapcsolas tiszta heappel
   // indul. Enelkul egy korabbi forgatokonyv alacsony heapje atszivarogna a
@@ -7115,6 +7118,385 @@ static void scAP8() {
   CHECK(req2._body.size() < meret, "a tipikus eset kisebb a legrosszabbnal");
 }
 
+// ====================================================================
+// VELETLEN ALLAPOTGEP-BEJARAS (property-based testing)
+//
+// MIERT KELL EZ, HA MAR VAN 295 FORGATOKONYV? Mert mind a 295 KEZZEL irt:
+// pontosan azokat az utakat jarja be, AMIKRE A SZERZO GONDOLT. Ez a fajta
+// teszt forditva dolgozik. Nem azt mondja meg, hogy MI TORTENJEN, hanem hogy
+// mi NEM TORTENHET SOHA - barmilyen kornyezeti esemenysorozat is jon.
+//
+// A "kornyezet" itt az, amit az eszkoz nem befolyasol: a WiFi elerhetosege,
+// a HTTP vegpontok valasza, a gomb lenyomasa tetszoleges pillanatban, a
+// szabad heap, a fajlrendszer allapota. Ezeket a bejaro veletlenszeruen
+// valtogatja, majd MINDEN loop() lepes utan ellenorzi a tulajdonsagokat.
+//
+// DETERMINISZTIKUS. A magok fixek, tehat a CI-ban mindig pontosan ugyanaz a
+// nyolc bejaras fut. Egy veletlenszeruen bukdacsolo teszt hasznalhatatlan:
+// senki nem tudja megkulonboztetni a valodi regressziot a szerencsetol. Az
+// RNDSEED / RNDSTEPS kornyezeti valtozokkal viszont helyben tovabb lehet
+// keresni ugyanezzel a keszlettel:
+//     RNDSEED=12345 RNDSTEPS=5000 build/run-idf5 PROP
+//
+// MIT NEM TESZTEL? A helyes viselkedest. Egy bejaras attol meg atmegy, hogy
+// az eszkoz sosem inditja ujra a routert, amikor kellene - arra a 295 celzott
+// forgatokonyv valo. A ketto egymas kiegeszitese, nem helyettesitoje.
+// --------------------------------------------------------------------
+
+// A sketch konstansai. Kulon forditasi egysegben vagyunk, ezert a szamok itt
+// szerepelnek - a fomodullal valo egyezesuket a doksi-kereszt-ellenorzes es
+// az alabbi CHECK-ek ora tartjak.
+static const uint8_t  PROP_MAX_CYCLE_INDEX   = 4;      // TEST_ENDPOINTS[] merete-1
+static const uint8_t  PROP_MAX_FAILURE_EV    = 5;      // maxfailureEvents
+static const uint32_t PROP_MAX_RETRY_ROUNDS  = 33;     // MAX_RETRY_ROUNDS
+static const uint32_t PROP_EVLOG_SIZE        = 32;     // EVLOG_SIZE
+static const uint32_t PROP_RESET_PULSE_MS    = 90000;  // RESET_PULSE
+static const char*    PROP_PLAIN_PASS        = "TitkosJelszo123";
+static const uint32_t EVLOG_MAGIC_C          = 0x42415A4DUL;  // eventlog.h
+
+// Xorshift32 - ugyanaz a csalad, amit a secret modul is hasznal. Szandekosan
+// sajat es apro: a kimenetnek reprodukalhatonak kell lennie, nem
+// "veletlenszerunek" barmilyen statisztikai ertelemben.
+struct PropRnd {
+  uint32_t s;
+  explicit PropRnd(uint32_t seed) : s(seed ? seed : 1u) {}
+  uint32_t next() { s ^= s << 13; s ^= s >> 17; s ^= s << 5; return s; }
+  uint32_t below(uint32_t n) { return n ? (next() % n) : 0u; }
+  bool chance(uint32_t percent) { return below(100) < percent; }
+};
+
+// A tulajdonsagok allapota. FONTOS: itt NEM hivunk CHECK()-et lepesenkent -
+// az tobb ezer sort irna ki es elfedne a lenyeget. Az ELSO sertest rogzitjuk
+// (a lepesszammal es a szimulalt idovel egyutt), es a bejaras vegen egyetlen
+// CHECK dont. Igy egy bukas uzenete pontosan megmondja, MELYIK lepesnel es
+// MIT szegett meg a program.
+struct PropState {
+  const char* violation = nullptr;
+  uint32_t violStep = 0, violMs = 0;
+  uint32_t relayMaxHoldMs = 0;
+  bool     terminalSeen = false;   // volt-e mar MODE_CONFIG / MODE_FATAL
+  uint32_t reboots = 0, sleeps = 0, restarts = 0;
+  // ELERES-MERES. Egy tulajdonsag-teszt annyit er, amennyi allapotot valoban
+  // bejar: ha a rele sosem huz be, a "sosem ragad be" allitas URES.
+  // Ezert a bejaras JELENTI, meddig jutott - es az alabbi osszesito CHECK
+  // koveteli is meg, hogy a keszlet egeszeben elerje a fontos agakat.
+  uint8_t  maxCycleIndex = 0, maxResetEvents = 0;
+  bool     sawFailureState = false, sawConfigMode = false, sawFatalMode = false;
+  bool     sawRelayPulse = false;
+};
+
+// A keszlet egeszenek elerese. Forgatokonyvenkent kulon processz fut, ezert
+// ez NEM osztott allapot - minden bejaras a SAJAT elereset ellenorzi a
+// vegen. (Egy kozos osszesitohoz csovezetek kellene; itt eleg annyi, hogy
+// EGYETLEN bejaras se legyen teljesen ures.)
+struct PropReach { uint8_t cycle = 0, resets = 0;
+                   bool failure = false, config = false, fatal = false, relay = false; };
+static PropReach g_propReach;
+
+static void propViolate(PropState& ps, uint32_t step, const char* what) {
+  if (ps.violation == nullptr) {
+    ps.violation = what; ps.violStep = step; ps.violMs = g_millis;
+  }
+}
+
+// --------------------------------------------------------------------
+// A TULAJDONSAGOK. Ez a teszt lelke - minden sor egy allitas arrol, ami
+// SEMMILYEN esemenysorozatban nem fordulhat elo.
+// --------------------------------------------------------------------
+static void propCheck(PropState& ps, uint32_t step) {
+  // P1. A RELE SOSEM MARAD BEHUZVA A PULZUSNAL TOVABB.
+  //
+  // Ez az eszkoz legsulyosabb lehetseges hibaja: HIGH allapotban a router
+  // ARAM NELKUL van. Egy beragadt rele nem kellemetlenseg, hanem tartos
+  // internetkimaradas, amit epp az eszkoz okoz.
+  //
+  // A MERES A STUBBAN VAN, nem itt. Az elso valtozatom a loop() hivasok KOZOTT
+  // mintavetelezte a lab allapotat - es igy SOSEM latta HIGH-on, mert a 90 mp-es
+  // pulzus egyetlen loop() iteracion belul zajlik le (a routerResetAndRetry()
+  // vegig blokkol). Az allitas nyolc bejarason at "atment", miközben ures volt.
+  // Ugyanaz a hibafajta, mint a watchdog-res elso meresenel.
+  //
+  // +10% tures: a pulzus alatt gombot pollozunk, a kilepes nem ms-pontos.
+  if (g_relayMaxHighMs > PROP_RESET_PULSE_MS + PROP_RESET_PULSE_MS / 10) {
+    propViolate(ps, step, "a rele tovabb maradt behuzva a pulzusnal (a router aram nelkul)");
+  }
+  if (g_relayMaxHighMs > ps.relayMaxHoldMs) ps.relayMaxHoldMs = g_relayMaxHighMs;
+  if (g_relayIsHigh || g_relayMaxHighMs > 0) ps.sawRelayPulse = true;
+
+  // --- ELERES-MERES (nem tulajdonsag, hanem a tulajdonsagok ERVENYESSEGE) ---
+  if (testState.cycleIndex > ps.maxCycleIndex) ps.maxCycleIndex = testState.cycleIndex;
+  if (testState.resetEvents > ps.maxResetEvents) ps.maxResetEvents = testState.resetEvents;
+  if (currentState == (State)1) ps.sawFailureState = true;
+  if (deviceMode == (DeviceMode)1) ps.sawConfigMode = true;
+  if (deviceMode == (DeviceMode)2) ps.sawFatalMode = true;
+
+  // P2. A CIKLUSINDEX SOSEM LEP KI A VEGPONT-TABLABOL.
+  // TEST_ENDPOINTS[testState.cycleIndex] - egy elcsuszott index itt a tablan
+  // TULOLVASNA. Az ASan ezt elkapna, de csak ha be is kovetkezik; ez a sor
+  // azt is elkapja, ha az index csak atmenetileg all rossz erteken.
+  if (testState.cycleIndex > PROP_MAX_CYCLE_INDEX) {
+    propViolate(ps, step, "cycleIndex tullepte a vegpont-tabla meretet");
+  }
+
+  // P3. A SZAMLALOK A SAJAT KORLATJUK ALATT MARADNAK.
+  if (testState.resetEvents > PROP_MAX_FAILURE_EV) {
+    propViolate(ps, step, "resetEvents tullepte a maxfailureEvents korlatot");
+  }
+  if (rtcRetryRounds > PROP_MAX_RETRY_ROUNDS) {
+    propViolate(ps, step, "rtcRetryRounds tullepte a MAX_RETRY_ROUNDS korlatot");
+  }
+
+  // P4. AZ ESEMENYNAPLOBAN CSAK ERVENYES ESEMENYKOD ALLHAT.
+  //
+  // (AZ ELSO VALTOZATOM ITT TEVEDETT: azt allitotta, hogy rtcEvNext <=
+  // EVLOG_SIZE. Az rtcEvNext viszont MONOTON SZAMLALO - az indexeles mindig
+  // "rtcEvents[rtcEvNext % EVLOG_SIZE]" -, tehat jogosan no a gyuru merete
+  // fole. Nyolcbol nyolc bejaras "bukott" rajta, es egyik sem a program miatt.
+  // A tanulsag ugyanaz, mint a watchdog-res meresenel: eloszor a MEROESZKOZT
+  // kell igazolni, csak utana hinni neki.)
+  //
+  // Amit viszont ERDEMES allitani: a gyuruben allo minden bejegyzes kodja
+  // ervenyes esemeny. Egy elcsuszott iras, egy felig felulirt bejegyzes vagy
+  // egy rossz % szamitas itt azonnal latszana - a /log oldal ilyenkor
+  // ertelmezhetetlen sorokat mutatna, epp amikor a legnagyobb szukseg van ra.
+  if (rtcEvMagic == EVLOG_MAGIC_C) {
+    const uint32_t db = (rtcEvNext < PROP_EVLOG_SIZE) ? rtcEvNext : PROP_EVLOG_SIZE;
+    for (uint32_t i = 0; i < db; i++) {
+      const uint8_t c = rtcEvents[i].code;
+      if (c < 1 || c > 14) {   // EV_BOOT .. EV_HEAP_RESTART
+        propViolate(ps, step, "ervenytelen esemenykod az esemenynaploban");
+        break;
+      }
+    }
+  }
+
+  // P5. A NYILT SZOVEGU JELSZO SOHA NINCS EGYETLEN FAJLBAN SEM.
+  // A tarolas kodolva tortenik; ez a sor azt vedi, hogy egyetlen ut se
+  // irja ki nyersen - se hibakezelesben, se mentes kozben.
+  for (const auto& kv : g_fs) {
+    if (kv.second.find(PROP_PLAIN_PASS) != std::string::npos) {
+      propViolate(ps, step, "a nyilt szovegu jelszo megjelent a fajlrendszerben");
+      break;
+    }
+  }
+
+  // P6. A NYILT SZOVEGU JELSZO SOHA NEM KERUL A SOROS KIMENETRE.
+  // A soros port fizikailag hozzaferheto; egy diagnosztikai sor, ami kiirja
+  // a jelszot, csendes biztonsagi hiba lenne.
+  for (const auto& l : g_serialLog) {
+    if (l.find(PROP_PLAIN_PASS) != std::string::npos) {
+      propViolate(ps, step, "a nyilt szovegu jelszo megjelent a soros kimeneten");
+      break;
+    }
+  }
+
+  // P7. A MODE_CONFIG ES A MODE_FATAL TERMINALIS.
+  // A programban a MODE_MONITOR-bol van ut a masik kettobe, VISSZAUT NINCS -
+  // csak ujraindulassal. Ha egy bejaras visszatalal monitor modba
+  // ujraindulas nelkul, az a fo allapotgep szerkezetenek serulese.
+  if (deviceMode != (DeviceMode)0) {
+    ps.terminalSeen = true;
+  } else if (ps.terminalSeen) {
+    propViolate(ps, step, "MODE_CONFIG/MODE_FATAL utan visszatert MODE_MONITOR-ba ujraindulas nelkul");
+  }
+}
+
+// A bejaras kornyezete. Egy helyen, hogy az ujraindulas utan
+// visszaallithato legyen (a coldBoot mindent nulláz).
+struct PropEnv {
+  bool willConnect = true;
+  uint32_t latency = 500;
+  std::string encPass;
+  // A PROFIL. Nem eleg veletlen ERTEKEKET generalni: a veletlen ESEMENYSURUSEG
+  // is szamit. Az elso valtozatom minden 2000. lepesben nyomott gombot, ezert
+  // MINDEN bejaras 10-20 masodpercenkent ujraindult - es a percekben mero agakat
+  // (SUCCESS_DELAY, RESET_DELAY, a 90 mp-es rele-pulzus) egyszer sem erte el.
+  // Igy viszont van olyan mag, amelyik ORAKIG hagyja futni az eszkozt.
+  uint32_t buttonRate = 0;    // 0 = ebben a vilagban senki nem nyul az eszkozhoz
+  uint32_t netFlapRate = 0;
+  uint32_t httpRate = 0;
+  uint32_t heapRate = 0;
+  uint32_t fsRate = 0;
+  bool     netBroken = false; // tartos internetkieses - ez viszi a router-reset agra
+};
+
+static void propSeedWorld(PropState& ps, const PropEnv& env, bool deepSleepWake) {
+  // A terminalis-mod jelzo IS hidegindul. Enelkul a P7 hamisan bukna minden
+  // olyan bejarason, ami MODE_CONFIG vagy MODE_FATAL utan ujraindul - pedig
+  // az ujraindulas EPP a szabalyos kiut abbol a ket modbol. (Az elso valtozatom
+  // pontosan ezt hibazta el: nyolcbol ot bejaras "bukott", es egyik sem a
+  // program miatt.)
+  ps.terminalSeen = false;
+  // A jelszo KODOLVA kerul a fajlba - pontosan ugy, ahogy a program irja ki.
+  // (A coldBoot() nyersen masolna be, az elrontana a P5 tulajdonsagot.)
+  coldBoot(env.willConnect, "TestNet", nullptr, "", "", env.latency, deepSleepWake);
+  g_fs["/pass.txt"] = env.encPass;
+}
+
+static void propRun(uint32_t seed, uint32_t steps) {
+  PropRnd r(seed);
+  PropState ps;
+  PropEnv env;
+
+  char enc[128];
+  encodeSecret(PROP_PLAIN_PASS, enc, sizeof(enc));
+  env.encPass = enc;
+  env.willConnect = r.chance(70);
+  env.latency = 100 + r.below(2000);
+  // A vilag jellege. Van olyan mag, ahol senki nem nyul az eszkozhoz es a net
+  // tartosan halott (ez viszi vegig a router-reset -> alvas agat), es van, ahol
+  // valaki allandoan nyomkodja a gombokat.
+  static const uint32_t kBtn[]  = { 0, 0, 400000, 60000 };
+  static const uint32_t kFlap[] = { 0, 200000, 40000, 8000 };
+  env.buttonRate  = kBtn[r.below(4)];
+  env.netFlapRate = kFlap[r.below(4)];
+  env.httpRate    = 2000 + r.below(60000);
+  env.heapRate    = r.chance(50) ? 0u : (20000 + r.below(200000));
+  env.fsRate      = r.chance(70) ? 0u : (50000 + r.below(500000));
+  env.netBroken   = r.chance(45);
+  if (env.netBroken) {
+    // FONTOS: itt a WiFi MUKODIK, csak az internet halott - pontosan az a
+    // helyzet, amiert az eszkoz letezik. Ha a WiFi is elesik, a program a
+    // "nem tudok csatlakozni -> alvas" agra megy, es a router-resetet
+    // (a leglenyegesebb agat) a bejaras SOSEM erne el. Ezert ezekben a
+    // vilagokban a halozat nem is flapel.
+    env.willConnect = true; wifiSim.willConnect = true;
+    env.netFlapRate = 0;
+    g_httpCode = 503; g_httpBody = "nincs net"; g_httpBeginOk = true;
+    pingSim.ok = r.chance(50);   // a gateway lehet eleto es halott is
+  }
+
+  bool needBoot = true;
+  uint32_t step = 0;
+  const uint32_t MAX_REBOOTS = 40;
+
+  while (step < steps && ps.violation == nullptr) {
+    if (needBoot) {
+      if (ps.reboots > MAX_REBOOTS) break;   // csak ujraindul: nincs mit tovabb nezni
+      propSeedWorld(ps, env, ps.reboots > 0 && r.chance(60));
+      try {
+        setup();
+        needBoot = false;
+      } catch (DeepSleepSignal&) {
+        propCheck(ps, step);
+        if (g_pinState.count(PIN_RELAY) && g_pinState[PIN_RELAY] == HIGH) {
+          propViolate(ps, step, "deep sleep behuzott relevel (a router egy alvasnyi ideig aram nelkul)");
+        }
+        ps.sleeps++; ps.reboots++; step++;
+        continue;
+      } catch (RestartSignal&) {
+        propCheck(ps, step);
+        ps.restarts++; ps.reboots++; step++;
+        continue;
+      }
+      ps.reboots++;
+    }
+
+    // --- kornyezeti esemeny a lepes ELOTT, a profil suruségével ---
+    if (env.buttonRate && r.below(env.buttonRate) == 0) {
+      const int which = (r.below(2) == 0) ? PIN_RESETBTN : PIN_WIFIBTN;
+      g_pinRead[which] = LOW;
+      if (g_isr.count(which)) simIsr(which);
+    }
+    if (env.buttonRate && r.below(env.buttonRate / 2 + 1) == 0) {
+      for (int b : { PIN_RESETBTN, PIN_WIFIBTN }) {
+        if (g_pinRead[b] == LOW) {
+          g_pinRead[b] = HIGH;
+          if (g_isr.count(b)) simIsr(b);
+        }
+      }
+    }
+    if (env.netFlapRate && r.below(env.netFlapRate) == 0) {
+      env.willConnect = !env.willConnect;
+      wifiSim.willConnect = env.willConnect;
+      if (!env.willConnect && r.chance(20)) wifiSim.authFail = true;
+    }
+    if (env.httpRate && r.below(env.httpRate) == 0) {
+      const bool jo = !env.netBroken && r.chance(60);
+      g_httpCode = jo ? 200 : (int)(400 + r.below(200));
+      g_httpBody = jo ? "Microsoft NCSI" : "valami mas";
+      g_httpBeginOk = jo || r.chance(50);
+      pingSim.ok = jo || r.chance(50);
+    }
+    if (env.heapRate && r.below(env.heapRate) == 0) {
+      if (r.chance(50)) {
+        g_freeHeap = 8000 + r.below(40000);
+        g_maxAllocHeap = g_freeHeap / 2;
+      } else {
+        g_freeHeap = 180000; g_maxAllocHeap = 110000;
+      }
+    }
+    if (env.fsRate && r.below(env.fsRate) == 0) {
+      g_fsWritable = !g_fsWritable;
+    }
+
+    try {
+      loop();
+    } catch (DeepSleepSignal&) {
+      propCheck(ps, step);
+      if (g_pinState.count(PIN_RELAY) && g_pinState[PIN_RELAY] == HIGH) {
+        propViolate(ps, step, "deep sleep behuzott relevel (a router egy alvasnyi ideig aram nelkul)");
+      }
+      ps.sleeps++; needBoot = true; step++;
+      continue;
+    } catch (RestartSignal&) {
+      propCheck(ps, step);
+      ps.restarts++; needBoot = true; step++;
+      continue;
+    }
+    propCheck(ps, step);
+    step++;
+  }
+
+  printf("     [info] mag %u: %u lepes, %u boot, %u alvas, %u restart, "
+         "szimulalt ido %.1f perc\n",
+         (unsigned)seed, (unsigned)step, (unsigned)ps.reboots,
+         (unsigned)ps.sleeps, (unsigned)ps.restarts, g_millis / 60000.0);
+  printf("     [eleres] cycleIndex<=%u resetEvents<=%u FAILURE=%s CONFIG=%s "
+         "FATAL=%s rele=%s (leghosszabb pulzus %.1f mp)\n",
+         ps.maxCycleIndex, ps.maxResetEvents,
+         ps.sawFailureState ? "igen" : "NEM", ps.sawConfigMode ? "igen" : "NEM",
+         ps.sawFatalMode ? "igen" : "NEM", ps.sawRelayPulse ? "igen" : "NEM",
+         ps.relayMaxHoldMs / 1000.0);
+  // A globalis eleres-osszesito a keszlet vegen dont (lasd propReach).
+  g_propReach.cycle   = ps.maxCycleIndex > g_propReach.cycle ? ps.maxCycleIndex : g_propReach.cycle;
+  g_propReach.resets  = ps.maxResetEvents > g_propReach.resets ? ps.maxResetEvents : g_propReach.resets;
+  g_propReach.failure |= ps.sawFailureState;
+  g_propReach.config  |= ps.sawConfigMode;
+  g_propReach.fatal   |= ps.sawFatalMode;
+  g_propReach.relay   |= ps.sawRelayPulse;
+  if (ps.violation != nullptr) {
+    printf("     [info] a sertes a %u. lepesben, %u ms-nal\n",
+           (unsigned)ps.violStep, (unsigned)ps.violMs);
+  }
+  CHECK(ps.violation == nullptr,
+        ps.violation ? ps.violation : "a veletlen bejaras egyetlen tulajdonsagot sem sertett meg");
+  // A BEJARAS NE LEHESSEN URES. Egy tulajdonsag-teszt legveszelyesebb hibaja
+  // nem az, hogy rosszul allit valamit - hanem hogy IGAZAT allit egy olyan
+  // allapotrol, ahova sosem jut el. Ez a sor koveteli meg, hogy a bejaras
+  // tenyleg elerje a program erdemi againak valamelyiket. (Kellett is: az
+  // elso ket valtozatom egyike sem erte el a rele-pulzust, es a "sosem ragad
+  // be" allitas nyolcbol nyolcszor URESEN ment at.)
+  CHECK(ps.sawRelayPulse || ps.sawConfigMode || ps.sawFatalMode,
+        "a bejaras elerte a program valamelyik erdemi agat (nem ures)");
+}
+
+// A lepesszam kornyezeti valtozobol is allithato - a CI a fix erteket futtatja,
+// helyben viszont hosszabb bejarassal lehet tovabb keresni.
+static uint32_t propSteps() {
+  const char* s = getenv("RNDSTEPS");
+  return s ? (uint32_t)strtoul(s, nullptr, 10) : 400000u;
+}
+static uint32_t propSeed(uint32_t n) {
+  const char* s = getenv("RNDSEED");
+  return s ? (uint32_t)strtoul(s, nullptr, 10) + n : (0x9E3779B9u * n + 1u);
+}
+
+#define PROP_SCENARIO(n) static void scPROP##n() { propRun(propSeed(n), propSteps()); }
+PROP_SCENARIO(1) PROP_SCENARIO(2) PROP_SCENARIO(3) PROP_SCENARIO(4)
+PROP_SCENARIO(5) PROP_SCENARIO(6) PROP_SCENARIO(7) PROP_SCENARIO(8)
+#undef PROP_SCENARIO
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -7420,6 +7802,16 @@ static const Scenario kScenarios[] = {
   { "SYNC1: a hatarido+jelzo par EGY kritikus szakaszban", scSYNC1 },
   { "SYNC2: az ujraindulasi hatarido szemantikaja", scSYNC2 },
   { "SYNC3: a konfigzar megszerzese es feloldasa szimmetrikus", scSYNC3 },
+
+  // --- Veletlen allapotgep-bejaras (property-based) ---
+  { "PROP1: veletlen kornyezeti esemenysorozat - tulajdonsagok (mag 1)", scPROP1 },
+  { "PROP2: veletlen kornyezeti esemenysorozat - tulajdonsagok (mag 2)", scPROP2 },
+  { "PROP3: veletlen kornyezeti esemenysorozat - tulajdonsagok (mag 3)", scPROP3 },
+  { "PROP4: veletlen kornyezeti esemenysorozat - tulajdonsagok (mag 4)", scPROP4 },
+  { "PROP5: veletlen kornyezeti esemenysorozat - tulajdonsagok (mag 5)", scPROP5 },
+  { "PROP6: veletlen kornyezeti esemenysorozat - tulajdonsagok (mag 6)", scPROP6 },
+  { "PROP7: veletlen kornyezeti esemenysorozat - tulajdonsagok (mag 7)", scPROP7 },
+  { "PROP8: veletlen kornyezeti esemenysorozat - tulajdonsagok (mag 8)", scPROP8 },
 };
 
 
