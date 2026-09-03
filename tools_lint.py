@@ -33,6 +33,20 @@ Ez a lenyeg: a szabalyt nem a fegyelem tartja be, hanem a build.
 """
 import re, sys, pathlib
 
+# A forrasokat A SCRIPT SAJAT HELYEHEZ kepest keressuk, nem a munkakonyvtarhoz.
+#
+# MIERT SZAMIT? Mert a "make lint" a test/ konyvtarbol hivja
+# ("python3 ../tools_lint.py"), es ott EGYIK forrasfajl sincs meg. A korabbi
+# valtozat ilyenkor a "if not p.exists(): continue" agon MINDEN fajlt
+# atugrott, es "rendben"-t irt ki nulla megvizsgalt sorral - kilepesi kod 0.
+#
+# Vagyis a kapu, aminek epp az lett volna a dolga, hogy a szabalyokat ne a
+# fegyelem tartsa be, a CI-ban EGYALTALAN NEM MERT SEMMIT. A mutacios probak
+# azert mutattak jonak, mert azokat a repo gyokerebol futtattam - vagyis a
+# MASIK, mukodo hivasi modon. Harom szandekos hibat (blokkolo ciklus etetes
+# nelkul, malloc, atfordulas-erzekeny idoosszehasonlitas) engedett at.
+GYOKER = pathlib.Path(__file__).resolve().parent
+
 FORRASOK = ['bazsi_router_reboot.ino', 'netprobe.cpp', 'eventlog.cpp',
             'configstore.cpp', 'webportal.cpp', 'sync.cpp', 'secret.cpp',
             'strutil.cpp']
@@ -92,9 +106,12 @@ def ciklus_torzsek(szoveg):
 
 hibak = []
 for f in FORRASOK:
-    p = pathlib.Path(f)
+    p = GYOKER / f
     if not p.exists():
-        continue
+        # NEM csendes atugras: egy hianyzo forras a lista es a valosag
+        # elteresét jelenti, es epp ez tenne a kaput uresse.
+        print(f"tools_lint: HIANYZO FORRAS: {p}")
+        sys.exit(2)
     nyers = p.read_text(encoding='utf-8')
     eredeti_sorok = nyers.split('\n')
     szoveg = re.sub(r'//[^\n]*', '', nyers)   # a ciklusok keresese kommentek nelkul
@@ -146,9 +163,12 @@ TILTOTT = [
 
 alloc_hibak = []
 for f in FORRASOK:
-    p2 = pathlib.Path(f)
+    p2 = GYOKER / f
     if not p2.exists():
-        continue
+        # NEM csendes atugras: egy hianyzo forras a lista es a valosag
+        # elteresét jelenti, es epp ez tenne a kaput uresse.
+        print(f"tools_lint: HIANYZO FORRAS: {p2}")
+        sys.exit(2)
     for n, sor in enumerate(p2.read_text(encoding='utf-8').split('\n'), 1):
         mag = re.sub(r'//.*', '', sor)
         if 'LINT-OK:' in sor:
@@ -210,9 +230,12 @@ IDO_KEZI = {'millis', 'now', 'currentMillis', 'apDeadline', 'restartAt',
 
 ido_nevek = set(IDO_KEZI)
 for f in FORRASOK:
-    p3 = pathlib.Path(f)
+    p3 = GYOKER / f
     if not p3.exists():
-        continue
+        # NEM csendes atugras: egy hianyzo forras a lista es a valosag
+        # elteresét jelenti, es epp ez tenne a kaput uresse.
+        print(f"tools_lint: HIANYZO FORRAS: {p3}")
+        sys.exit(2)
     szoveg3 = p3.read_text(encoding='utf-8')
     for m in re.finditer(r'\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*millis\s*\(\s*\)', szoveg3):
         ido_nevek.add(m.group(1))
@@ -232,9 +255,12 @@ def ido_erteku(kif):
 
 ido_hibak = []
 for f in FORRASOK:
-    p3 = pathlib.Path(f)
+    p3 = GYOKER / f
     if not p3.exists():
-        continue
+        # NEM csendes atugras: egy hianyzo forras a lista es a valosag
+        # elteresét jelenti, es epp ez tenne a kaput uresse.
+        print(f"tools_lint: HIANYZO FORRAS: {p3}")
+        sys.exit(2)
     for n, sor in enumerate(p3.read_text(encoding='utf-8').split('\n'), 1):
         mag = re.sub(r'//.*', '', sor)
         if 'int32_t' in mag or 'TIME-OK:' in sor:
