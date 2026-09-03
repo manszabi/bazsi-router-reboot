@@ -1138,12 +1138,12 @@ jöhet egy áramszünet, ami az RTC naplót elvinné.
 
 | | |
 |---|---|
-| Mikor | router reset előtt, AP módba váltás előtt, és **minden alvás előtt** (egyetlen közös ponton, az `enterDeepSleep()` elején) |
+| Mikor | router reset előtt, AP módba váltás előtt, **minden alvás előtt** (egyetlen közös ponton, az `enterDeepSleep()` elején), és a **heap miatti önkéntes újraindulás** előtt |
 | Írás közben | nincs alvás, újraindulás és másik írás – ugyanaz a **konfigurációs zár**, amit a webes mentés használ; foglalt zárnál a mentés **kimarad**, nem blokkol |
 | Sikeresség | **visszaolvasással** ellenőrizve; a sikertelenség **nem végzetes**, az RTC napló ettől még ép |
 | Hogyan | **hozzáfűz, nem ír felül**: a fájl megőrzi a régi tartalmát, és a végére kerül, ami a legutóbbi mentés óta keletkezett |
 | Mennyit őriz | a fájl **saját, 128 bejegyzéses gyűrű** – négyszerese az RTC naplónak, több áramszünet története is elfér benne |
-| A `/log` oldal | **mindkét forrást** mutatja: a fájlt, majd az RTC-ből azt, ami még nincs benne (kettőzés nélkül); a lap a legfrissebb **48 sorra** korlátozódik |
+| A `/log` oldal | **mindkét forrást** mutatja teljes egészében: a fájlt, majd az RTC-ből azt, ami még nincs benne (kettőzés nélkül) |
 | A teljes napló | a soros porton a **`LOG`** paranccsal |
 | Hiányzó / üres / hibás fájl | nem hiba: az RTC naplót mutatja |
 | Ha mindkettő üres | egyszerűen nincs napló a lapon |
@@ -1171,11 +1171,16 @@ jöhet egy áramszünet, ami az RTC naplót elvinné.
 > régebbi „életből" való nagyobb számot hordoz. A helyes alap ezért a kettő
 > **kisebbike**: így sem elrejteni, sem kettőzni nem tud. (`GAP`, `GAP2`.)
 
-> **Miért korlátos a weblap?** Mert a `/log` az **async_tcp** taskon fut, és a
-> teljes napló egyben 160 sor = **mért 18 KB**. Egy ekkora összefüggő foglalás
-> szembemegy a program elvével: a heap-felügyelet kritikus küszöbe a legnagyobb
-> tömbre 6000 bájt. A lap ezért a legfrissebb 48 sort mutatja (**6,9 KB**), és
-> kiírja, hogy a teljes napló a soros porton érhető el.
+> **Mekkora a `/log` lap, és mennyi memóriát kér?** A stream puffere a
+> **tényleges tartalomhoz** van méretezve (`~2600 + sorok × 120` bájt), nem fix.
+> Így egy pár soros lap ~3 KB-ot kér, a teljes napló (160 sor, **mért 18 070
+> bájt**) ~21 KB-ot. A méretezés azért kell, mert a könyvtár `resizeAdd()`-je
+> pontosan a hiányzó bájtokkal növel – soronként újraallokálna.
+>
+> A valódi eszközön mérve: **szabad heap 201 852 B, a legnagyobb összefüggő
+> tömb 114 676 B**. Egy 21 KB-os kérés ennek a 18%-a, és a lapot ember nyitja
+> meg, ritkán. Ha mégsem sikerülne a foglalás, a könyvtár nem omlik össze:
+> annyit ír ki, amennyi befér.
 
 **Valós idő:** amint van kapcsolat – **bármelyik úton** jött is létre –, elindul
 az óraszinkron (`hu.pool.ntp.org`, magyar időzóna a nyári időszámítással). **Ha

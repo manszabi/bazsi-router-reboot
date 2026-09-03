@@ -71,21 +71,26 @@ static_assert(SECRET_ENC_MAX >= SECRET_PREFIX_LEN + 2 * (sizeof(ConfigDraft::pas
 static AsyncWebServer server(80);
 
 // Search for parameter in HTTP POST request
-// A /log oldal valasz-streamjenek kezdo puffere, es az oldalon mutatott
-// sorok felso korlatja. A kettő EGYUTT jar: a meretet a LOG7 teszt meri.
+// A /log oldal valasz-streamjenek kezdo puffere. A stream igeny szerint no,
+// DE a resizeAdd() pontosan a hianyzo bajtokkal novel - vagyis soronkent
+// ujraallokalna, ami 160 sornal 160 masolas es eros toredezettseg-nyomas.
+// Ezert a puffert ELORE, a TENYLEGES tartalomhoz meretezzuk.
 //
-// MIERT KORLATOS AZ OLDAL? A naplofajl mostantol 128 bejegyzest orizhet, es
-// az RTC gyuru meg 32-t - egyben kiirva ez 160 sor, MERVE 18 KB. Egy ekkora
-// osszefuggo foglalas az async_tcp taskban szembemegy az egesz program
-// elvevel: a heap-felugyelet KRITIKUS kuszobe a legnagyobb tombre 6000 bajt,
-// vagyis egy 18-24 KB-os keres joval a riasztasi szint elott elbukna egy
-// elaprozodott heapen.
+// MIERT NEM FIX MERET? Mert a ketto rossz iranyba huz: egy tipikus lap
+// (par sor) mellett egy 20 KB-os foglalas pazarlas, a teljes naplo mellett
+// viszont egy 8 KB-os kevés. A becsles mindkettot megoldja.
 //
-// Ezert a felosztas: a FAJL orzi a hosszu tortenetet, a LAP a legfrissebb
-// LOG_PAGE_MAX_ROWS sort mutatja, a TELJES naplot pedig a soros "LOG" parancs
-// irja ki - az soronkent kuld, nem pufferel.
-constexpr uint16_t LOG_PAGE_MAX_ROWS = 48;
-constexpr size_t LOG_STREAM_BUFFER = 8192;
+// A SZAMOK MERVE (LOG7): a fix resz (fejlec, allapot, jelmagyarazat, lablec)
+// ~2500 bajt, egy sor ~110 bajt valos idobelyeggel. A legrosszabb eset
+// 128 + 32 = 160 sor = 18 063 bajt.
+//
+// ES MIERT VALLALHATO EZ? A meres a valodi eszkozon: szabad heap 201 852 B,
+// a legnagyobb osszefuggo tomb 114 676 B. Egy 20 KB-os keres ennek a 17%-a,
+// es a lapot ember nyitja meg, ritkan. Ha megis nem sikerulne a foglalas, a
+// konyvtar nem omlik ossze: annyit ir ki, amennyi befer (WebResponses.cpp).
+constexpr size_t LOG_PAGE_FIX_BYTES = 2600;   // fejlec + allapot + jelmagyarazat
+constexpr size_t LOG_PAGE_ROW_BYTES = 120;    // egy sor, valos idobelyeggel
+constexpr size_t LOG_STREAM_MIN = 3072;       // egy szinte ures lapra is eleg
 
 const char PARAM_SSID[]    = "ssid";
 const char PARAM_PASS[]    = "pass";
@@ -514,63 +519,9 @@ static void printLogRow(AsyncResponseStream* r, const EventEntry& e,
 
 static void sendDiagnosticLog(AsyncWebServerRequest* request) {
   touchApDeadline();
-  // A stream puffere igény szerint nő (resizeAdd), de akkor soronként
-  // újraallokálna. Egy bőséges kezdőmérettel ez egyetlen foglalás lesz:
-  // fejléc + állapot + 32 sor x ~70 bájt + a ~900 bájtos jelmagyarázat +
-  // lábléc alatta marad.
-  // A KEZDO PUFFER MERETE. A stream szukseg eseten no, de akkor soronkent
-  // ujraallokal - epp az async_tcp taskban, ahol a heap a legszukebb. Egy
-  // boseges kezdomeret ezt egyetlen foglalassa teszi.
-  //
-  // A LEGROSSZABB ESET MEGNOTT, amikor a naplofajl sajat, nagyobb gyuruve
-  // valt: 128 fajl-sor + 32 RTC-sor. A LOG7 teszt MEGMERI, es megbukik, ha a
-  // lap eszrevetlenul a puffer fole nőne.
-  AsyncResponseStream* r = request->beginResponseStream("text/html",
-                                                        LOG_STREAM_BUFFER);
-  r->print(F("<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
-             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-             "<title>Naplo</title></head><body><h2>Diagnosztikai naplo</h2>"));
 
-  const esp_reset_reason_t rr = esp_reset_reason();
-  r->printf("<p><b>Utolso indulas oka:</b> %s (%d)<br>",
-            resetReasonName(rr), (int)rr);
-  // A negy szamlalot EGYSZERRE kerjuk le (app_hooks.h): igy a lapon egymassal
-  // konzisztens pillanatkep jelenik meg, nem negy kulon idopillanate.
-  const DiagCounters dc = diagCounters();
-  r->printf("<b>Watchdog ujraindulasok:</b> %u / %u<br>",
-            (unsigned)dc.wdtResets, (unsigned)dc.wdtLimit);
-  r->printf("<b>Ujraprobalkozasi korok:</b> %u / %u<br>",
-            (unsigned)dc.retryRounds, (unsigned)dc.retryLimit);
-  // Az uptime ugyanabban az alakban, mint a soros porton - a nyers
-  // masodpercbol (pl. "165600 mp") ranezesre semmi nem latszik.
-  {
-    const uint32_t up = (uint32_t)(esp_timer_get_time() / 1000000);
-    r->printf("<b>Uptime:</b> %ud %uh %um %us</p>",
-              (unsigned)(up / 86400), (unsigned)((up % 86400) / 3600),
-              (unsigned)((up % 3600) / 60), (unsigned)(up % 60));
-  }
-
-  // Pillanatkép a naplóról a mux alatt: az író (logEvent) a loop taskból
-  // fut, ez a kezelő az async_tcp taskból - enélkül félig kiírt bejegyzést
-  // is olvashatnánk. A kritikus szakasz egy memcpy.
-  //
-  // EGYETLEN puffert hasznalunk mindkét forráshoz (RTC és fájl): az
-  // A KET FORRAS MOSTANTOL EGYUTT, NEM EGYMAS HELYETT.
-  //
-  // Korabban a lap valasztott: vagy a fajl, vagy az RTC naplo - amelyik
-  // frissebbnek latszott. Ez azert kellett, mert a fajl az RTC gyuru
-  // PILLANATKEPE volt, tehat a ketto atfedte egymast. Mostantol a mentes
-  // HOZZAFUZ (lasd saveEventLog), igy a ket forras EGYMAST EGESZITI KI:
-  //   - a fajl a HOSSZU tortenet (max EVFILE_SIZE bejegyzes, tobb bootolason
-  //     at, aramszunetet is tulelve),
-  //   - az RTC gyuru pedig csak az, ami a legutobbi sikeres mentes OTA
-  //     tortent (rtcSavedEvNext).
-  // A ketto egymas utan a teljes tortenet, ketszerezes nelkul - es a
-  // "melyik a frissebb?" heurisztikara sincs tobbe szukseg.
-  //
-  // A VEREM: a fajlt NEM toltjuk be egeszben (128 bejegyzes 1536 bajt lenne),
-  // hanem nyolcasaval olvassuk - 96 bajt. Az async_tcp task verme veges, es a
-  // "make stack" 1200 bajtos kerete pontosan ezt vedi.
+  // A NAPLO ALLAPOTAT A STREAM LETREHOZASA ELOTT olvassuk ki - igy a puffert
+  // a tenylegesen kiirando sorok szamahoz tudjuk meretezni (lasd fent).
   uint32_t evTotal, mentettEddig;
   EventEntry evCopy[EVLOG_SIZE];
   portENTER_CRITICAL(&evLogMux);
@@ -609,13 +560,55 @@ static void sendDiagnosticLog(AsyncWebServerRequest* request) {
   const uint32_t keletkezett = (evTotal > alap) ? (evTotal - alap) : 0;
   const uint16_t ujDb = (uint16_t)(keletkezett < EVLOG_SIZE ? keletkezett : EVLOG_SIZE);
 
+  // A puffer a TENYLEGES tartalomhoz meretezve. Felso korlat nincs: mind a
+  // ket forras MINDEN sora kimegy - a darabszamot a ket gyuru merete
+  // (EVFILE_SIZE + EVLOG_SIZE = 160) amugy is korlatozza.
+  const size_t sorok = (size_t)fajlDb + (size_t)ujDb;
+  size_t pufferMeret = LOG_PAGE_FIX_BYTES + sorok * LOG_PAGE_ROW_BYTES;
+  if (pufferMeret < LOG_STREAM_MIN) {
+    pufferMeret = LOG_STREAM_MIN;
+  }
+  AsyncResponseStream* r = request->beginResponseStream("text/html", pufferMeret);
+  r->print(F("<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+             "<title>Naplo</title></head><body><h2>Diagnosztikai naplo</h2>"));
+
+  const esp_reset_reason_t rr = esp_reset_reason();
+  r->printf("<p><b>Utolso indulas oka:</b> %s (%d)<br>",
+            resetReasonName(rr), (int)rr);
+  // A negy szamlalot EGYSZERRE kerjuk le (app_hooks.h): igy a lapon egymassal
+  // konzisztens pillanatkep jelenik meg, nem negy kulon idopillanate.
+  const DiagCounters dc = diagCounters();
+  r->printf("<b>Watchdog ujraindulasok:</b> %u / %u<br>",
+            (unsigned)dc.wdtResets, (unsigned)dc.wdtLimit);
+  r->printf("<b>Ujraprobalkozasi korok:</b> %u / %u<br>",
+            (unsigned)dc.retryRounds, (unsigned)dc.retryLimit);
+  // Az uptime ugyanabban az alakban, mint a soros porton - a nyers
+  // masodpercbol (pl. "165600 mp") ranezesre semmi nem latszik.
+  {
+    const uint32_t up = (uint32_t)(esp_timer_get_time() / 1000000);
+    r->printf("<b>Uptime:</b> %ud %uh %um %us</p>",
+              (unsigned)(up / 86400), (unsigned)((up % 86400) / 3600),
+              (unsigned)((up % 3600) / 60), (unsigned)(up % 60));
+  }
+
+  // Pillanatkép a naplóról a mux alatt: az író (logEvent) a loop taskból
+  // fut, ez a kezelő az async_tcp taskból - enélkül félig kiírt bejegyzést
+  // is olvashatnánk. A kritikus szakasz egy memcpy.
+  //
+  // EGYETLEN puffert hasznalunk mindkét forráshoz (RTC és fájl): az
+  // A KET FORRAS EGYUTT, NEM EGYMAS HELYETT. A fajl a HOSSZU tortenet, az RTC
+  // gyuru pedig csak az, ami a legutobbi sikeres mentes OTA tortent. A ketto
+  // egymas utan a teljes tortenet, ketszerezes nelkul - es a "melyik a
+  // frissebb?" heurisztikara sincs tobbe szukseg. (Az allapotot mar a fuggveny
+  // elejen kiolvastuk, a puffer meretezesehez.)
   if (fajlDb == 0 && ujDb == 0) {
     r->print(F("<p>Nincs rogzitett esemeny.</p>"));
   } else {
     r->print(F("<p><b>Forras:</b> "));
     if (vanFajl) {
       char mikor[24];
-      r->printf("a fajlrendszerre mentett naplo %u bejegyzese", (unsigned)fajlDb);
+      r->printf("a fajlrendszerre mentett naplo mind a %u bejegyzese", (unsigned)fajlDb);
       if (formatEpoch(fej.savedEpoch, mikor, sizeof(mikor))) {
         r->printf(" (utoljara mentve: %s)", mikor);
       } else {
@@ -633,27 +626,16 @@ static void sendDiagnosticLog(AsyncWebServerRequest* request) {
     r->printf("az RTC memoriabol %u, a mentes ota keletkezett bejegyzes.</p>",
               (unsigned)ujDb);
 
-    // A LAP ABLAKA: a legfrissebb LOG_PAGE_MAX_ROWS sor. Az RTC resz mindig
-    // belefer (legfeljebb 32), a maradek helyet a fajl VEGEROL toltjuk fel.
-    const uint16_t fajlHely = (uint16_t)(ujDb < LOG_PAGE_MAX_ROWS
-                                         ? LOG_PAGE_MAX_ROWS - ujDb : 0);
-    const uint16_t fajlMutat = fajlDb < fajlHely ? fajlDb : fajlHely;
-    const uint32_t fajlKezd = (uint32_t)(fajlDb - fajlMutat);
-    if (fajlKezd > 0) {
-      r->printf("<p><i>A fajl %u legregebbi bejegyzese nem fer a lapra - a "
-                "TELJES naplo a soros porton a \"LOG\" paranccsal olvashato.</i></p>",
-                (unsigned)fajlKezd);
-    }
-
     r->print(F("<table border=1 cellpadding=4><tr><th>Ido</th><th>Uptime</th>"
                "<th>Esemeny</th><th>Param</th><th>Forras</th></tr>"));
 
-    // 1. A FAJL vege, nyolcasaval beolvasva.
-    if (fajlMutat > 0) {
+    // 1. A FAJL - TELJES EGESZEBEN, nyolcasaval beolvasva. A puffer mar a
+    //    sorok szamahoz van meretezve, tehat nem kell ablakot vagni.
+    if (fajlDb > 0) {
       EventEntry darab[8];
-      uint32_t tol = fajlKezd;
-      while (tol < (uint32_t)fajlKezd + fajlMutat) {
-        const uint16_t hatra = (uint16_t)(fajlKezd + fajlMutat - tol);
+      uint32_t tol = 0;
+      while (tol < fajlDb) {
+        const uint16_t hatra = (uint16_t)(fajlDb - tol);
         const uint16_t db = (uint16_t)(hatra < 8 ? hatra : 8);
         if (!loadEventLogRange(fej, tol, db, darab)) {
           r->print(F("<tr><td colspan=5>a naplofajl olvasasa megszakadt</td></tr>"));
