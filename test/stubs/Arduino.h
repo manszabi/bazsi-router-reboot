@@ -160,6 +160,11 @@ extern bool     g_wdtTrack;
 extern bool g_wdtInProgram;        // a setup()/loop() belsejeben vagyunk?
 void feedLoopWDT_fromCore();       // a core per-iteracios etetese (nem naploz)
 void wdtAdvanceTime(uint32_t ms);  // eltelt ido bejelentese az etetes-meresnek
+// --- a rele behuzott allapotanak merese (lasd main_stub.cpp) ---
+extern uint32_t g_relayMaxHighMs;   // a leghosszabb HIGH szakasz
+extern uint32_t g_relayHighSince;
+extern bool     g_relayIsHigh;
+void relayTrackTime();
 void wdtNoteTime();
 int64_t esp_timer_get_time();
 void esp_sleep_enable_timer_wakeup(uint64_t);

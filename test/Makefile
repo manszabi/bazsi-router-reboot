@@ -115,3 +115,36 @@ $(BUILD):
 
 clean:
 	@rm -rf $(BUILD) *.gcov
+
+# --- FUZZING (clang libFuzzer) ---------------------------------------------
+# Negy kulon binaris, celpontonkent egy: igy a lefedettseg-vezerelt kereses
+# nem oszlik meg a celpontok kozott. ASan+UBSan alatt futnak, mert a fuzzer
+# onmagaban csak az osszeomlast latna - a csendes puffertulcsordulast nem.
+FUZZCXX  ?= clang++
+FUZZSEC  ?= 30
+FUZZFLAGS = -std=gnu++17 -g -O1 -Istubs -I.. -DESP_IDF_VERSION_MAJOR=5 \
+            -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer \
+            -Wno-unused-parameter -Wno-overloaded-virtual
+FUZZSRC   = $(BUILD)/sketch.cpp $(MODULES) stubs/main_stub.cpp fuzz_main.cpp
+FUZZBINS  = $(BUILD)/fuzz-post $(BUILD)/fuzz-secret $(BUILD)/fuzz-evlog $(BUILD)/fuzz-config
+
+$(BUILD)/fuzz-post:   $(DEPS) fuzz_main.cpp
+	$(FUZZCXX) $(FUZZFLAGS) -DFUZZ_TARGET=1 -o $@ $(FUZZSRC)
+$(BUILD)/fuzz-secret: $(DEPS) fuzz_main.cpp
+	$(FUZZCXX) $(FUZZFLAGS) -DFUZZ_TARGET=2 -o $@ $(FUZZSRC)
+$(BUILD)/fuzz-evlog:  $(DEPS) fuzz_main.cpp
+	$(FUZZCXX) $(FUZZFLAGS) -DFUZZ_TARGET=3 -o $@ $(FUZZSRC)
+$(BUILD)/fuzz-config: $(DEPS) fuzz_main.cpp
+	$(FUZZCXX) $(FUZZFLAGS) -DFUZZ_TARGET=4 -o $@ $(FUZZSRC)
+
+.PHONY: fuzz
+fuzz: $(FUZZBINS)
+	@rc=0; for b in $(FUZZBINS); do \
+	  echo "=== $$b ($(FUZZSEC) mp) ==="; \
+	  mkdir -p corpus/$$(basename $$b); \
+	  ASAN_OPTIONS=detect_leaks=0 $$b corpus/$$(basename $$b) \
+	    -max_total_time=$(FUZZSEC) -print_final_stats=1 -rss_limit_mb=4096 \
+	    2>&1 | grep -E "^#|Done|stat::|ERROR|SUMMARY|crash" | tail -8 || rc=1; \
+	done; \
+	if [ $$rc -ne 0 ]; then echo "FUZZING: TALALAT - lasd a crash-* fajlokat"; exit 1; fi; \
+	echo "Fuzzing: mind a negy celpont tisztan futott."

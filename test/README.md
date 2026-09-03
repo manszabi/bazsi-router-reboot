@@ -144,7 +144,7 @@ lefordított kódot nézi. Mindhárom mutációval igazolva.
 
 | Cél | Mit tart be | Miért nem volt eddig kikényszerítve |
 |---|---|---|
-| `make lint` | **(1)** minden `delay()`-t tartalmazó `while`/`for`/`do` ciklus etessen, térjen vissza a `loop()`-ba, vagy kapjon `// WDT-OK: <indok>` jelölést · **(2)** nincs dinamikus foglalás (`malloc`, `new`, STL tároló, érték szerinti `String`) | a (2) a README és a MUKODES **állítása** volt, nulla ellenőrzéssel |
+| `make lint` | **(1)** minden `delay()`-t tartalmazó `while`/`for`/`do` ciklus etessen, térjen vissza a `loop()`-ba, vagy kapjon `// WDT-OK: <indok>` jelölést · **(2)** nincs dinamikus foglalás (`malloc`, `new`, STL tároló, érték szerinti `String`) · **(3)** két abszolút időpontot tilos közvetlenül összehasonlítani – csak `(int32_t)(most - határidő)` vagy `(most - kezdet) < időtartam` | a (2) a README és a MUKODES **állítása** volt, nulla ellenőrzéssel; a (3) 49,7 naponta **egyszer** hibázna, és semmilyen rövidebb teszten nem látszana |
 | `make warn` | `-Wformat-truncation=2`, `-Wformat-overflow=2`, `-Wstringop-*`, `-Werror` | ezek **csak `-O2` mellett** futnak, a fő teszt-build viszont `-O0` (a pontos lefedettségért) – így csendben kimaradtak |
 | `make stack` | az async_tcp taskon futó HTTP kezelők veremkerete (`handleConfigPost` 720 B, `sendDiagnosticLog` 592 B, küszöb 1200 B) | a kód több helyen **épp a véges veremre hivatkozva** választ közös puffert – de a számot semmi nem mérte |
 
@@ -253,3 +253,152 @@ elérhetetlen – ezeket **nem** kell tesztelni:
 A stubok **nem** emulálják az ESP32-t. Azt ellenőrzik, hogy a firmware
 vezérlési logikája, időzítései és API-használata helyes-e. A valódi rádió,
 lwIP, LittleFS és a relé viselkedését hardveren kell igazolni.
+
+## Veletlen allapotgep-bejaras (PROP1-PROP8)
+
+A tobbi 295 forgatokonyv **kezzel irt**: pontosan azokat az utakat jarja be,
+amikre a szerzo gondolt. A PROP forgatokonyvek forditva dolgoznak - veletlen
+kornyezeti esemenysorozatot generalnak (WiFi-szakadas, gombnyomas tetszoleges
+pillanatban, HTTP-valasz, heap-eses, fajlrendszer-hiba), es nem azt allitjak,
+hogy MI TORTENJEN, hanem hogy mi **nem tortenhet soha**:
+
+| | Tulajdonsag |
+|---|---|
+| P1 | a rele sosem marad behuzva a pulzusnal tovabb (a router aram nelkul) |
+| P2 | a `cycleIndex` sosem lep ki a `TEST_ENDPOINTS[]` tablabol |
+| P3 | `resetEvents` / `rtcRetryRounds` a sajat korlatjuk alatt |
+| P4 | az esemenynaploban csak ervenyes esemenykod all |
+| P5 | a nyilt szovegu jelszo soha nincs egyetlen fajlban sem |
+| P6 | a nyilt szovegu jelszo soha nem kerul a soros kimenetre |
+| P7 | a `MODE_CONFIG` / `MODE_FATAL` terminalis (csak ujraindulassal van kiut) |
+
+**Determinisztikus**: a magok fixek, a CI-ban mindig ugyanaz a nyolc bejaras fut.
+Egy veletlenszeruen bukdacsolo teszt hasznalhatatlan lenne. Helyben tovabb lehet
+keresni ugyanezzel a keszlettel:
+
+```
+RNDSEED=12345 RNDSTEPS=2000000 build/run-idf5 PROP
+```
+
+**Az ELERES is merve van** (`[eleres]` sor), es kovetelve: minden bejarasnak el
+kell jutnia a program valamelyik erdemi againak. Ez nem oncel - a fejlesztes
+kozben **ketszer** fordult elo, hogy egy tulajdonsag URESEN ment at:
+
+1. Az elso valtozat a `loop()` hivasok **kozott** mintavetelezte a rele labat -
+   es igy sosem latta HIGH-on, mert a 90 mp-es pulzus egyetlen `loop()`
+   iteracion belul zajlik le. A meres ezert a stubba kerult (`g_relayMaxHighMs`),
+   ugyanoda, ahova a watchdog-rese.
+2. Ket tulajdonsag maga volt hibas: az `rtcEvNext` **monoton szamlalo**, nem
+   gyuruindex, a `terminalSeen` jelzot pedig nem nullazta az ujraindulas.
+   Nyolcbol nyolc, illetve nyolcbol ot bejaras "bukott" - egyik sem a program
+   miatt.
+
+Mutacioval igazolva, mind a negy a **helyes** tulajdonsagot buktatja:
+
+| Mutacio | Elkapja |
+|---|---|
+| `RESET_PULSE` 90 -> 200 mp | P1, 8/8 bejaras |
+| `MAX_CYCLE_INDEX` 4 -> 5 | P2, 8/8 |
+| a jelszo kiirasa a soros portra | P6, 8/8 |
+| a jelszo kiirasa egy fajlba | P5, 8/8 |
+
+## Fuzzing: `make fuzz` (clang libFuzzer)
+
+Minden mas teszt - a 295 kezzel irt forgatokonyv es a 8 veletlen bejaras is -
+**ervenyes vagy legalabbis elkepzelt** bemenetekkel dolgozik. A fuzzer nem:
+kifejezetten olyan bajtsorozatokat keres, amikre senki nem gondolt, es a
+lefedettseg alapjan tanul, merre erdemes menni.
+
+| Celpont | Mit elemez | Ki irja a bemenetet |
+|---|---|---|
+| `fuzz-post` | a POST urlap-elemzo | **barki, aki AP modban csatlakozik** |
+| `fuzz-secret` | `decodeSecretInPlace()` / `encodeSecret()` | a `/pass.txt` (serult vagy atirt) |
+| `fuzz-evlog` | az `/evlog.bin` betolto | a naplofajl (felbeszakadt iras) |
+| `fuzz-config` | `readConfigValue()`, `fileMatches()` | a negy konfig fajl |
+
+A **`fuzz-post` a lenyeg**: ez az egyetlen felulet, aminek a tuloldalan
+tenyleges tamado ulhet. A masik harom olyan adatot olvas, amit maga az eszkoz
+irt ki - ott a "serult flash" a realis fenyegetes, nem a rosszindulat.
+
+Mind a negy **ASan + UBSan alatt** fut: a fuzzer onmagaban csak az
+osszeomlast latna, a csendes puffertulcsordulast nem.
+
+```
+make fuzz               minden celpont 30 mp
+FUZZSEC=600 make fuzz   hosszabban
+build/fuzz-post -runs=100000
+build/fuzz-post crash-<hash>    egy talalat ujrajatszasa
+```
+
+**MUTACIOVAL IGAZOLVA, hogy a negy harness tenyleg eleri a kodot** - egy
+fuzz-teszt legveszelyesebb hibaja az, ha nulla talalattal fut, mert nem jut el
+sehova:
+
+| Mutacio | Eredmeny |
+|---|---|
+| a POST-elemzo `candidate` pufferje 16 bajt + `strcpy` | **elkapva** 60 mp alatt (stack-buffer-overflow) |
+| az evlog-betoltobol kivéve a sajat `count` hatarellenorzes | **elkapva** 60 mp alatt |
+| `decodeSecretInPlace`: tulcsordulas CSAK a `v1:9f` bemenetnel | **elkapva** 50 mp alatt (a fuzzer maga talalta meg a prefixet) |
+| `readConfigValue`: tulcsordulas CSAK egy adott pufferméretnél | **elkapva** 50 mp alatt |
+
+Egy otodik mutacio **NEM** bukott el, es ezt is kimondjuk: a `d.ssid` tulirasa
+a `ConfigDraft` **strukturan belul** marad, azt pedig az ASan alapertelmezesben
+nem latja. Ez a modszer valos hatara, nem a harnesse.
+
+### A meres hatara
+
+Ez **hoston** fut, stub Arduino API-k felett. Amit megfog: puffertulcsordulas,
+hataron tuli olvasas, definialatlan viselkedes, vegtelen ciklus - **a sajat
+kodunkban**. Amit nem: a valodi ESPAsyncWebServer / lwIP hibait (nem a mi
+kodunk, es nem is forognak itt), es az `IPAddress::fromString()`-et sem, mert az
+a hoston stub - azt fuzzolni a sajat stubunk teszteles lenne, nem a firmware-e.
+
+## A ket task tenyleges osszefonasa (ILV1-ILV5)
+
+A program **ket taskon** fut: a loop task mer, dont es alszik, az async_tcp
+task futtatja a HTTP kezeloket. A ket task kozos allapoton dolgozik
+(`savingConfig`, `restartPending`, `restartAt`, `apDeadline`), es epp ezert van
+a `portMUX` spinlock. Eddig azt bizonyitottuk, hogy a kritikus szakasz sosem
+agyazodik egymasba - azt viszont soha, hogy a ket task **tetszoleges pontokon
+valtakozva** is helyesen viselkedik.
+
+**Hol vannak a valodi megszakitasi pontok?** Egyetlen magon a taskvaltas nem
+barhol tortenik, hanem ott, ahol az utemezo szohoz jut:
+
+| Horog | Irany | Mit modellez |
+|---|---|---|
+| `g_onDelay` | loop() → HTTP kezelo | a loop blokkolo szakaszai; az async_tcp magasabb prioritasu (3 vs 1), tehat bevag |
+| `g_onFsWrite` | HTTP kezelo → loop() | a flash-iras ideje; ilyenkor az async_tcp **mar a zar birtokaban van**, de meg nem engedte el |
+
+| | Mit rogzit |
+|---|---|
+| ILV1 | `/ping` a loop **minden** `delay()`-eben (3999 osszefonas) - a keep-alive a versenyben is hat |
+| ILV2 | `/log` olvasas a naplo irasa kozben - a gyuru ep marad |
+| ILV3 | POST mentes a loop koze ekelve; az injektalas abbahagyasa utan a halasztott ujrainditas **pontosan egyszer** fut le, a zarat megszerezve |
+| ILV4 | a loop a **flash-iras kozben** - a lejart AP hatarido ellenere sem alszik el |
+| ILV5 | mindket irany egyszerre, veletlen suruseggel |
+
+### Amit az ILV4 megmutatott
+
+Azt akartam merni, hogy a mentes alatt elalvo loop atmegy-e a
+`lockConfigBeforeShutdown()`-on. **Nem alszik el, es nem is jut el a zarig**: a
+`handleConfigMode()` mar a DONTESNEL kizarja.
+
+```cpp
+if (!configWriteInProgress() && !restartRequested() &&
+    (int32_t)(currentMillis - apDeadline) >= 0) { apSleep(); }
+```
+
+A vedelem tehat **ket retegu**: az elso itt van (a loop ra sem lep az alvas
+agara), a masodik a `lockConfigBeforeShutdown()`, ami azokat az utakat fogja
+(gomb, watchdog), amik nem ezen a felteteten at jonnek. Az ILV4 az elso reteget
+rogziti - es kulon ellenorzi, hogy az ablak tenyleg **nyitva volt** (a zar allt,
+a hatarido lejart, a loop tenyleg futott), kulonben az allitas ures lenne.
+
+### Mutacioval igazolva
+
+| Mutacio | Elkapja |
+|---|---|
+| a `!configWriteInProgress()` feltetel kivéve az alvas-dontesbol | **ILV4** (es a kilepes tenyleg bekovetkezik) |
+| a halasztott ujrainditas hatarideje sosem jar le | **ILV3** |
+| beagyazott `portENTER_CRITICAL` a naplozasban | **10 ellenorzes** az ILV-kben |
