@@ -301,3 +301,54 @@ Mutacioval igazolva, mind a negy a **helyes** tulajdonsagot buktatja:
 | `MAX_CYCLE_INDEX` 4 -> 5 | P2, 8/8 |
 | a jelszo kiirasa a soros portra | P6, 8/8 |
 | a jelszo kiirasa egy fajlba | P5, 8/8 |
+
+## Fuzzing: `make fuzz` (clang libFuzzer)
+
+Minden mas teszt - a 295 kezzel irt forgatokonyv es a 8 veletlen bejaras is -
+**ervenyes vagy legalabbis elkepzelt** bemenetekkel dolgozik. A fuzzer nem:
+kifejezetten olyan bajtsorozatokat keres, amikre senki nem gondolt, es a
+lefedettseg alapjan tanul, merre erdemes menni.
+
+| Celpont | Mit elemez | Ki irja a bemenetet |
+|---|---|---|
+| `fuzz-post` | a POST urlap-elemzo | **barki, aki AP modban csatlakozik** |
+| `fuzz-secret` | `decodeSecretInPlace()` / `encodeSecret()` | a `/pass.txt` (serult vagy atirt) |
+| `fuzz-evlog` | az `/evlog.bin` betolto | a naplofajl (felbeszakadt iras) |
+| `fuzz-config` | `readConfigValue()`, `fileMatches()` | a negy konfig fajl |
+
+A **`fuzz-post` a lenyeg**: ez az egyetlen felulet, aminek a tuloldalan
+tenyleges tamado ulhet. A masik harom olyan adatot olvas, amit maga az eszkoz
+irt ki - ott a "serult flash" a realis fenyegetes, nem a rosszindulat.
+
+Mind a negy **ASan + UBSan alatt** fut: a fuzzer onmagaban csak az
+osszeomlast latna, a csendes puffertulcsordulast nem.
+
+```
+make fuzz               minden celpont 30 mp
+FUZZSEC=600 make fuzz   hosszabban
+build/fuzz-post -runs=100000
+build/fuzz-post crash-<hash>    egy talalat ujrajatszasa
+```
+
+**MUTACIOVAL IGAZOLVA, hogy a negy harness tenyleg eleri a kodot** - egy
+fuzz-teszt legveszelyesebb hibaja az, ha nulla talalattal fut, mert nem jut el
+sehova:
+
+| Mutacio | Eredmeny |
+|---|---|
+| a POST-elemzo `candidate` pufferje 16 bajt + `strcpy` | **elkapva** 60 mp alatt (stack-buffer-overflow) |
+| az evlog-betoltobol kivéve a sajat `count` hatarellenorzes | **elkapva** 60 mp alatt |
+| `decodeSecretInPlace`: tulcsordulas CSAK a `v1:9f` bemenetnel | **elkapva** 50 mp alatt (a fuzzer maga talalta meg a prefixet) |
+| `readConfigValue`: tulcsordulas CSAK egy adott pufferméretnél | **elkapva** 50 mp alatt |
+
+Egy otodik mutacio **NEM** bukott el, es ezt is kimondjuk: a `d.ssid` tulirasa
+a `ConfigDraft` **strukturan belul** marad, azt pedig az ASan alapertelmezesben
+nem latja. Ez a modszer valos hatara, nem a harnesse.
+
+### A meres hatara
+
+Ez **hoston** fut, stub Arduino API-k felett. Amit megfog: puffertulcsordulas,
+hataron tuli olvasas, definialatlan viselkedes, vegtelen ciklus - **a sajat
+kodunkban**. Amit nem: a valodi ESPAsyncWebServer / lwIP hibait (nem a mi
+kodunk, es nem is forognak itt), es az `IPAddress::fromString()`-et sem, mert az
+a hoston stub - azt fuzzolni a sajat stubunk teszteles lenne, nem a firmware-e.

@@ -80,6 +80,27 @@ jobs:
         working-directory: test
         run: make covgate
 
+  fuzz:
+    name: Fuzzing (libFuzzer, negy bemenet-elemzo celpont)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A libFuzzer es a sanitizer futtatokornyezete kulon csomag; a clang
+      # maga fent van az ubuntu-latest kepen, de a libclang_rt.* nincs.
+      - name: A clang sanitizer/fuzzer futtatokornyezete
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends clang libclang-rt-dev
+
+      # KULON JOB, mert ez az EGYETLEN ellenorzes, ami idore fut, nem
+      # befejezesre: a fuzzer addig keres, amig hagyjuk. 40 mp/celpont a CI-ban
+      # eleg ahhoz, hogy egy UJ, durva hiba kiessen (a mutacios probaknal a
+      # negybol harom 60 mp alatt megvolt), a hosszabb keresest pedig kezzel
+      # kell inditani. Ha ez a job elhasal, a talalatot a libFuzzer kiirja es a
+      # bemenetet is elmenti - az ujrajatszhato.
+      - name: make fuzz
+        working-directory: test
+        run: FUZZSEC=40 make fuzz
+
   firmware-build:
     name: ESP32-C3 firmware forditas (XIAO)
     runs-on: ubuntu-latest

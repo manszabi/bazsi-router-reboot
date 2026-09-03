@@ -345,11 +345,17 @@ void portENTER_CRITICAL(portMUX_TYPE*) {
   if (g_criticalDepth > g_criticalMaxDepth) g_criticalMaxDepth = g_criticalDepth;
 }
 void portEXIT_CRITICAL(portMUX_TYPE*) { g_criticalDepth--; }
+// A strlcpy-t a glibc 2.38 OTA maga is biztositja. Ahol megvan, NE definialjuk
+// ujra: a ket deklaracio kivetel-specifikacioja nem egyezik (a clang hibat ad
+// ra, a gcc a masik iranyban), es a rendszer sajat, szabvanyos valtozata
+// amugy is pontosabb modellje annak, amit az ESP32 toolchain hasznal.
+#if !(defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 38)))
 size_t strlcpy(char* d, const char* s, size_t n) {
   size_t l = strlen(s);
   if (n) { size_t c = l >= n ? n - 1 : l; memcpy(d, s, c); d[c] = 0; }
   return l;
 }
+#endif
 
 // --- Ido (NTP) modell ------------------------------------------------------
 uint32_t g_epochNow = 0;

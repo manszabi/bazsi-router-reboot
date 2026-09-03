@@ -11,3 +11,7 @@
 *.bin
 *.elf
 *.map
+test/corpus/
+test/crash-*
+test/leak-*
+test/timeout-*
