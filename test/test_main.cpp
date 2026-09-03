@@ -8594,6 +8594,65 @@ static void scRST3() {
   CHECK(f.count == evNextMost, "es MINDEN bejegyzes bekerult - semmi nem veszett el");
 }
 
+static int g_wearWrites = 0;
+static void wearHook() { g_wearWrites++; }
+
+static void scWEAR() {
+  // A FLASH KOPASA. Nem elmeleti kerdes: ez az eszkoz evekig fut felugyelet
+  // nelkul, es a LittleFS/esp_littlefs NEM ad vissza torlesi ciklusszamot -
+  // vagyis a tenyleges kopas nem olvashato ki. Amit MERNI lehet, az az irasok
+  // szama, es a legfontosabb allitas ott van, ahol a legtobb ido telik:
+  // MUKODO INTERNET MELLETT AZ ESZKOZ SEMMIT NEM IR A FLASHBE.
+  //
+  // AZ ELSO MERESEM EZT ELRONTOTTA: a stub alapertelmezett HTTP valasza
+  // "Microsoft NCSI", az ELSO vegpont viszont "Microsoft Connect Test"-et var -
+  // vagyis az alapertelmezes BUKO tesztet ad. A "boldog ut" igy valojaban a
+  // hibautat merte: 14 perc alatt 5 naplo-mentest, 10 irast.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setFilesystemReady(true);
+  g_httpBody = "Microsoft Connect Test";   // amit az ELSO vegpont VAR
+  g_wearWrites = 0; g_onFsWrite = wearHook;
+  setup();
+  const uint32_t kezdet = g_millis;
+  int guard = 0;
+  try { while (++guard < 400000) loop(); } catch (...) {}
+  g_onFsWrite = nullptr;
+  const double percek = (g_millis - kezdet) / 60000.0;
+  printf("     [info] mukodo internet: %.1f perc alatt %d flash-iras\n",
+         percek, g_wearWrites);
+  CHECK(percek > 30.0, "a meres tenyleg hosszu futast fedett le");
+  CHECK(deviceMode == (DeviceMode)0, "es az eszkoz vegig monitor modban volt");
+  CHECK(g_wearWrites == 0,
+        "MUKODO INTERNET MELLETT NULLA flash-iras - a flash nem kopik");
+
+  // A HIBAUTON viszont ir - es ez igy helyes: ott van mit naplozni. A FELSO
+  // KORLAT szamit: ha egy kor sok irast adna, egy tartos hiba evek alatt
+  // tenyleg elkoptatna a flasht.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setFilesystemReady(true);
+  g_httpCode = 503; g_httpBody = "nincs net"; pingSim.ok = false;
+  g_wearWrites = 0; g_onFsWrite = wearHook;
+  try { setup(); } catch (...) {}
+  guard = 0;
+  int alvasok = 0;
+  try { while (++guard < 400000) loop(); }
+  catch (DeepSleepSignal&) { alvasok++; }
+  catch (RestartSignal&) {}
+  g_onFsWrite = nullptr;
+  printf("     [info] halott internet: egy korben %d flash-iras (%d alvas)\n",
+         g_wearWrites, alvasok);
+  CHECK(g_wearWrites > 0, "a hibauton viszont menti a naplot");
+  // A FELSO KORLAT LEVEZETVE, nem talalgatva: egy korben legfeljebb
+  // maxfailureEvents-1 = 4 router reset tortenik (mindegyik elott mentes),
+  // plusz egy mentes az alvas elott = 5 mentes. Egy mentes 2 iras (fejlec +
+  // bejegyzesek), tehat 10. A 12-es korlat ad egy kis rest, de megfogja, ha
+  // egy uj mentesi pont eszrevetlenul bekerulne.
+  CHECK(g_wearWrites <= 12,
+        "korlatosan: 5 mentes x 2 iras (4 router reset + 1 alvas)");
+  printf("     [info] ez 33 ujraprobalkozasi korre (2 nap) legfeljebb %d iras\n",
+         g_wearWrites * 33);
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -8918,6 +8977,7 @@ static const Scenario kScenarios[] = {
   { "ILV5: mindket irany egyszerre, veletlen suruseggel", scILV5 },
 
   // --- A maradek hibaagak ---
+  { "WEAR: mukodo internet mellett nulla flash-iras", scWEAR },
   { "RST1: heap miatti ujraindulas nem veszit naplobejegyzest", scRST1 },
   { "RST2: watchdog reset nem veszit naplobejegyzest", scRST2 },
   { "RST3: kritikus heapnel a sikertelen mentes sem art", scRST3 },
