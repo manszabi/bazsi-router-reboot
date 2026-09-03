@@ -1047,7 +1047,9 @@ void lockConfigBeforeShutdown() {
   if (acquired) {
     Serial.println("A fajliras befejezodott.");
   } else {
-    Serial.println("FIGYELEM: a mentes 5 mp alatt sem fejezodott be, tovabblepunk.");
+    Serial.print("FIGYELEM: a mentes ");
+    Serial.print(SAVE_WAIT_MAX_MS / 1000);
+    Serial.println(" mp alatt sem fejezodott be, tovabblepunk.");
   }
 }
 
@@ -1421,7 +1423,14 @@ void retrySleep() {
   Serial.print(rtcRetryRounds);
   Serial.print(" / ");
   Serial.println(MAX_RETRY_ROUNDS);
-  Serial.println("Alvas 1 orara, utana automatikus ujraprobalkozas.");
+  // A HOSSZ A KONSTANSBOL, nem beegetve. Ugyanezt az erteket az
+  // internetFailSleep() mar igy irja ki - ket alvas, ket kulonbozo modszer
+  // ugyanarra a szamra: a SLEEP_DURATION_US egy jovobeli modositasa utan az
+  // egyik sor hazudott volna. A soros naplo a fo diagnosztikai eszkoz, ott ez
+  // nem engedheto meg.
+  Serial.print("Alvas ");
+  Serial.print((unsigned long)(SLEEP_DURATION_US / 60000000ULL));
+  Serial.println(" percre, utana automatikus ujraprobalkozas.");
   logEvent(EV_SLEEP, 1);
   enterDeepSleep(SLEEP_DURATION_US);   // a naplot az enterDeepSleep() menti
 }
@@ -1482,7 +1491,8 @@ void apSleep() {
 // múlik el, ezért értelmetlen lenne óránként felébredni és újra villogni.
 void fatalSleep() {
   printUptime();
-  Serial.println("5 perc hibajelzes utan az ESP elalszik.");
+  Serial.print(FATAL_SLEEP_AFTER_MS / 60000);
+  Serial.println(" perc hibajelzes utan az ESP elalszik.");
   Serial.println("Idozitett ebresztes NINCS - reset gomb vagy aramtalanitas kell.");
   logEvent(EV_SLEEP, 4);
   enterDeepSleep(0);
@@ -2041,7 +2051,8 @@ void clearHealthyRunCounters(uint32_t currentMillis) {
   if (rtcWdtResets != 0 && currentMillis - timing.startMillis >= WDT_COUNTER_CLEAR_MS) {
     rtcWdtResets = 0;
     printUptime();
-    Serial.println("1 ora hibatlan mukodes - a watchdog szamlalo nullazva.");
+    Serial.print(WDT_COUNTER_CLEAR_MS / 60000);
+    Serial.println(" perc hibatlan mukodes - a watchdog szamlalo nullazva.");
   }
   // Ugyanez a heap miatti ujrainditasok szamlalojara: egy ora hibatlan
   // mukodes utan a korabbi sorozat mar nem szamit. Kulon feltetel, hogy a
@@ -2049,7 +2060,8 @@ void clearHealthyRunCounters(uint32_t currentMillis) {
   if (rtcHeapRestarts != 0 && currentMillis - timing.startMillis >= WDT_COUNTER_CLEAR_MS) {
     rtcHeapRestarts = 0;
     printUptime();
-    Serial.println("1 ora hibatlan mukodes - a heap ujrainditas szamlalo nullazva.");
+    Serial.print(WDT_COUNTER_CLEAR_MS / 60000);
+    Serial.println(" perc hibatlan mukodes - a heap ujrainditas szamlalo nullazva.");
   }
 }
 

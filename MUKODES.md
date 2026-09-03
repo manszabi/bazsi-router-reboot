@@ -1203,7 +1203,7 @@ arányosan romlik; a védelem hat sor, és nincs hátránya. (Mérve: `LOG4`.)
 ## 16. A forráskód szerkezete
 
 A program **nyolc fordítási egység**: a `bazsi_router_reboot.ino` és hét modul
-a sketch mappájában. Összesen ~4643 sor, 98 függvény; **43%-a komment** – a
+a sketch mappájában. Összesen ~4700 sor, 98 függvény; **44%-a komment** – a
 legtöbb egy-egy döntés *indoklása*, nem a kód újramondása.
 
 > Miért nem egy fájl? Mert egy 4100 soros `.ino`-ban nincs fordító által
@@ -1232,12 +1232,12 @@ Fentről lefelé: minden modul csak a nála lentebb állóktól függ. A `config
 | **`limits_config.h`** | 16 | a konfig mezők méretkorlátai | 3 konstans, se állapot, se függvény |
 | **`strutil`** | 34 | `trimInPlace()` | 1 függvény |
 | **`secret`** | 123 | a jelszó összekeverése a flashben | `encodeSecret()`, `decodeSecretInPlace()` – a `secretSeed()`, `xorshift32()`, `hexVal()` **belső** |
-| **`sync`** | 252 | a két task közti osztott állapot | 7 függvény + `evLogMux` – a `savingConfig`, `restartPending`, `restartAt` **belső** |
+| **`sync`** | 206 | a két task közti osztott állapot | 7 függvény + `evLogMux` – a `savingConfig`, `restartPending`, `restartAt` **belső** |
 | **`configstore`** | 243 | a négy mentett érték, a fájljaik, a LittleFS | a négy puffer, `readConfigValue()`, `writeConfigValue()`, `clearConfigValue()`, `initLittleFS()`, `filesystemReady()` |
-| **`eventlog`** | 574 | a diagnosztikai napló **és** a valós idő (NTP) | `logEvent()`, `saveEventLog()`, `load*()`, `eventName()`, `formatEpoch()`, `ensureNtp()` – a `startNtp()`, `nowEpoch()` **belső** |
+| **`eventlog`** | 620 | a diagnosztikai napló **és** a valós idő (NTP) | `logEvent()`, `saveEventLog()`, `load*()`, `eventName()`, `formatEpoch()`, `ensureNtp()` – a `startNtp()`, `nowEpoch()` **belső** |
 | **`netprobe`** | 277 | HTTP végpont-tesztek és ICMP ping | `testInternetHTTP()`, `testInternetPing()` – a négy korlátozott olvasó **belső** |
-| **`webportal`** | 733 | az AP beállító portál HTTP felülete | **mindössze 3**: `startWebPortal()`, `stopWebPortal()`, `touchApDeadline()` |
-| **`app_hooks.h`** | 49 | amit a főmodul ad a moduloknak | `feedWatchdog()`, `resetbutton()`, `wifiresetbutton()`, `waitWithButtons()`, `printUptime()`, `diagCounters()` |
+| **`webportal`** | 747 | az AP beállító portál HTTP felülete | **mindössze 3**: `startWebPortal()`, `stopWebPortal()`, `touchApDeadline()` |
+| **`app_hooks.h`** | 51 | amit a főmodul ad a moduloknak | `feedWatchdog()`, `resetbutton()`, `wifiresetbutton()`, `waitWithButtons()`, `printUptime()`, `diagCounters()` |
 
 > A `webportal` kapta a legszorosabb határt, mert ez a program
 > **biztonságkritikus felülete**: ezen megy be a Wi-Fi jelszó. A POST-kezelő,
@@ -1248,7 +1248,7 @@ Fentről lefelé: minden modul csak a nála lentebb állóktól függ. A `config
 > az a rossz határhúzás első jele.** Egyszer már meg is történt – a
 > `filesystemReady()` átmenetileg ide került, majd oda, ahová való (`configstore`).
 
-### A főmodul (`bazsi_router_reboot.ino`, 2337 sor, 49 függvény)
+### A főmodul (`bazsi_router_reboot.ino`, ~2400 sor, 49 függvény)
 
 Ami maradt: a **döntéshozatal**. A modulok mérnek és tárolnak, a főmodul
 eldönti, mi következik.
