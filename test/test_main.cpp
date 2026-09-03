@@ -155,8 +155,7 @@ constexpr uint8_t EVLOG_SIZE_C = 32;      // eventlog.h EVLOG_SIZE
 constexpr size_t  SSID_MAX_LEN_C = 32;    // limits_config.h SSID_MAX_LEN
 constexpr size_t  IPSTR_MAX_LEN_C = 15;   // limits_config.h IPSTR_MAX_LEN
 constexpr uint16_t EVFILE_SIZE_C = 128;   // eventlog.h EVFILE_SIZE
-constexpr size_t LOG_STREAM_BUFFER_C = 8192;   // webportal.cpp LOG_STREAM_BUFFER
-constexpr uint16_t LOG_PAGE_MAX_ROWS_C = 48;   // webportal.cpp LOG_PAGE_MAX_ROWS
+
 // Az /evlog.bin fejlece. BAJTROL BAJTRA egyeznie kell az eventlog.h-beli
 // EvFileHeader-rel: a betolto sajat hatarellenorzeset csak igy lehet
 // kozvetlenul, a hivotol fuggetlenul probara tenni.
@@ -184,6 +183,7 @@ bool loadEventLogHeader(EvFileHeader& fej);
 bool loadEventLogEntries(const EvFileHeader& fej, EventEntry* ki);
 bool loadEventLogRange(const EvFileHeader& fej, uint32_t tol, uint16_t db, EventEntry* ki);
 void printEventLogs();
+void checkWatchdogResets();
 bool gatewayUnreachable();
 extern std::set<std::string> g_fsDirs;
 extern std::string g_serialIn;
@@ -5345,15 +5345,16 @@ static void scLOG7() {
          "(%zu fajl + %zu RTC)\n", (unsigned)meret, sorok, fajlSor, rtcSor);
   CHECK(req._code == 200, "a lap kiszolgalodik");
   CHECK(rtcSor == EVLOG_SIZE_C, "mind a 32 RTC-sor ott van");
-  CHECK(sorok == LOG_PAGE_MAX_ROWS_C, "a lap a legfrissebb 48 sorra korlatozodik");
-  CHECK(fajlSor == LOG_PAGE_MAX_ROWS_C - EVLOG_SIZE_C,
-        "a maradek helyet a fajl VEGE tolti fel");
-  CHECK(req._body.find("a soros porton") != std::string::npos,
-        "es a lap kimondja, hogy a teljes naplo a soros porton van");
+  CHECK(fajlSor == EVFILE_SIZE_C, "es mind a 128 fajl-sor is - nincs tobbe ablak");
+  CHECK(sorok == EVFILE_SIZE_C + EVLOG_SIZE_C, "osszesen 160 sor");
   // A KEZDO PUFFER. A meret alapjan allitjuk be a webportal.cpp-ben; ez a
   // CHECK azt vedi, hogy a lap ne nojon eszrevetlenul a puffer fole.
-  CHECK(meret < LOG_STREAM_BUFFER_C,
-        "es belefer a stream kezdo pufferebe (egyetlen foglalas)");
+  // A PUFFER A TARTALOMHOZ VAN MERETEZVE. Ez a CHECK azt vedi, hogy a becsles
+  // ne csusszon a valosag ala - kulonben a stream soronkent ujraallokalna.
+  const size_t becsult = 2600 + sorok * 120;
+  printf("     [info] becsult puffer %zu bajt, tenyleges lap %u bajt\n",
+         becsult, (unsigned)meret);
+  CHECK(meret < becsult, "a becsult puffer fedezi a tenyleges lapot");
 }
 
 static void scLOG8() {
@@ -8331,6 +8332,268 @@ static void scCOV8() {
   CHECK(serialHas("=== ESEMENYNAPLO ==="), "utana viszont lefut");
 }
 
+static void scGAP() {
+  // A FAJL ELVESZ, DE AZ RTC TULELI. (LittleFS ujraformazas, torolt fajl,
+  // flash-hiba.) Ilyenkor a "csak a mentes ota" szabaly ELREJTENE azokat az
+  // RTC bejegyzeseket, amikrol azt HISSZUK, hogy a fajlban vannak - pedig
+  // az a fajl mar nincs meg.
+  //
+  // A SORREND SZAMIT A TESZTBEN: a portalt ELOSZOR inditjuk el, mert a
+  // startConfigPortal() maga is ment (AP modba valtas elott), es igy
+  // ujrairna a fajlt, amit epp eltuntetni akarunk. (Az elso valtozatom ezen
+  // bukott el: 0 sort mert, es nem a hibat merte, hanem a sajat sorrendjet.)
+  coldBoot(false, "", "", "", "");
+  setFilesystemReady(true);
+  startConfigPortal();                       // a /log kezelo alljon rendelkezesre
+  for (int i = 0; i < 10; i++) logEvent((EventCode)2, (uint16_t)(100 + i));
+  CHECK(saveEventLog("mentes"), "10 bejegyzes mentve");
+  const uint32_t mentettEddig = rtcSavedEvNext;
+  CHECK(mentettEddig >= 10, "a jelzo szerint mentettunk");
+  for (int i = 0; i < 3; i++) logEvent((EventCode)3, (uint16_t)(200 + i));
+
+  // ...es most a FAJL eltunik, az RTC viszont ep marad.
+  g_fs.erase("/evlog.bin");
+  AsyncWebServerRequest req; g_handlers["/log#1"](&req);
+  const std::string& b = req._body;
+  size_t rtcSor = 0, p = 0;
+  while ((p = b.find("<td>RTC</td>", p)) != std::string::npos) { rtcSor++; p++; }
+  printf("     [info] az RTC-ben %u bejegyzes van, a lap %zu RTC-sort mutat\n",
+         (unsigned)rtcEvNext, rtcSor);
+  CHECK(b.find("<td>100</td>") != std::string::npos,
+        "a fajl elvesztese utan a REGEBBI RTC bejegyzesek is latszanak");
+  CHECK(rtcSor == rtcEvNext, "mind a meglevo RTC bejegyzes megjelenik");
+
+  // Es ugyanez a soros LOG parancson.
+  g_serialLog.clear();
+  printEventLogs();
+  CHECK(serialHas("-- fajl: nincs, vagy nem olvashato"), "a LOG is latja, hogy nincs fajl");
+  char vart[48];
+  snprintf(vart, sizeof(vart), "-- RTC (a mentes ota): %u bejegyzes", (unsigned)rtcEvNext);
+  CHECK(serialHas(vart), "es a soros kiiras is a TELJES RTC naplot adja");
+}
+
+static void scGAP2() {
+  // A MASIK IRANY: a FAJL eli tul, az RTC nem (aramszunet). Ilyenkor a
+  // rtcSavedEvNext nullarol indul, a fajl viszont egy REGEBBI "eletbol" valo,
+  // NAGYOBB evNextAtSave-et hordoz. Ha a lap a fajl szamat hinne el, a friss
+  // bejegyzeseket rejtene el; ha a jelzot, ketszerezne. A kettobol a KISEBB
+  // az egyetlen helyes alap.
+  coldBoot(false, "", "", "", "");
+  setFilesystemReady(true);
+  startConfigPortal();
+  for (int i = 0; i < 20; i++) logEvent((EventCode)2, (uint16_t)(300 + i));
+  CHECK(saveEventLog("elozo elet"), "20 bejegyzes mentve");
+  EvFileHeader f; memset(&f, 0, sizeof(f));
+  CHECK(loadEventLogHeader(f), "a fajl olvashato");
+  CHECK(f.evNextAtSave >= 20, "a fajl 20-ig tart");
+
+  // --- ARAMSZUNET: a flash tuleli, az RTC nem ---
+  const std::string flash = g_fs["/evlog.bin"];
+  coldBoot(false, "", "", "", "");
+  g_fs["/evlog.bin"] = flash;
+  setFilesystemReady(true);
+  startConfigPortal();
+  rtcEvMagic = 0;                         // az RTC torlodott
+  logEvent((EventCode)1, 42);             // egyetlen friss BOOT
+  CHECK(rtcEvNext == 1, "az RTC-ben egyetlen friss bejegyzes");
+  CHECK(rtcSavedEvNext == 0, "es a 'mar mentettuk' jelzo nullarol indul");
+
+  AsyncWebServerRequest req; g_handlers["/log#1"](&req);
+  const std::string& b = req._body;
+  size_t rtcSor = 0, fajlSor = 0, p = 0;
+  while ((p = b.find("<td>RTC</td>", p)) != std::string::npos) { rtcSor++; p++; }
+  p = 0;
+  while ((p = b.find("<td>fajl</td>", p)) != std::string::npos) { fajlSor++; p++; }
+  printf("     [info] %zu fajl-sor + %zu RTC-sor\n", fajlSor, rtcSor);
+  CHECK(rtcSor == 1, "a friss bejegyzes NEM veszik el (a fajl szama nem nyomja el)");
+  CHECK(b.find("<td>42</td>") != std::string::npos, "es tenyleg ott is van");
+  CHECK(fajlSor == 20, "a fajl 20 sora is megvan - ketszerezes nelkul");
+}
+
+// Egy SZOFTVERES ujraindulas modellje: a flash ES az RTC_NOINIT is tulel,
+// csak a RAM torlodik. (A coldBoot() a g_fs-t is torli - az "uj eszkoz"-t
+// modellez -, ezert a fajlt es az RTC naplot kezzel visszatesszuk.)
+static EventEntry g_rstMentes[EVLOG_SIZE_C];
+static void szoftveresReboot(const std::string& flash) {
+  const uint32_t evMagic = rtcEvMagic, evNext = rtcEvNext, saved = rtcSavedEvNext;
+  memcpy(g_rstMentes, rtcEvents, sizeof(g_rstMentes));
+  const uint32_t wdtMagic = rtcWdtMagic, wdtResets = rtcWdtResets;
+  coldBoot(false, "", "", "", "");
+  g_fs["/evlog.bin"] = flash;
+  setFilesystemReady(true);
+  rtcEvMagic = evMagic; rtcEvNext = evNext; rtcSavedEvNext = saved;
+  memcpy(rtcEvents, g_rstMentes, sizeof(g_rstMentes));
+  rtcWdtMagic = wdtMagic; rtcWdtResets = wdtResets;
+}
+
+static void scRST1() {
+  // HEAP MIATTI ONKENTES UJRAINDULAS - elveszik-e naplobejegyzes?
+  //
+  // A VIZSGALAT KOZVETLENUL AZ ALLAPOTOT NEZI, nem a /log lapot. Az elso
+  // valtozatom a lapon at merte, de ahhoz startConfigPortal() kellett - az
+  // viszont (a) maga is MENT, tehat a kerdeses bejegyzesek meres elott a
+  // fajlba kerultek, es (b) MODE_CONFIG-ba tett, ahol a heap-vedelem
+  // SZANDEKOSAN nem indit ujra. A teszt igy a sajat beallitasat merte volna.
+  coldBoot(false, "", "", "", "");
+  setFilesystemReady(true);
+  CHECK(deviceMode == (DeviceMode)0, "MODE_MONITOR - itt engedett az ujraindulas");
+  for (int i = 0; i < 6; i++) logEvent((EventCode)2, (uint16_t)(400 + i));
+  CHECK(saveEventLog("alap"), "van mentett elozmeny");
+  const std::string flash = g_fs["/evlog.bin"];
+  const uint32_t mentettDb = rtcSavedEvNext;
+
+  // A heap osszeomlik -> onkentes ujraindulas (LOW HEAP + HEAP RESTART).
+  g_freeHeap = 8000; g_maxAllocHeap = 4000;
+  bool ujraindult = false;
+  for (int i = 0; i < 8 && !ujraindult; i++) {
+    g_millis += 11000;
+    try { checkHeap(g_millis); } catch (RestartSignal&) { ujraindult = true; }
+  }
+  CHECK(ujraindult, "a heap-vedelem tenyleg ujrainditott");
+  const uint32_t evNextElott = rtcEvNext;
+  const uint32_t ujDb = evNextElott - mentettDb;
+  printf("     [info] az ujrainditas elott %u uj bejegyzes keletkezett\n", (unsigned)ujDb);
+  CHECK(ujDb > 0, "es kozben naplozott is (LOW HEAP / HEAP RESTART)");
+
+  // A heap-ujraindulas MAGA IS MENT (vezerelt leallas, ugyanugy, mint az
+  // alvas), ezert a bejegyzesek MAR a flashben vannak - nem kell megvarni a
+  // kovetkezo mentesi pontot. Igy egy azonnali aramszunet sem viszi el epp
+  // azt a bizonyitekot, amiert az ujraindulas tortenik.
+  //
+  // A FLASH PILLANATKEPET EZERT ITT VESSZUK, nem a heap-osszeomlas elott.
+  // (Az elso valtozatom a REGI pillanatkepet tette vissza az "ujraindulas"
+  // utan, es igy a sajat visszaallitasat merte, nem a program mentesét.)
+  const std::string flashUtan = g_fs["/evlog.bin"];
+  CHECK(flashUtan != flash, "a fajl MAR az ujraindulas elott frissult");
+  CHECK(rtcSavedEvNext == evNextElott,
+        "es a 'meddig mentettuk' jelzo is elorelepett - minden mentve");
+
+  // --- SZOFTVERES UJRAINDULAS: az RTC_NOINIT TULEL ---
+  szoftveresReboot(flashUtan);
+  g_freeHeap = 180000; g_maxAllocHeap = 110000;
+  CHECK(rtcEvNext == evNextElott, "az RTC naplo szamlaloja tulelte az ujraindulast");
+
+  bool vanHeapRestart = false, vanLowHeap = false;
+  for (uint32_t i = mentettDb; i < evNextElott; i++) {
+    const uint8_t c = rtcEvents[i % EVLOG_SIZE_C].code;
+    if (c == 14) vanHeapRestart = true;   // EV_HEAP_RESTART
+    if (c == 13) vanLowHeap = true;       // EV_LOW_HEAP
+  }
+  CHECK(vanHeapRestart, "a HEAP RESTART bejegyzes tulelte az ujraindulast");
+  CHECK(vanLowHeap, "a LOW HEAP is megvan");
+
+  EvFileHeader f; memset(&f, 0, sizeof(f));
+  CHECK(loadEventLogHeader(f), "a fajl olvashato");
+  printf("     [info] a fajlban %u bejegyzes (mentve volt %u, uj %u)\n",
+         (unsigned)f.count, (unsigned)mentettDb, (unsigned)ujDb);
+  CHECK(f.count == mentettDb + ujDb,
+        "a fajl a regi ES az uj bejegyzeseket is tartalmazza - egy sem veszett el");
+  // ...es egy AZONNALI aramszunet (az RTC elvesztese) sem visz el semmit.
+  const std::string flashVegleges = g_fs["/evlog.bin"];
+  coldBoot(false, "", "", "", "");
+  g_fs["/evlog.bin"] = flashVegleges;
+  setFilesystemReady(true);
+  rtcEvMagic = 0;                      // az RTC torlodott
+  EvFileHeader f2; memset(&f2, 0, sizeof(f2));
+  CHECK(loadEventLogHeader(f2), "aramszunet utan is olvashato a fajl");
+  CHECK(f2.count == evNextElott,
+        "es a HEAP RESTART bizonyiteka az aramszunetet is tuleli");
+}
+
+static void scRST2() {
+  // WATCHDOG RESET - ugyanez, csak ott menteni SEM lehet.
+  coldBoot(false, "", "", "", "");
+  setFilesystemReady(true);
+  for (int i = 0; i < 4; i++) logEvent((EventCode)2, (uint16_t)(500 + i));
+  CHECK(saveEventLog("alap"), "van mentett elozmeny");
+  const std::string flash = g_fs["/evlog.bin"];
+  const uint32_t mentettDb = rtcSavedEvNext;
+  // Ket esemeny, amit MAR NEM mentunk el - ezek csak az RTC-ben vannak.
+  logEvent((EventCode)3, 601);
+  logEvent((EventCode)3, 602);
+  const uint32_t evNextElott = rtcEvNext;
+
+  // --- WATCHDOG RESET ---
+  szoftveresReboot(flash);
+  g_resetReason = ESP_RST_TASK_WDT;
+  checkWatchdogResets();                 // ez naploz egy WDT RESET-et
+  CHECK(rtcEvNext == evNextElott + 1, "a WDT RESET bejegyzes hozzaadodott");
+  CHECK(rtcSavedEvNext == mentettDb, "a 'meddig mentettuk' jelzo valtozatlan");
+
+  bool van601 = false, van602 = false, vanWdt = false;
+  for (uint32_t i = mentettDb; i < rtcEvNext; i++) {
+    const EventEntry& e = rtcEvents[i % EVLOG_SIZE_C];
+    if (e.param == 601) van601 = true;
+    if (e.param == 602) van602 = true;
+    if (e.code == 10) vanWdt = true;     // EV_WDT_RESET
+  }
+  CHECK(van601 && van602,
+        "a mentes UTAN, a lefagyas ELOTT keletkezett bejegyzesek megvannak");
+  CHECK(vanWdt, "es az uj WDT RESET bejegyzes is ott van");
+
+  CHECK(saveEventLog("lefagyas utan"), "a kovetkezo mentes lefut");
+  EvFileHeader f; memset(&f, 0, sizeof(f));
+  CHECK(loadEventLogHeader(f), "a fajl olvashato");
+  printf("     [info] a fajlban %u bejegyzes (mentve volt %u, mentetlen %u)\n",
+         (unsigned)f.count, (unsigned)mentettDb, (unsigned)(rtcEvNext - mentettDb));
+  CHECK(f.count == rtcEvNext, "mind a mentetlen bejegyzes a fajlba kerult");
+}
+
+static void scRST3() {
+  // BIZTONSAGOS-E MENTENI, AMIKOR A HEAP EPP KRITIKUS?
+  //
+  // A mentes NEM a heapbol dolgozik: az osszefuzo puffer (EVFILE_SIZE * 12 =
+  // 1536 bajt) a LOOP TASK VERMEN all, nem a heapen. Ami heapet ker, az a
+  // LittleFS fajlnyitas - nehany szaz bajt -, es a kritikus kuszob (12 000 B
+  // szabad, 6000 B legnagyobb tomb) nem nulla: ott meg van hely.
+  //
+  // DE MI VAN, HA MEGSEM SIKERUL? Ez a teszt EPP AZT az esetet allitja elo:
+  // kritikus heap ES sikertelen fajliras. A kovetelmeny nem az, hogy a mentes
+  // sikeruljon, hanem hogy a KUDARC NE ARTSON: az ujraindulas ettol meg
+  // menjen vegbe, az RTC naplo maradjon ep, es a jelzo NE lepjen elore
+  // (kulonben egy kesobbi mentes atugorna ezeket a bejegyzeseket).
+  coldBoot(false, "", "", "", "");
+  setFilesystemReady(true);
+  for (int i = 0; i < 5; i++) logEvent((EventCode)2, (uint16_t)(700 + i));
+  CHECK(saveEventLog("alap"), "van mentett elozmeny");
+  const std::string flash = g_fs["/evlog.bin"];
+  const uint32_t mentettDb = rtcSavedEvNext;
+
+  // Kritikus heap ES a fajliras csendben elbukik.
+  g_freeHeap = 8000; g_maxAllocHeap = 4000;
+  g_fsSilentWriteFail = true;
+  bool ujraindult = false;
+  for (int i = 0; i < 8 && !ujraindult; i++) {
+    g_millis += 11000;
+    try { checkHeap(g_millis); } catch (RestartSignal&) { ujraindult = true; }
+  }
+  g_fsSilentWriteFail = false;
+  printf("     [info] sikertelen mentes mellett is ujraindult: %s\n",
+         ujraindult ? "igen" : "NEM");
+  CHECK(ujraindult, "a sikertelen mentes NEM akadalyozza meg az ujraindulast");
+  CHECK(serialHas("NEM sikerult") || serialHas("verify FAILED")
+        || serialHas("rovid iras"), "es a kudarcot ki is mondja");
+  CHECK(rtcSavedEvNext == mentettDb,
+        "a jelzo NEM lep elore - a bejegyzesek 'mentetlennek' maradnak");
+  CHECK(rtcEvNext > mentettDb, "az RTC naplo tovabbra is ep, a bejegyzesek benne");
+
+  // ...es a kovetkezo, sikeres mentes potolja oket.
+  //
+  // A ZARAT ITT KEZZEL OLDJUK FEL. A lockConfigBeforeShutdown() SZANDEKOSAN
+  // nem engedi el (aki hivja, mar nem ter vissza) - a valodi ESP.restart()
+  // oldja fel azzal, hogy a RAM-ot nullazza. A harness-ben a restart csak egy
+  // kivetel, tehat ezt nekunk kell modelleznunk. (Enelkul a kovetkezo mentes
+  // a foglalt zaron bukna el, es a teszt a sajat modelljet merne.)
+  endConfigWrite();
+  g_freeHeap = 180000; g_maxAllocHeap = 110000;
+  g_fs["/evlog.bin"] = flash;          // a felig irt fajl helyett a regi
+  const uint32_t evNextMost = rtcEvNext;
+  CHECK(saveEventLog("potlas"), "a kesobbi mentes lefut");
+  EvFileHeader f; memset(&f, 0, sizeof(f));
+  CHECK(loadEventLogHeader(f), "a fajl olvashato");
+  CHECK(f.count == evNextMost, "es MINDEN bejegyzes bekerult - semmi nem veszett el");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -8655,6 +8918,11 @@ static const Scenario kScenarios[] = {
   { "ILV5: mindket irany egyszerre, veletlen suruseggel", scILV5 },
 
   // --- A maradek hibaagak ---
+  { "RST1: heap miatti ujraindulas nem veszit naplobejegyzest", scRST1 },
+  { "RST2: watchdog reset nem veszit naplobejegyzest", scRST2 },
+  { "RST3: kritikus heapnel a sikertelen mentes sem art", scRST3 },
+  { "GAP: elveszett fajl mellett az RTC teljes tartalma latszik", scGAP },
+  { "GAP2: aramszunet utan sem elrejtes, sem ketszerezes", scGAP2 },
   { "COV7: a naplofajl olvasasi hibaagai", scCOV7 },
   { "COV8: a soros olvasas vedelmi aga", scCOV8 },
   { "CMD1: a soros LOG parancs mindket naplot kiirja", scCMD1 },

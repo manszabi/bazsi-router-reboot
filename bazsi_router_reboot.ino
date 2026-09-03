@@ -700,6 +700,20 @@ void checkHeap(uint32_t now) {
   rtcCarryRetryRounds = rtcRetryRounds;
   rtcHeapRestarts++;
   logEvent(EV_HEAP_RESTART, (uint16_t)(szabad / 1024));
+
+  // A NAPLO KIIRASA MEG AZ UJRAINDULAS ELOTT.
+  //
+  // Az ESP.restart() az RTC_NOINIT teruletet NEM torli, tehat a bejegyzesek
+  // enelkul sem vesznenek el - de csak a KOVETKEZO mentesi pontig (router
+  // reset, alvas, AP mod) elnenek kizarolag RTC-ben. Egy aramszunet abban az
+  // ablakban epp azt a bizonyitekot vinne el, amiert ez az ujraindulas
+  // tortenik. Ez egy VEZERELT leallas, ugyanugy, mint az alvas - ott is
+  // mentunk.
+  //
+  // Ha a mentes a keves heap miatt megsem sikerul, az NEM vegzetes: a
+  // saveEventLog() ezt kezeli, es az RTC naplo attol meg ep. (Merve: RST1.)
+  saveEventLog("heap miatti ujraindulas elott");
+
   printUptime();
   Serial.printf("KRITIKUS: a szabad heap %u B (legnagyobb tomb %u B) %u meresen at.\n",
                 (unsigned)szabad, (unsigned)tomb, (unsigned)HEAP_CRIT_SAMPLES);

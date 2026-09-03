@@ -346,7 +346,8 @@ void printEventLogs() {
   //    keret elve itt is ervenyes.)
   uint16_t sorszam = 0;
   EvFileHeader fej;
-  if (loadEventLogHeader(fej)) {
+  const bool vanFajl = loadEventLogHeader(fej);
+  if (vanFajl) {
     Serial.printf("-- fajl (%s): %u bejegyzes\n", evLogPath, (unsigned)fej.count);
     EventEntry darab[8];
     uint32_t tol = 0;
@@ -375,7 +376,26 @@ void printEventLogs() {
   memcpy(masolat, rtcEvents, sizeof(masolat));
   portEXIT_CRITICAL(&evLogMux);
 
-  const uint32_t keletkezett = (evTotal > mentettEddig) ? (evTotal - mentettEddig) : 0;
+  // MEDDIG BIZHATUNK A "MAR MENTETTUK" JELZOBEN?
+  //
+  // A ket forras sorrendje SZERKEZETI, nem idobelyeg-alapu: a fajl a regebbi
+  // (oldest->newest kiegyenesitve), az RTC uj bejegyzesei pedig definicio
+  // szerint utana kovetkeznek. Ezert nem is kell idobelyeg a rendezeshez -
+  // es ez jo, mert NTP nelkul nem is lenne.
+  //
+  // A jelzo viszont csak akkor mond igazat, ha a FAJL TENYLEG MEGVAN. Ha
+  // elveszett (LittleFS ujraformazas, torolt fajl, flash-hiba), akkor azok a
+  // bejegyzesek, amikrol azt hisszuk, hogy "mar mentve vannak", SEHOL nem
+  // latszanak - pedig az RTC gyuruben ott vannak. Merve: 13 meglevo
+  // bejegyzesbol 3 latszott. (GAP teszt.)
+  //
+  // Es a fajl SAJAT allitasa (evNextAtSave) is szamit: aramszunet utan a
+  // rtcSavedEvNext nullarol indul, mikozben a fajl egy REGEBBI "eletbol" valo
+  // nagyobb szamot hordoz. A kettobol a KISEBB a helyes alap - igy sem
+  // elrejteni, sem ketszerezni nem tudunk.
+  const uint32_t alap = vanFajl
+      ? (mentettEddig < fej.evNextAtSave ? mentettEddig : fej.evNextAtSave) : 0;
+  const uint32_t keletkezett = (evTotal > alap) ? (evTotal - alap) : 0;
   const uint16_t ujDb = (uint16_t)(keletkezett < EVLOG_SIZE ? keletkezett : EVLOG_SIZE);
   Serial.printf("-- RTC (a mentes ota): %u bejegyzes\n", (unsigned)ujDb);
   for (uint16_t i = 0; i < ujDb; i++) {
