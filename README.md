@@ -416,7 +416,7 @@ bazsi-router-reboot/
 ├── webportal.h/.cpp          # az AP beállító portál HTTP felülete
 │
 ├── partitions_custom.csv     # Egyedi partíciós tábla: OTA nélkül, 512 KiB LittleFS
-├── test/                     # host tesztkészlet (295 forgatókönyv)
+├── test/                     # host tesztkészlet (328 forgatókönyv)
 └── LICENSE                   # MIT License
 ```
 
@@ -424,11 +424,11 @@ A Wi-Fi beállító weboldal a programba van fordítva (`FORM_HEAD` / `FORM_TAIL
 konstansok + a `sendConfigForm()` generálja a mezőket), a flash `.rodata`
 szekciójában – nincs külön feltöltendő `data/` mappa. A LittleFS-re így csak a
 négy konfigurációs fájl és a mentett napló kerül (`/ssid.txt`, `/pass.txt`,
-`/ip.txt`, `/gateway.txt`, `/evlog.bin` – ez utóbbi ~400 bájt).
+`/ip.txt`, `/gateway.txt`, `/evlog.bin` – ez utóbbi ~1,5 KB, 128 bejegyzés).
 
 ### A program felépítése
 
-**Nyolc fordítási egység**, ~4700 sor, **98 függvény**, 44%-a komment. A gerinc
+**Nyolc fordítási egység**, ~5100 sor, **104 függvény**, 44%-a komment. A gerinc
 három üzemmód (`MODE_MONITOR` / `MODE_CONFIG` / `MODE_FATAL`) és három állapot
 (`TESTING` → `SUCCESS`, vagy `TESTING` → `FAILURE`). `MODE_MONITOR`-ból van út
 a másik kettőbe, **visszaút nincs**.
@@ -1126,13 +1126,20 @@ szekvencia, AP portál, alvás/ébredés:
 
 ## 🔍 Diagnosztikai napló
 
-Az utolsó 32 esemény RTC memóriában, a beállító portál **`/log`** oldalán
-olvasható – soros kábel nélkül is. Túléli a deep sleepet, a watchdog resetet és
-a reset gombot.
+A napló **két rétegű**, és a kettő kiegészíti egymást:
+
+| | Mit őriz | Meddig |
+|---|---|---|
+| **RTC memória** | az utolsó **32** esemény | túléli a deep sleepet, a watchdog resetet, a reset gombot – az **áramszünetet nem** |
+| **LittleFS** (`/evlog.bin`) | az utolsó **128** esemény | mindent túlél, az áramszünetet is |
+
+Mindkettő olvasható a beállító portál **`/log`** oldalán – soros kábel nélkül
+is –, és **mindkettő** a soros porton, a **`LOG`** paranccsal.
 
 **Az áramszünetet is túléli** – mert a program a fontos pillanatokban kiírja a
 naplót a LittleFS-re is (`/evlog.bin`): **router reset előtt**, **AP módba
-váltás előtt**, és **minden alvás előtt**. Ezek azok a pontok, ahol vagy
+váltás előtt**, **minden alvás előtt**, és a **heap miatti önkéntes
+újraindulás előtt**. Ezek azok a pontok, ahol vagy
 hosszabb idő következik, vagy az eszköz beavatkozik – és mindkettő után könnyen
 jöhet egy áramszünet, ami az RTC naplót elvinné.
 
@@ -1182,20 +1189,44 @@ jöhet egy áramszünet, ami az RTC naplót elvinné.
 > meg, ritkán. Ha mégsem sikerülne a foglalás, a könyvtár nem omlik össze:
 > annyit ír ki, amennyi befér.
 
+### Soros parancsok
+
+A `/log` lap csak akkor érhető el, ha az eszköz **AP módba** került. Egy
+normálisan működő eszköztől a soros kábel az egyetlen út a naplóhoz – ezért van
+két parancs (115200 baud, sorvéggel lezárva):
+
+| Parancs | Mit csinál |
+|---|---|
+| **`LOG`** | kiírja a **teljes** naplót: előbb a fájlból (a hosszú történet), utána az RTC-ből azt, ami még nincs benne |
+| **`HELP`** | a parancsok listája |
+
+A feldolgozás **nem blokkol** – csak a már megérkezett bájtokat olvassa ki, egy
+félig beírt sor a következő `loop()` iterációban folytatódik –, és `MODE_FATAL`-ban
+is működik: épp ott van a legnagyobb szükség a naplóra.
+
 **Valós idő:** amint van kapcsolat – **bármelyik úton** jött is létre –, elindul
 az óraszinkron (`hu.pool.ntp.org`, magyar időzóna a nyári időszámítással). **Ha
-az NTP nem sikerül, az nem okoz gondot:** az órára csak a bejegyzések kiírása és
-a frissesség-döntés tie-breakje épül, és mindkettő működik nélküle (`-` az Idő
-oszlopban, illetve darabszám-alapú döntés). Hamis 1970-es dátum sem jelenik meg. Amíg nincs szinkron,
-a lap `-`-t ír az Idő oszlopba – a napló ettől még működik. A valós idő a deep
+az NTP nem sikerül, az nem okoz gondot:** a bejegyzések sorrendje **nem
+időbélyeg-alapú**, hanem szerkezeti (a fájl a régebbi, az RTC új része követi),
+tehát óra nélkül is helyes. Hamis 1970-es dátum sem jelenik meg: amíg nincs
+szinkron, a lap `-`-t ír az Idő oszlopba. A valós idő a deep
 sleepet **túléli**, ezért használható a bejegyzések rendezésére bootolásokon át.
 
-**Nem fájlba megy**, hanem egy körpufferbe az RTC memóriában: nincs flash írás,
-nincs naplóírási hiba, amit kezelni kellene, és akkor is olvasható marad, ha
-épp a fájlrendszer csatolása bukott meg. Az ismétlődő eseményekből (`TEST
-FAIL`, `WIFI LOST`, `STUCK BUTTON`) csak az **első** kerül be, hogy egy tartós
-hiba ne söpörje ki a puffert – épp a hiba kezdetét veszítenénk el. Részletek:
-[MUKODES.md](MUKODES.md)
+**Egy esemény rögzítése nem ír flasht** – az RTC körpufferbe megy, tehát nincs
+naplóírási hiba, amit kezelni kellene, és akkor is olvasható marad, ha épp a
+fájlrendszer csatolása bukott meg. Flashre csak a **négy mentési ponton**
+íródik ki (router reset, AP mód, alvás, heap-újraindulás előtt).
+
+Ennek a következménye mérve: **működő internet mellett az eszköz 66,9 perc
+alatt nulla flash-írást végez.** Halott internetnél egy újrapróbálkozási kör
+10 írás (5 mentés × 2), tehát a 33 körös felső korlát ~330 írás – egy 512 KB-os
+partíción, ahol a LittleFS másolás-írással szórja a blokkokat, ez nem éri el a
+NOR flash élettartamát. (A `WEAR` teszt ezt méri; a LittleFS a tényleges
+törlési ciklusszámot nem adja vissza, tehát a kopás közvetlenül nem olvasható.)
+
+Az ismétlődő eseményekből (`TEST FAIL`, `WIFI LOST`, `STUCK BUTTON`, `LOW
+HEAP`) csak az **első** kerül be, hogy egy tartós hiba ne söpörje ki a puffert
+– épp a hiba kezdetét veszítenénk el. Részletek: [MUKODES.md](MUKODES.md)
 
 ## 🧪 Tesztek
 

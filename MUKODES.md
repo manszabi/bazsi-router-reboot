@@ -996,6 +996,7 @@ pillanatokban** kiírja a naplót a LittleFS-re is (`/evlog.bin`):
 | **Router reset előtt** | épp azért nyúlunk a hálózathoz, mert valami nem stimmel – itt a legnagyobb az esély egy áramszünetre |
 | **AP módba váltás előtt** | az AP mód azt jelenti, hogy az eszköz feladta; épp ezt az előzményt akarja látni az, aki odamegy és megnyitja a portált |
 | **Minden alvás előtt** | hosszú idő következik, ami alatt egy áramszünet elviheti az RTC naplót |
+| **Heap miatti önkéntes újraindulás előtt** | vezérelt leállás, mint az alvás. `ESP.restart()` az RTC memóriát nem törli, de a bejegyzések így csak a *következő* mentési pontig élnének kizárólag RTC-ben – egy áramszünet abban az ablakban épp azt a bizonyítékot vinné el, amiért az újraindulás történik (mérve: `RST1`) |
 
 Az alvások mentése **egyetlen közös ponton**, az `enterDeepSleep()` elején
 történik – így mind a négy alvási út (`retrySleep`, `internetFailSleep`,
@@ -1006,8 +1007,24 @@ legfontosabb, hiszen épp azt akarjuk később kivizsgálni. (Mérve: `NV9`.)
 Csatolatlan fájlrendszernél a mentés magától kimarad, és nem akasztja meg az
 alvást.
 
-A fájl a teljes körpuffer pillanatképe, **kiegyenesítve** (a legrégebbitől a
-legújabbig), így az olvasónak nem kell tudnia, hol tartott a gyűrű.
+**A fájl SAJÁT, nagyobb gyűrű – nem az RTC napló pillanatképe.** A mentés
+**hozzáfűz**: a fájl megőrzi a régi tartalmát, és a végére kerül az, ami a
+legutóbbi sikeres mentés óta keletkezett (`rtcSavedEvNext`). A fájl így
+**128** bejegyzést őriz – négyszeresét az RTC gyűrűnek –, kiegyenesítve (a
+legrégebbitől a legújabbig), így az olvasónak nem kell tudnia, hol tartott a
+gyűrű.
+
+> **Korábban felülírt, és pontosan az áramszünetnél tette a legrosszabbat.**
+> Az `RTC_NOINIT` terület ilyenkor törlődik, tehát a „meddig mentettünk" jelző
+> is nullázódik – és az első mentés az **egyetlen friss, még időbélyeg nélküli
+> `BOOT`** bejegyzést írta a korábbi 32 helyére. Mérve: 404 bájt / 32
+> bejegyzés → 32 bájt / 1. Vagyis épp az az esemény tüntette el a tartós
+> naplót, amiért az egyáltalán létezik. (Mérve: `NV20`, `NV21`, `NV22`.)
+
+A **verziószám nem változott**: az elrendezés ugyanaz maradt, csak a `count`
+mező vehet fel nagyobb értéket. Egy **régi**, legfeljebb 32 bejegyzéses fájlt
+az új firmware változatlanul beolvas, és az első mentésnél kiegészít – a
+firmware-frissítés nem dob el történetet.
 
 **Írás közben nincs alvás, újraindulás vagy másik írás.** Ezt nem külön kód
 biztosítja, hanem ugyanaz a **konfigurációs zár**, amit a webes mentés és a
@@ -1025,7 +1042,12 @@ végzetes**: az RTC naplóban minden ott marad, a program dolga fontosabb – cs
 szólunk róla. (Mérve: `NV2`.)
 
 > A flasht nem koptatjuk feleslegesen: ha a legutóbbi mentés óta nem történt
-> esemény, nem írunk újra. A `wifireset` gomb a négy konfigurációs fájlt törli,
+> esemény, nem írunk újra. **Mérve**: működő internet mellett 66,9 perc alatt
+> **nulla** flash-írás; halott internetnél egy újrapróbálkozási kör 10 írás
+> (5 mentés × 2: 4 router reset + 1 alvás előtt), tehát a 33 körös felső
+> korlát ~330 írás. (`WEAR`.) A LittleFS a tényleges törlési ciklusszámot nem
+> adja vissza az Arduino API-n, tehát a kopás közvetlenül nem olvasható ki –
+> az írások száma az egyetlen mérhető közelítés. A `wifireset` gomb a négy konfigurációs fájlt törli,
 > a naplófájlt **szándékosan nem**: nem tartalmaz konfigurációs értéket, és épp
 > a törlés utáni diagnózishoz kell a leginkább. (Mérve: `LOG9`.)
 
@@ -1038,23 +1060,38 @@ szólunk róla. (Mérve: `NV2`.)
 > `EVLOG_MAGIC`-et is emelni kell.** Az ára egyetlen bootnyi napló, cserébe
 > nincs hamis diagnosztika. (Mérve: `LOG8`.)
 
-### Melyiket tölti be az AP mód weboldala?
+### Mit mutat az AP mód weboldala?
 
-A fájl mindig az RTC napló egy **korábbi** pillanatképe. Ebből következik a
-szabály:
+**Mindkét forrást, egymás után – nem egymás helyett.** Amíg a fájl az RTC napló
+pillanatképe volt, a kettő átfedte egymást, és a lapnak *választania* kellett
+(időbélyeg-összehasonlítással, azonos időbélyegnél darabszám alapján). Mióta a
+mentés **hozzáfűz**, a két forrás kiegészíti egymást:
 
-| Helyzet | Melyik nyer | Miért |
-|---|---|---|
-| Mindkettőnek van **NTP időbélyege** | a **nagyobb** | ez a legpontosabb válasz, ezért ez az első szabály |
-| Az RTC napló túlélte a mentés óta eltelt időt | **RTC** | bővebb is nála: mindent tartalmaz, ami a fájlban van, plusz ami azóta történt |
-| Áramszünet törölte az RTC naplót | **fájl** | a fájl őrizte meg az előzményt – **ez a mentés értelme** |
-| Az RTC-ben már 32 új esemény van | **RTC** | a körpuffer tele van friss adattal, ami időben mindenképp újabb |
+1. előbb a **fájl** teljes tartalma (a hosszú történet, max 128 sor),
+2. utána az **RTC**-ből az, ami a legutóbbi sikeres mentés óta keletkezett.
 
-A lap **kiírja, melyik forrásból** dolgozik, és ha a fájlé, azt is, mikor
-mentettük: valós idővel dátumot, **anélkül pedig a mentés akkori uptime-ját**
-(„mentve a bootolás után 3:12:45-kor"). Így a „melyik eseménysor mikori?"
-kérdésre óra nélkül is van válasz, és nem találunk ki egy dátumot.
-(Mérve: `NV5`, `NV11`.)
+Kettőzés nincs, és **a „melyik a frissebb?" heurisztikára sincs többé szükség**.
+
+> **A sorrend szerkezeti, nem időbélyeg-alapú.** A fájl bejegyzései a
+> legrégebbitől a legújabbig állnak, az RTC új része pedig definíció szerint
+> utánuk következik. Ezért **NTP nélkül is helyes a sorrend** – ami azért
+> számít, mert óra épp a legrosszabb esetben (friss bootolás áramszünet után)
+> nincs.
+
+A táblázat **`Forrás` oszlopa** minden sornál kiírja, `fajl` vagy `RTC`. A
+fejléc pedig azt is, mikor mentettünk utoljára: valós idővel dátumot,
+**anélkül pedig a mentés akkori uptime-ját** („utoljára mentve a bootolás után
+3:12:45-kor"). Így a „melyik eseménysor mikori?" kérdésre óra nélkül is van
+válasz, és nem találunk ki egy dátumot. (Mérve: `NV5`, `NV11`, `NV14`.)
+
+> ⚠️ **A „meddig mentettünk" jelző csak akkor mond igazat, ha a fájl megvan.**
+> Ha elveszett (LittleFS újraformázás, törölt fájl, flash-hiba), a jelző
+> elrejtené azokat az RTC bejegyzéseket, amikről azt *hisszük*, hogy már mentve
+> vannak – mérve **13 meglévőből 3** látszott. És fordítva: áramszünet után a
+> jelző nulláról indul, miközben a fájl egy régebbi „életből" való nagyobb
+> `evNextAtSave`-et hordoz; ha azt hinnénk el, a friss bejegyzéseket rejtenénk
+> el. A helyes alap ezért a kettő **kisebbike**, fájl híján nulla – így sem
+> elrejteni, sem kettőzni nem tud. (Mérve: `GAP`, `GAP2`.)
 
 **Ha a fájl hiányzik, üres, csonka, rossz a magic-je vagy a fejléce többet ígér,
 mint amennyi ott van** – mind az öt eset ugyanoda vezet: a lap az RTC naplót
@@ -1062,11 +1099,36 @@ mutatja, külön hibaüzenet nélkül. Ez nem kivételkezelés, hanem a normál 
 egyik ága. **Ha mindkettő üres**, egyszerűen nincs napló a lapon – nem
 hibaüzenet, nem üres táblázat. (Mérve: `NV6`.)
 
-> A `/log` kezelő **egyetlen** 384 bájtos puffert használ, mert az `async_tcp`
-> task verme véges: előbb a fejlécből eldönti, melyik forrás kell, és csak azt
-> tölti be. Ha a betöltés félúton bukik, a puffer fél fájl, fél RTC adat lenne –
-> ezért ilyenkor **újra vesszük** az RTC pillanatképet, nem csak
-> „visszalépünk". (Mérve: `NV8`.)
+> **A verem és a heap.** A `/log` kezelő az `async_tcp` taskon fut, aminek a
+> verme véges: a fájlt ezért **nyolcasával** olvassa (96 bájt puffer), nem
+> egészben (128 bejegyzés 1536 bájt lenne). A válasz-stream kezdő puffere
+> viszont a **tényleges tartalomhoz** méretezett (`~2600 + sorok × 120` bájt),
+> mert a könyvtár `resizeAdd()`-je pontosan a hiányzó bájtokkal növel –
+> soronként újraallokálna. Mérve: a teljes napló (160 sor) **18 070 bájt**, a
+> becsült puffer 21 800. A valódi eszközön a legnagyobb összefüggő tömb
+> **114 676 bájt**, tehát ez annak a 18%-a, és a lapot ember nyitja meg,
+> ritkán. (Mérve: `LOG7`.)
+
+### Soros parancsok
+
+A `/log` lap csak **AP módban** érhető el. Egy normálisan működő eszköztől a
+soros kábel az egyetlen út a naplóhoz – és a lapot amúgy sem szabad korlátlanul
+növelni. Ezért van két parancs:
+
+| Parancs | Mit csinál |
+|---|---|
+| **`LOG`** | a **teljes** napló: előbb a fájl, utána az RTC-ből a mentés óta keletkezett rész |
+| **`HELP`** | a parancsok listája |
+
+**Nem blokkol**: csak a már megérkezett bájtokat dolgozza fel, egy félig beírt
+sor a következő `loop()` iterációban folytatódik – a watchdog-etetés rendje sem
+változik. `MODE_FATAL`-ban is működik, mert a `loop()` fatal ága korábban
+visszatér, a parancsfeldolgozás viszont **előtte** áll.
+
+> A **túl hosszú sort egészben eldobjuk**, a sorvégig. Az első változat a
+> puffert a túlcsordulásnál nullázta, de utána újra gyűjteni kezdett – vagyis a
+> hosszú sor *végéből* lett egy csonkolt parancs. (Mérve: `CMD1`, `CMD2`,
+> `CMD3`.)
 
 ### Valós idő (NTP)
 
@@ -1085,18 +1147,23 @@ ami a mentett napló értelmezéséhez kell.
 ### Ha az NTP kommunikáció nem sikerül
 
 **Nem okoz gondot** – és ez nem feltevés, hanem szerkezeti tulajdonság: az órára
-mindössze **két** dolog épül, és mindkettő működik nélküle is.
+mindössze **egy** dolog épül, és az is működik nélküle.
 
 | Mire kell | Óra nélkül |
 |---|---|
 | A bejegyzések **kiírása** | `-` áll az Idő oszlopban; az uptime oszlop ilyenkor is elmond mindent |
-| A frissesség-döntés **tie-breakje** | csak akkor használjuk, ha **mindkét** oldalnak van érvényes időbélyege; egyébként a darabszám-alapú szabályra esünk vissza |
+
+**A sorrendhez már nem kell óra.** Amíg a fájl az RTC napló pillanatképe volt,
+a lapnak el kellett döntenie, melyik forrás a frissebb – és ehhez időbélyeget
+hasonlított, tie-breakkel. Mióta a mentés hozzáfűz, a sorrend **szerkezeti**: a
+fájl a régebbi, az RTC új része követi. Ez azért fontos, mert óra épp a
+legrosszabb esetben – friss bootolás egy áramszünet után – nincs.
 
 Egyetlen ág sem **vár** az órára, és egyik sem hiúsul meg nélküle. A
 `nowEpoch()` alsó korlátja (2025-01-01) gondoskodik arról is, hogy szinkron
 nélkül **ne jelenjen meg hamis 1970-es dátum** – a mező marad 0, a lap pedig `-`
--t ír. A „mentve: …" címke ugyanígy egyszerűen elmarad, nem találunk ki egy
-időpontot.
+-t ír. Az „utoljára mentve: …" címke ugyanígy egyszerűen elmarad, nem találunk
+ki egy időpontot.
 
 A `configTzTime()` maga sem blokkol: csak elindítja az SNTP klienst poll
 módban, a válasz a háttérben (a tcpip taskban) érkezik – ha a szerver
@@ -1105,7 +1172,7 @@ elérhetetlen vagy a névfeloldás bukik, az a mi `loop()`-unkat nem érinti.
 > A mérés: az `NV11` végigjátssza a teljes eszkalációt (tesztek bukása → router
 > reset → mentés → alvás), majd egy áramszünet utáni `/log` oldalt is –
 > **végig óraszinkron nélkül**. Mellékesen az **egész tesztkészlet** így fut: a
-> `coldBoot()` `g_epochNow = 0`-t állít, tehát mind a 295 forgatókönyv a
+> `coldBoot()` `g_epochNow = 0`-t állít, tehát mind a 328 forgatókönyv a
 > „nincs óraszinkron" állapotot játssza.
 
 > A valós idő a **deep sleepet túléli**. Az `esp_timer` (és így a `millis()`)
@@ -1203,7 +1270,7 @@ arányosan romlik; a védelem hat sor, és nincs hátránya. (Mérve: `LOG4`.)
 ## 16. A forráskód szerkezete
 
 A program **nyolc fordítási egység**: a `bazsi_router_reboot.ino` és hét modul
-a sketch mappájában. Összesen ~4700 sor, 98 függvény; **44%-a komment** – a
+a sketch mappájában. Összesen ~5100 sor, 104 függvény; **44%-a komment** – a
 legtöbb egy-egy döntés *indoklása*, nem a kód újramondása.
 
 > Miért nem egy fájl? Mert egy 4100 soros `.ino`-ban nincs fordító által
@@ -1234,9 +1301,9 @@ Fentről lefelé: minden modul csak a nála lentebb állóktól függ. A `config
 | **`secret`** | 123 | a jelszó összekeverése a flashben | `encodeSecret()`, `decodeSecretInPlace()` – a `secretSeed()`, `xorshift32()`, `hexVal()` **belső** |
 | **`sync`** | 206 | a két task közti osztott állapot | 7 függvény + `evLogMux` – a `savingConfig`, `restartPending`, `restartAt` **belső** |
 | **`configstore`** | 243 | a négy mentett érték, a fájljaik, a LittleFS | a négy puffer, `readConfigValue()`, `writeConfigValue()`, `clearConfigValue()`, `initLittleFS()`, `filesystemReady()` |
-| **`eventlog`** | 620 | a diagnosztikai napló **és** a valós idő (NTP) | `logEvent()`, `saveEventLog()`, `load*()`, `eventName()`, `formatEpoch()`, `ensureNtp()` – a `startNtp()`, `nowEpoch()` **belső** |
-| **`netprobe`** | 277 | HTTP végpont-tesztek és ICMP ping | `testInternetHTTP()`, `testInternetPing()` – a négy korlátozott olvasó **belső** |
-| **`webportal`** | 747 | az AP beállító portál HTTP felülete | **mindössze 3**: `startWebPortal()`, `stopWebPortal()`, `touchApDeadline()` |
+| **`eventlog`** | 828 | a diagnosztikai napló **és** a valós idő (NTP) | `logEvent()`, `saveEventLog()`, `loadEventLogHeader/Entries/Range()`, `printEventLogs()`, `eventName()`, `formatEpoch()`, `ensureNtp()` – a `startNtp()`, `nowEpoch()` **belső** |
+| **`netprobe`** | 294 | HTTP végpont-tesztek és ICMP ping | `testInternetHTTP()`, `testInternetPing()` – a négy korlátozott olvasó **belső** |
+| **`webportal`** | 782 | az AP beállító portál HTTP felülete | **mindössze 3**: `startWebPortal()`, `stopWebPortal()`, `touchApDeadline()` |
 | **`app_hooks.h`** | 51 | amit a főmodul ad a moduloknak | `feedWatchdog()`, `resetbutton()`, `wifiresetbutton()`, `waitWithButtons()`, `printUptime()`, `diagCounters()` |
 
 > A `webportal` kapta a legszorosabb határt, mert ez a program
@@ -1248,7 +1315,7 @@ Fentről lefelé: minden modul csak a nála lentebb állóktól függ. A `config
 > az a rossz határhúzás első jele.** Egyszer már meg is történt – a
 > `filesystemReady()` átmenetileg ide került, majd oda, ahová való (`configstore`).
 
-### A főmodul (`bazsi_router_reboot.ino`, ~2400 sor, 49 függvény)
+### A főmodul (`bazsi_router_reboot.ino`, ~2500 sor, 51 függvény)
 
 Ami maradt: a **döntéshozatal**. A modulok mérnek és tárolnak, a főmodul
 eldönti, mi következik.
@@ -1263,6 +1330,7 @@ eldönti, mi következik.
 | A négy alvás | `enterDeepSleep()` ← `retrySleep()`, `internetFailSleep()`, `apSleep()`, `fatalSleep()`; külön úton `handleStuckButton()` |
 | Gombok | a két ISR (`onResetButtonEdge()`, `onWifiResetButtonEdge()`) · `armButtonLatches()` · `resetbutton()` · `wifiresetbutton()` · `pressedButtonNow()` · `doWifiReset()` |
 | Watchdog és heap | `initWatchdog()` · `checkWatchdogResets()` · `feedWatchdog()` · `checkHeap()` · `initHeapState()` · `applyHeapCarry()` |
+| Soros parancsok | `serialCommands()` · `runSerialCommand()` |
 | Várakozások | `blockingDelay()` · `waitWithButtons()` · `waitWithButtonsUntilOnline()` · `onlineProbe()` · `onlineProbeDue()` |
 | Leállás | `lockConfigBeforeShutdown()` · `restartFromButton()` · `enterFatal()` · `fatalHalt()` |
 | Üzemmódváltás | `startConfigPortal()` – a naplómentés, a `deviceMode` és a LED-ek; a HTTP részt a `webportal` végzi |
