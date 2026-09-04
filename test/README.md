@@ -11,7 +11,7 @@ make test
 
 > A teljes készlet ~2 perc ágonként; a CI-ban a `make test` + `make san` +
 > `make covgate` együtt ~7-8 perc (mindhárom újrafordít és újra lefuttat
-> mind a 295 forgatókönyvet).
+> mind a 328 forgatókönyvet).
 
 **A fordítási modell megegyezik az Arduinóéval**: a `bazsi_router_reboot.ino`
 és a hét modul (`secret.cpp`, `strutil.cpp`, `netprobe.cpp`, `sync.cpp`,
@@ -90,7 +90,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 
 ## Lefedett esetek
 
-**295 forgatókönyv, 1695 ellenőrzés. Sorlefedettség: 98,65%.**
+**328 forgatókönyv, 1946 ellenőrzés. Sorlefedettség: 99,14%.**
 
 ### A watchdog-etetés globális invariánsa
 
@@ -256,7 +256,7 @@ lwIP, LittleFS és a relé viselkedését hardveren kell igazolni.
 
 ## Veletlen allapotgep-bejaras (PROP1-PROP8)
 
-A tobbi 295 forgatokonyv **kezzel irt**: pontosan azokat az utakat jarja be,
+A tobbi 328 forgatokonyv **kezzel irt**: pontosan azokat az utakat jarja be,
 amikre a szerzo gondolt. A PROP forgatokonyvek forditva dolgoznak - veletlen
 kornyezeti esemenysorozatot generalnak (WiFi-szakadas, gombnyomas tetszoleges
 pillanatban, HTTP-valasz, heap-eses, fajlrendszer-hiba), es nem azt allitjak,
@@ -304,7 +304,7 @@ Mutacioval igazolva, mind a negy a **helyes** tulajdonsagot buktatja:
 
 ## Fuzzing: `make fuzz` (clang libFuzzer)
 
-Minden mas teszt - a 295 kezzel irt forgatokonyv es a 8 veletlen bejaras is -
+Minden mas teszt - a 320 kezzel irt forgatokonyv es a 8 veletlen bejaras is -
 **ervenyes vagy legalabbis elkepzelt** bemenetekkel dolgozik. A fuzzer nem:
 kifejezetten olyan bajtsorozatokat keres, amikre senki nem gondolt, es a
 lefedettseg alapjan tanul, merre erdemes menni.
@@ -405,7 +405,7 @@ a hatarido lejart, a loop tenyleg futott), kulonben az allitas ures lenne.
 
 ## A stubok igazolasa: `make stubcheck`
 
-**A teljes host-tesztkeszlet ervenyessege ezen all.** Az 1761 ellenorzes mind a
+**A teljes host-tesztkeszlet ervenyessege ezen all.** Az 1946 ellenorzes mind a
 `test/stubs/` alatti modelleken keresztul lat: ha egy stub teved, a teszt
 **zold**, az eszkoz meg hibazik - es semmi nem szolna. Ez volt a tesztelesi
 piramis egyetlen meg nem vizsgalt alapja.
@@ -458,7 +458,7 @@ vizsgalt semmit; harmadik ne legyen.
 
 ## A maradek hibaagak (COV1-COV6)
 
-A lefedettseg 98,71% volt. A hianyzo resz nagy reszet olyan fuggvenyek zaro
+A lefedettseg akkor 98,71% volt. A hianyzo resz nagy reszet olyan fuggvenyek zaro
 kapcsos zarojele adta, amik **sosem ternek vissza normalisan** (alszanak vagy
 ujrainditanak) - az nem hianyossag. Maradt viszont nehany **valodi hibaag**,
 amit egyetlen forgatokonyv sem erintett. Ezek epp azok, amik akkor futnak le,
@@ -477,7 +477,7 @@ A COV4 kedveert a stub megtanult **konyvtarat** modellezni (`g_fsDirs`). Egy
 stub, ami egy valos allapotot nem tud eloallitani, csendben csokkenti a
 tesztek erejet: az az ag addig lefedhetetlen volt.
 
-**Lefedettseg: 98,71% -> 99,08%**, a kapu kuszobe 97,0% -> 98,8%.
+**Lefedettseg: 98,71% -> 99,14%**, a kapu kuszobe 97,0% -> 98,8%.
 
 ### Ami szandekosan feher marad - es mostantol a FORDITO tartja igy
 

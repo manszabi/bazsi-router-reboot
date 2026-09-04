@@ -10,12 +10,14 @@ legyen.
 Jelölés: lekerekített doboz = belépési/kilépési pont, rombusz = döntés,
 téglalap = művelet. Az `EV_*` címkék a diagnosztikai napló eseménykódjai
 (lásd `MUKODES.md` 15. fejezet). A `saveEventLog()` a naplót a LittleFS-re is
-kiírja – három fontos pillanatban: **router reset előtt**, **AP módba váltás
-előtt**, és **minden `enterDeepSleep()`-en át vezető alvás előtt** (egyetlen
-közös ponton, a függvény elején); így egy áramszünet sem viszi el. Egyetlen
-kivétel a beragadt gomb 60 mp-es alvása: az a `setup()` elején, a
-`handleStuckButton()`-ból megy el, saját úton – ott a LittleFS még csatolva
-sincs, tehát nem is volna mit írni.
+kiírja – **négy** fontos pillanatban: **router reset előtt**, **AP módba váltás
+előtt**, **minden `enterDeepSleep()`-en át vezető alvás előtt** (egyetlen közös
+ponton, a függvény elején), és a **heap miatti önkéntes újraindulás előtt**;
+így egy áramszünet sem viszi el. A mentés **hozzáfűz**, nem ír felül: a fájl
+saját, 128 bejegyzéses gyűrű, az RTC napló 32-es gyűrűje pedig csak a legutóbbi
+mentés óta eltelt időt őrzi. Egyetlen kivétel a beragadt gomb 60 mp-es alvása:
+az a `setup()` elején, a `handleStuckButton()`-ból megy el, saját úton – ott a
+LittleFS még csatolva sincs, tehát nem is volna mit írni.
 
 ---
 
@@ -121,10 +123,11 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    L([loop ciklus, 10 ms-onként]) --> RP{"restartPending és<br>letelt a 2 s türelmi idő?"}
+    L([loop ciklus, 10 ms-onként]) --> SER["serialCommands()<br>LOG = a teljes napló (fájl + RTC)<br>HELP = a parancsok listája<br>nem blokkol, MINDEN üzemmódban fut"]
+    SER --> RP{"restartPending és<br>letelt a 2 s türelmi idő?"}
     RP -->|igen| WFW["lockConfigBeforeShutdown()<br>(fájlírás megvárása max 5 s,<br>ÉS a zár megszerzése)"] --> RS([ESP.restart])
     RP -->|nem| WDC0["1 óra hibátlan futás után:<br>watchdog + heap számláló nullázása"]
-    WDC0 --> HEAP["checkHeap() – 10 s-onként mér<br>30 percenként állapotsor<br>25 kB alatt figyelmeztet (csak az átlépéskor)<br>KRITIKUS: szabad &lt; 12 kB VAGY legnagyobb tömb &lt; 6 kB<br>ha 3 egymást követő mérésen át kitart (30 s):<br>ÖNKÉNTES ÚJRAINDULÁS – csak MODE_MONITOR-ban,<br>fájlírás / relé-impulzus / reset-ellenőrző ablak alatt SOHA<br>a resetEvents ÉS az rtcRetryRounds átvitelével"]
+    WDC0 --> HEAP["checkHeap() – 10 s-onként mér<br>30 percenként állapotsor<br>25 kB alatt figyelmeztet (csak az átlépéskor)<br>KRITIKUS: szabad &lt; 12 kB VAGY legnagyobb tömb &lt; 6 kB<br>ha 3 egymást követő mérésen át kitart (30 s):<br>ÖNKÉNTES ÚJRAINDULÁS – csak MODE_MONITOR-ban,<br>fájlírás / relé-impulzus / reset-ellenőrző ablak alatt SOHA<br>EV_HEAP_RESTART + saveEventLog() a flashbe,<br>a resetEvents ÉS az rtcRetryRounds átvitelével"]
     HEAP --> NTP["ensureNtp()<br>óraszinkron indítása, amint van kapcsolat<br>(bármelyik úton jött is létre)"]
     NTP --> MODE{deviceMode}
     MODE -->|MODE_FATAL| FB["Mindkét LED együtt villog (5 Hz)<br>gombok élnek"] --> F5{"5 perc letelt?"}
@@ -230,7 +233,7 @@ flowchart TD
     AP --> IDLE["5 perces tétlenségi visszaszámlálás<br>MINDEN kérés (404 is) újraindítja;<br>a nyitott lap 60 s-onként /ping-el"]
     IDLE --> REQ{Kérés típusa}
     REQ -->|"GET /"| FORM["Beépített beállító űrlap (sendConfigForm)<br>SSID/IP/gateway ELŐKITÖLTVE, escape-elve;<br>a jelszó SOHA. A LittleFS-ről semmit<br>nem szolgálunk ki"]
-    REQ -->|"GET /log"| LOG["Diagnosztikai napló:<br>reset ok, számlálók, 32 esemény"]
+    REQ -->|"GET /log"| LOG["Diagnosztikai napló: reset ok, számlálók,<br>a FÁJL teljes tartalma (max 128), majd az RTC-ből<br>a mentés óta keletkezett rész (max 32)<br>Forrás oszlop: fajl / RTC, kettőzés nincs"]
     REQ -->|"POST /"| FSOK{"fsReady?<br>(csatolva van a LittleFS?)"}
     FSOK -->|nem| E500F["500: LittleFS nem elerheto<br>(partíciós séma hiba)"]
     FSOK -->|igen| VAL{"1. FÁZIS - validálás:<br>mind a négy mezőn ELŐBB trim, AZTÁN hossz<br>SSID 1-32, jelszó max 63,<br>IP és gateway: IPv4, nem 0.0.0.0<br>statikus IP CSAK párban"}
@@ -322,4 +325,4 @@ A **valós idő** (`gettimeofday()`) szintén túléli a deep sleepet – az RTC
 
 *Az ábrák a `bazsi_router_reboot.ino` aktuális állapotát dokumentálják.
 Módosításkor a kóddal együtt frissítendők – a viselkedést a `test/` alatti
-295 forgatókönyves (1695 ellenőrzéses) tesztkészlet rögzíti.*
+328 forgatókönyves (1946 ellenőrzéses) tesztkészlet rögzíti.*
