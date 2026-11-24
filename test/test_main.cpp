@@ -98,6 +98,10 @@ extern uint32_t rtcCarryInternetFailRounds;
 extern bool pingOkResetUsed;
 extern bool holdOffActive;
 extern uint8_t lastSkipDiag;
+extern uint32_t rtcCarryDiagState;
+extern int g_randomCalls;
+extern uint32_t g_randomState;
+extern uint64_t g_efuseMac;
 uint8_t diagnoseNetwork();
 void ensureFallbackDns();
 int lastHttpCode();
@@ -343,6 +347,8 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   g_isr.clear(); g_isrMode.clear();
   rtcCarryRetryRounds = 0;
   rtcCarryInternetFailRounds = 0;
+  rtcCarryDiagState = 0;
+  g_randomCalls = 0;
   btnResetLatched = false; btnWifiResetLatched = false;
   btnResetDownAt = 0; btnWifiResetDownAt = 0;
   // A GPIO hold a valosagban tuleli az ebredest (reset), csak az
@@ -9078,6 +9084,130 @@ static void scPG2() {
   CHECK(testInternetPing(IPAddress(1, 1, 1, 1), "teszt"), "a valodi valasz tovabbra is siker");
 }
 
+
+// ===========================================================================
+// AZ ESZKOZONKENTI AP JELSZO (ETSI EN 303 645 5.1-1, EN 18031, PSTI)
+// ===========================================================================
+
+static const char* kApAbc = "abcdefghjkmnpqrstuvwxyz23456789A";
+
+static void scAPP1() {
+  // Az elso portal-inditas EGYEDI, eros jelszot general - nem a regi,
+  // mindenhol azonos "12345678"-at.
+  coldBoot(false, "", "", "", "");
+  setup();
+  const std::string pw = wifiSim.apPass;
+  printf("     [info] generalt AP jelszo: %s\n", pw.c_str());
+  CHECK(pw.size() == 12, "12 karakter");
+  CHECK(pw != "12345678", "nem a regi univerzalis jelszo");
+  CHECK(pw.find_first_not_of(kApAbc) == std::string::npos,
+        "csak az osszetevesztes-mentes abece betui");
+  CHECK(logIndex("WiFi.mode(AP)") >= 0 && logIndex("WiFi.mode(AP)") < logIndex("esp_random"),
+        "a veletlen a radio bekapcsolasa UTAN keszul (csak ugy valodi veletlen)");
+  CHECK(g_fs.count("/appass.txt") == 1, "elmentette");
+  CHECK(g_fs["/appass.txt"].find(pw) == std::string::npos, "kodolva, nem nyilt szovegkent");
+  CHECK(serialHas(("UJ AP jelszo generalva (irdd fel az eszkozre!): " + pw).c_str()),
+        "a soros porton kiirja, hogy fel lehessen irni");
+}
+
+static void scAPP2() {
+  // A jelszo ALLANDO: ujraindulas utan ugyanaz, uj veletlen nelkul, es mar
+  // indulaskor kiirja.
+  coldBoot(false, "", "", "", "");
+  setup();
+  const std::string pw = wifiSim.apPass;
+  const std::string fajl = g_fs["/appass.txt"];
+  coldBoot(false, "", "", "", "");
+  g_fs["/appass.txt"] = fajl;
+  setup();
+  CHECK(wifiSim.apPass == pw, "ugyanaz a jelszo");
+  CHECK(g_randomCalls == 0, "nem generalt ujat");
+  CHECK(serialHas(("AP beallito portal jelszava: " + pw).c_str()), "indulaskor kiirja");
+  // Monitor modban (mukodo Wi-Fi) is kiirja indulaskor - de nem general.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_fs["/appass.txt"] = fajl;
+  setup();
+  CHECK(serialHas(("AP beallito portal jelszava: " + pw).c_str()), "normal indulaskor is kiirja");
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  CHECK(g_fs.count("/appass.txt") == 0 && g_randomCalls == 0,
+        "normal uzemben nem general es nem ir flasht");
+}
+
+static void scAPP3() {
+  // A wifireset gomb a Wi-Fi beallitast torli, az AP jelszot NEM - egy
+  // felcimkezett jelszo ervenyes marad.
+  coldBoot(false, "", "", "", "");
+  setup();
+  const std::string fajl = g_fs["/appass.txt"];
+  try { doWifiReset(); } catch (RestartSignal&) {}
+  CHECK(g_fs["/appass.txt"] == fajl, "az AP jelszo megmaradt");
+}
+
+static void scAPP4() {
+  // Ket eszkoz: ket kulonbozo jelszo es ket kulonbozo AP nev.
+  coldBoot(false, "", "", "", "");
+  g_randomState = 0x1111u; g_efuseMac = 0x0000A1B2C3D4E5F6ULL;
+  setup();
+  const std::string pw1 = wifiSim.apPass;
+  const bool nev1 = logIndex("WiFi.softAP(ESP-ESP32-C3-B2A1)") >= 0;
+  coldBoot(false, "", "", "", "");
+  g_randomState = 0x2222u; g_efuseMac = 0x0000112233445566ULL;
+  setup();
+  CHECK(pw1 != wifiSim.apPass, "mas eszkoz, mas jelszo");
+  CHECK(nev1, "az AP neve a MAC utolso ket bajtjat viseli (B2A1)");
+  CHECK(logIndex("WiFi.softAP(ESP-ESP32-C3-2211)") >= 0, "a masik eszkoze mas (2211)");
+  g_efuseMac = 0x0000A1B2C3D4E5F6ULL;
+}
+
+static void scAPP5() {
+  // Serult (tul rovid) mentett jelszo: ujat general, nem indit 8 karakternel
+  // rovidebb jelszoval AP-t (az a core-ban csendben elbukna).
+  coldBoot(false, "", "", "", "");
+  char enc[64]; encodeSecret("rovid", enc, sizeof(enc));
+  g_fs["/appass.txt"] = enc;
+  setup();
+  CHECK(wifiSim.apPass.size() == 12, "uj, ervenyes jelszo");
+  CHECK(wifiSim.softApCount == 1, "az AP elindult");
+}
+
+static void scAPP6() {
+  // Nem irhato fajlrendszer: a portal ettol meg elindul, a jelszo ki van irva,
+  // es figyelmeztet, hogy csak erre a munkamenetre ervenyes.
+  coldBoot(false, "", "", "", "");
+  g_fsWritable = false;
+  setup();
+  CHECK(wifiSim.softApCount == 1 && wifiSim.apPass.size() == 12, "az AP elindult");
+  CHECK(serialHas("az AP jelszo mentese nem sikerult"), "figyelmeztet");
+  CHECK(!configWriteInProgress(), "a zarat elengedte");
+}
+
+static void scSLP4() {
+  // A heap-ujraindulas a reset elotti diagnozis emleket is atviszi.
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcHeapMagic = 0;
+  setup();
+  pingOkResetUsed = true; lastSkipDiag = 3;
+  g_freeHeap = 5000; g_maxAllocHeap = 4000;
+  bool restarted = false;
+  int guard = 0;
+  try { while (!restarted && ++guard < 200000) { checkHeap(g_millis); g_millis += 1000; } }
+  catch (RestartSignal&) { restarted = true; }
+  CHECK(restarted, "a heap miatt ujraindult");
+  const uint32_t hm = rtcHeapMagic, hr = rtcHeapRestarts, cd = rtcCarryDiagState;
+  const uint8_t ce = rtcCarryResetEvents;
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcHeapMagic = hm; rtcHeapRestarts = hr; rtcCarryResetEvents = ce; rtcCarryDiagState = cd;
+  setup();
+  CHECK(pingOkResetUsed, "a 'mar kapott eselyt' jelzo megmaradt");
+  CHECK(lastSkipDiag == 3, "es a kihagyott-reset sorozat is");
+  // ...es egy MAS okbol tortent ujraindulas (gomb) mar nem tamasztja fel.
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcHeapMagic = hm; rtcHeapRestarts = hr;   // carry felhasznalva: CARRY_NONE
+  setup();
+  CHECK(!pingOkResetUsed && lastSkipDiag == 0, "felhasznalas utan nem el tovabb");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -9444,6 +9574,15 @@ static const Scenario kScenarios[] = {
   { "SP3: a portal nem ment osszeillo par nelkuli statikus IP-t", scSP3 },
   { "PW1: a jelszo szokozei megmaradnak, a sorveg nem", scPW1 },
   { "PG2: az ESPping fantom-sikere bukasnak szamit", scPG2 },
+  { "SLP4: a heap-ujraindulas a diagnozis emleket is atviszi", scSLP4 },
+
+  // --- Eszkozonkenti AP jelszo ---
+  { "APP1: az elso portal-inditas egyedi, eros AP jelszot general", scAPP1 },
+  { "APP2: az AP jelszo allando, indulaskor kiirva, normal uzemben nincs iras", scAPP2 },
+  { "APP3: a wifireset nem torli az AP jelszot", scAPP3 },
+  { "APP4: ket eszkoz - ket jelszo, ket AP nev", scAPP4 },
+  { "APP5: serult mentett AP jelszo helyett uj", scAPP5 },
+  { "APP6: nem irhato fajlrendszer mellett is indul a portal", scAPP6 },
 };
 
 

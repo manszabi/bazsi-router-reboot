@@ -233,7 +233,7 @@ teljes hosszukban futnak. A körök között 1 óra alvás:
 
 ```mermaid
 flowchart TD
-    IN([startConfigPortal]) --> AP["WIFI_AP mód<br>SSID: ESP-ESP32-C3, jelszó: 12345678<br>végpontok: GET / , /ping, /log és POST /"]
+    IN([startConfigPortal]) --> AP["WIFI_AP mód<br>SSID: ESP-ESP32-C3-XXXX (MAC vége)<br>jelszó: eszközönként egyedi (/appass.txt)<br>végpontok: GET / , /ping, /log és POST /"]
     AP --> IDLE["5 perces tétlenségi visszaszámlálás<br>MINDEN kérés (404 is) újraindítja;<br>a nyitott lap 60 s-onként /ping-el"]
     IDLE --> REQ{Kérés típusa}
     REQ -->|"GET /"| FORM["Beépített beállító űrlap (sendConfigForm)<br>SSID/IP/gateway ELŐKITÖLTVE, escape-elve;<br>a jelszó SOHA. A LittleFS-ről semmit<br>nem szolgálunk ki"]

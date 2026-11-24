@@ -25,6 +25,26 @@ void startWebPortal();
 // A webszerver leallitasa (alvas es ujraindulas elott).
 void stopWebPortal();
 
+// AZ ESZKOZ SAJAT AP JELSZAVA.
+//
+// Korabban minden eszkoz ugyanazt, a forraskodban olvashato "12345678"-at
+// hasznalta. Ez ma kifejezetten tilos: az ETSI EN 303 645 (5.1-1), az EU
+// radioberendezes-iranyelvenek 2025. augusztus 1. ota kotelezo
+// kiberbiztonsagi kovetelmenyei (EN 18031) es a brit PSTI torveny is tiltja az
+// "univerzalis alapertelmezett jelszot". Egy szomszed a portalon at at tudta
+// volna irni a Wi-Fi beallitast - es ez a portal az, amin a Wi-Fi jelszo
+// bemegy.
+//
+// Most minden eszkoz ELSO portal-inditasakor egy 12 karakteres, valodi
+// veletlen jelszot general (esp_random(): bekapcsolt Wi-Fi mellett hardveres
+// veletlen, esp_random.h), es kodolva menti (/appass.txt, ugyanaz a kodolas,
+// mint a Wi-Fi jelszonal). Utana mindig ezt hasznalja: a wifireset gomb sem
+// torli, tehat egy felcimkezett jelszo ervenyes marad.
+//
+// A soros portra MINDEN indulaskor kiirjuk (ha mar van), es generalaskor is -
+// a soros port fizikai hozzaferest igenyel, ez a tervezett ut a megismeresere.
+void announceApPassword();
+
 // A tetlensegi visszaszamlalas ujrainditasa. Minden HTTP keresnel megtortenik;
 // kivulrol azert latszik, mert a fomodul is kitolja a hataridot, amikor AP
 // modba lep.

@@ -4,8 +4,10 @@
 // szerepel, mert az Arduino a konyvtarakat az includeok alapjan deriti fel, es
 // ezt a lancot nem akarjuk egy kozvetett fuggosegre bizni.
 #include <AsyncTCP.h>
+#include <LittleFS.h>
 #include <WiFi.h>
 #include <string.h>
+#include "esp_random.h"
 
 #include "app_hooks.h"
 #include "configstore.h"
@@ -128,14 +130,82 @@ const char FORM_TAIL[] =
   KEEPALIVE_JS_LIT
   "</body></html>";
 
-// AP password (WPA2: min. 8, max. 63 karakter)
-const char AP_PASSWORD[] = "12345678";
-// A WiFi.softAP() visszateresi erteket nem nezzuk, a core pedig rovid jelszonal
-// csak annyit tesz, hogy "passphrase too short!" es return false (AP.cpp) - az
-// AP letre sem jonne, az eszkoz elerhetetlen lenne, es 5 perc mulva elaludna.
-// Ezt fordítási idoben fogjuk meg, hogy egy kesobbi atiras ne tudja elrontani.
-static_assert(sizeof(AP_PASSWORD) - 1 >= 8, "AP jelszo: legalabb 8 karakter (WPA2)");
-static_assert(sizeof(AP_PASSWORD) - 1 <= 63, "AP jelszo: legfeljebb 63 karakter (WPA2)");
+// AZ ESZKOZONKENTI AP JELSZO - lasd az announceApPassword() leirasat a
+// headerben.
+//
+// HOSSZ ES ABECE: 12 karakter egy 32 elemu abecebol = 60 bit. Bőven tul van
+// a WPA2-PSK offline szotaras tamadasan, es meg begepelheto telefonon. Az
+// abecebol SZANDEKOSAN hianyoznak az osszetevesztheto jelek (0/O, 1/l/I), mert
+// a jelszot cimkerol vagy soros kepernyorol kell lemasolni. A 32 elem miatt az
+// "& 31" egyenletes eloszlast ad (nincs modulo-torzitas).
+//
+// A WiFi.softAP() rovid jelszonal csak annyit tesz, hogy "passphrase too
+// short!" es return false (AP.cpp) - az AP letre sem jonne. Ezert a hosszt
+// forditasi idoben is rogzitjuk.
+constexpr size_t AP_PASS_LEN = 12;
+static_assert(AP_PASS_LEN >= 8 && AP_PASS_LEN <= 63, "AP jelszo: 8-63 karakter (WPA2)");
+static const char kApPassAlphabet[] = "abcdefghjkmnpqrstuvwxyz23456789A";
+static_assert(sizeof(kApPassAlphabet) - 1 == 32, "az abece pontosan 32 elemu (& 31)");
+const char apPassPath[] = "/appass.txt";
+static char apPass[PASS_MAX_LEN + 1] = { 0 };
+
+// A mentett jelszo betoltese. Igaz, ha van ervenyes (8-63 karakter).
+static bool loadApPassword() {
+  if (!filesystemReady()) {
+    return false;
+  }
+  char raw[SECRET_ENC_MAX + 1];
+  if (readSecretValue(LittleFS, apPassPath, raw, sizeof(raw)) != CONFIG_OK) {
+    return false;
+  }
+  decodeSecretInPlace(raw);
+  const size_t n = strlen(raw);
+  if (n < 8 || n > PASS_MAX_LEN) {
+    return false;   // hianyzo, ures vagy serult: ujat generalunk
+  }
+  strlcpy(apPass, raw, sizeof(apPass));
+  return true;
+}
+
+static void printApPassword(const char* elotag) {
+  Serial.print(elotag);
+  Serial.println(apPass);
+}
+
+void announceApPassword() {
+  if (loadApPassword()) {
+    printApPassword("AP beallito portal jelszava: ");
+  }
+}
+
+// A jelszo biztositasa a portal inditasakor: betolti, vagy - ha meg nincs -
+// general es ment egyet. CSAK a WiFi.mode(WIFI_AP) UTAN hivhato: az
+// esp_random() csak bekapcsolt radio mellett valodi veletlen.
+static void ensureApPassword() {
+  if (loadApPassword()) {
+    return;
+  }
+  for (size_t i = 0; i < AP_PASS_LEN; i++) {
+    apPass[i] = kApPassAlphabet[esp_random() & 31u];
+  }
+  apPass[AP_PASS_LEN] = '\0';
+  printApPassword("UJ AP jelszo generalva (irdd fel az eszkozre!): ");
+
+  // Mentes, kodolva. A portal meg nem fut (a hivo csak utana inditja a
+  // webszervert), tehat a fajlirasnak nincs versenytarsa a masik taskbol -
+  // a zarat megis megszerezzuk, hogy a szabaly kivetel nelkuli legyen.
+  char enc[SECRET_ENC_MAX + 1];
+  bool mentve = false;
+  if (filesystemReady() && encodeSecret(apPass, enc, sizeof(enc)) && beginConfigWrite()) {
+    mentve = writeConfigValue(LittleFS, apPassPath, enc);
+    endConfigWrite();
+  }
+  if (!mentve) {
+    // Nem vegzetes: ebben a portal-munkamenetben ez a jelszo el, es ki is
+    // irtuk. A kovetkezo inditas uj jelszot general.
+    Serial.println("FIGYELEM: az AP jelszo mentese nem sikerult - csak erre a munkamenetre ervenyes.");
+  }
+}
 
 // HTML-escape egy attribútumérték számára.
 //
@@ -726,10 +796,15 @@ static void sendDiagnosticLog(AsyncWebServerRequest* request) {
 
 void startWebPortal() {
   Serial.println("Setting AP (Access Point)");
+  // Az AP NEVE is egyedi: a MAC cim utolso ket bajtja kerul a vegere. Ket
+  // eszkoz egy lakasban kulonben ugyanazon a neven jelenne meg.
   char apName[32];
-  snprintf(apName, sizeof(apName), "ESP-%s", ESP.getChipModel());
+  const uint64_t mac = ESP.getEfuseMac();
+  snprintf(apName, sizeof(apName), "ESP-%s-%02X%02X", ESP.getChipModel(),
+           (unsigned)((mac >> 32) & 0xFF), (unsigned)((mac >> 40) & 0xFF));
   WiFi.mode(WIFI_AP);
-  WiFi.softAP(apName, AP_PASSWORD);
+  ensureApPassword();   // a mode() UTAN: a radio mar fut, az esp_random() valodi
+  WiFi.softAP(apName, apPass);
   Serial.print("AP SSID: ");
   Serial.println(apName);
   Serial.print("AP IP address: ");

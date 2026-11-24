@@ -205,6 +205,12 @@ def main():
     allit("IPAddress::operator[] const",
           bool(re.search(r'uint8_t operator\[\]\(int index\) const;', ia)),
           bool(re.search(r'uint8_t operator\[\]\(int i\) const', stub_ard)))
+    er = szoveg(keres(gyokerek, 'esp_hw_support/include/esp_random.h'))
+    allit("esp_random() szignaturaja (az AP jelszo veletlenje)",
+          bool(re.search(r'uint32_t esp_random\(void\);', er)),
+          bool(re.search(r'uint32_t esp_random\(void\);', szoveg(GYOKER / 'test/stubs/esp_random.h'))))
+    allit("esp_random(): bekapcsolt Wi-Fi mellett valodi veletlen (a dokumentalt feltetel)",
+          bool(re.search(r'If Wi-Fi or Bluetooth are enabled, this function returns true random', er)), True)
     eh = szoveg(keres(gyokerek, 'src/ESPping.h'))
     allit("ESPping::averageTime() tipusa",
           egy(eh, r'(\w+) averageTime\(\);'),

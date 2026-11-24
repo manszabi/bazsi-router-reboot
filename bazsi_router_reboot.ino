@@ -489,6 +489,11 @@ RTC_NOINIT_ATTR uint32_t rtcCarryRetryRounds;
 // ...es ugyanezert a tartos internetkieses-korok szamlaloja is: nelkule egy
 // heap-ujraindulas visszaadna a routernek a teljes, 4 resetes kort.
 RTC_NOINIT_ATTR uint32_t rtcCarryInternetFailRounds;
+// ...es a reset elotti diagnozis emleke (pingOkResetUsed, lastSkipDiag). A
+// kihagyott-reset varakozas alatt a checkHeap() ujraindithat (ott nincs
+// kizaras); enelkul a router egy FELESLEGES ujabb resetet kapna, holott mar
+// kiderult, hogy nem segit. 0. bit: pingOkResetUsed, 8-15. bit: lastSkipDiag.
+RTC_NOINIT_ATTR uint32_t rtcCarryDiagState;
 
 // ---------------------------------------------------------------------------
 // KET TASK, EGY MEMORIA - mi vedi a kozos allapotot?
@@ -602,6 +607,7 @@ void initHeapState() {
     rtcCarryResetEvents = CARRY_NONE;
     rtcCarryRetryRounds = 0;
     rtcCarryInternetFailRounds = 0;
+    rtcCarryDiagState = 0;
   }
 }
 
@@ -618,6 +624,8 @@ void applyHeapCarry() {
   // egyutt irjuk es egyutt is hasznaljuk fel.
   rtcRetryRounds = rtcCarryRetryRounds;
   rtcInternetFailRounds = rtcCarryInternetFailRounds;
+  pingOkResetUsed = (rtcCarryDiagState & 1u) != 0;
+  lastSkipDiag = (uint8_t)((rtcCarryDiagState >> 8) & 0xFFu);
   rtcCarryResetEvents = CARRY_NONE;
   printUptime();
   Serial.print("Heap miatti ujraindulas utan folytatjuk: router reset szamlalo = ");
@@ -761,6 +769,7 @@ void checkHeap(uint32_t now) {
   rtcCarryResetEvents = testState.resetEvents;
   rtcCarryRetryRounds = rtcRetryRounds;
   rtcCarryInternetFailRounds = rtcInternetFailRounds;
+  rtcCarryDiagState = (pingOkResetUsed ? 1u : 0u) | ((uint32_t)lastSkipDiag << 8);
   rtcHeapRestarts++;
   logEvent(EV_HEAP_RESTART, (uint16_t)(szabad / 1024));
 
@@ -2209,6 +2218,10 @@ void setup() {
   Serial.println(ssid);
   Serial.print((unsigned)strlen(pass));
   Serial.println(" chars password loaded");
+  // Az eszköz saját AP jelszava (ha már generált egyet) - lásd
+  // announceApPassword(). Minden indulásnál: a soros port az egyetlen út,
+  // amin kábellel később is kideríthető.
+  announceApPassword();
   Serial.println(ipStr);
   Serial.println(gatewayStr);
 
