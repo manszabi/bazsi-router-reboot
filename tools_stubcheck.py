@@ -75,6 +75,8 @@ def main():
     stub_wdt    = szoveg(GYOKER / 'test/stubs/esp_task_wdt.h')
     stub_http   = szoveg(GYOKER / 'test/stubs/HTTPClient.h')
     stub_aws    = szoveg(GYOKER / 'test/stubs/ESPAsyncWebServer.h')
+    stub_ping   = szoveg(GYOKER / 'test/stubs/ESPping.h')
+    stub_ard    = szoveg(GYOKER / 'test/stubs/Arduino.h')
     teszt       = szoveg(GYOKER / 'test/test_main.cpp')
 
     # --- 1. LABKIOSZTAS. A legelesebb: a rele lába. -------------------------
@@ -177,6 +179,39 @@ def main():
     allit("main.cpp: a loopTask feltetelesen etet minden iteracioban",
           bool(re.search(r'if \(loopTaskWDTEnabled\)\s*\{\s*esp_task_wdt_reset\(\);', mc)),
           True)
+
+    # --- 9. A router reset elotti diagnozis es a Wi-Fi javitasok API-ja -----
+    # Ezekre a hivasokra uj viselkedes epul (tartalek DNS, modem-alvas,
+    # DNS-diagnozis, a fantom-ping szurese) - a szignaturak es a ket
+    # viselkedesi allitas, amire a forraskod hivatkozik.
+    wg = szoveg(keres(gyokerek, 'libraries/WiFi/src/WiFiGeneric.h'))
+    allit("WiFiGenericClass::setSleep(bool) visszateresi tipusa",
+          egy(wg, r'(\w+) setSleep\(bool enabled\);'),
+          egy(stub_wifi, r'(\w+) setSleep\(bool enabled\)'))
+    allit("WiFiGenericClass::hostByName static int",
+          bool(re.search(r'static int hostByName\(const char \*aHostname, IPAddress &aResult\);', wg)),
+          bool(re.search(r'static int hostByName\(const char\* host, IPAddress& out\)', stub_wifi)))
+    nm = szoveg(keres(gyokerek, 'libraries/Network/src/NetworkManager.cpp'))
+    allit("NetworkManager::hostByName hibanal a (pozitiv) lwIP kodot adja",
+          bool(re.search(r'DNS Failed for[^\n]*\n\s*return err;', nm)), True)
+    ni = szoveg(keres(gyokerek, 'libraries/Network/src/NetworkInterface.h'))
+    allit("NetworkInterface::dnsIP(uint8_t, IPAddress) setter",
+          egy(ni, r'(\w+) dnsIP\(uint8_t dns_no, IPAddress ip\);'),
+          egy(stub_wifi, r'(\w+) dnsIP\(uint8_t dns_no, IPAddress ip\)'))
+    ws = szoveg(keres(gyokerek, 'libraries/WiFi/src/WiFiSTA.h'))
+    allit("WiFiSTAClass: a STA tag publikus (WiFi.STA.dnsIP)",
+          bool(re.search(r'class WiFiSTAClass \{\s*public:\s*STAClass STA;', ws)), True)
+    ia = szoveg(keres(gyokerek, 'cores/esp32/IPAddress.h'))
+    allit("IPAddress::operator[] const",
+          bool(re.search(r'uint8_t operator\[\]\(int index\) const;', ia)),
+          bool(re.search(r'uint8_t operator\[\]\(int i\) const', stub_ard)))
+    eh = szoveg(keres(gyokerek, 'src/ESPping.h'))
+    allit("ESPping::averageTime() tipusa",
+          egy(eh, r'(\w+) averageTime\(\);'),
+          egy(stub_ping, r'(\w+) averageTime\(\)'))
+    ec = szoveg(keres(gyokerek, 'src/ESPping.cpp'))
+    allit("ESPping: _success = _expected_count - _errors (a fantom-siker oka)",
+          bool(re.search(r'_success = _expected_count - _errors;', ec)), True)
 
     if hibak:
         print("\nA STUB-IGAZOLAS MEGBUKOTT:")

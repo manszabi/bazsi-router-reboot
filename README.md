@@ -316,9 +316,27 @@ választ, és ez a hiba némán, a redundancia elvesztésével jelentkezne. A
    > `cycleIndex = 4`-re ugrik, és nem játssza végig az öt tesztet – nincs
    > hálózat, amin bármelyik végpont elérhető lenne.
 
-2. Ha **4 router újraindítás** sem hozza vissza az internetet → deep sleep 1 órára,
+2. **Diagnózis a router áramtalanítása előtt.** Az eszköz megnézi, *hol* a hiba:
+   - a **ping sem megy** (vagy nincs Wi-Fi) → valódi kiesés, jön a router reset;
+   - a **ping megy, de a DNS nem**, vagy **ping és DNS is megy, csak a HTTP bukik**
+     → az internet IP-n elérhető. A router **egy** esélyt kap (egy befagyott
+     router-DNS ezt indokolja); ha az nem segített, **több resetet nem kap**: a
+     firmware 10 percenként újra tesztel, és a naplóba írja, miért marad el a
+     reset (`NET DIAG`, `RESET SKIPPED`). Korábban ilyenkor a jó routert is
+     végtelenül, ~4 percenként újraindította.
+
+3. Ha **4 router újraindítás** sem hozza vissza az internetet → deep sleep 1 órára,
    majd magától ébred és újrapróbálja. (A `maxfailureEvents = 5` a *reset esemény*
    számláló határa; a számláló még a reset előtt nő, ezért 4 tényleges újraindítás történik.)
+   Ha az ébredés után is tart a kiesés, **körönként már csak 1** reset jár, aztán
+   újra alvás – így a router tartós hibánál legfeljebb óránként egyszer kap
+   áramtalanítást (korábban 85 percenként 4-szer, vég nélkül). Egy sikeres teszt
+   mindent nulláz.
+
+4. **A Wi-Fi beállítások a stabil méréshez:** a modem-alvás ki van kapcsolva
+   (egyes routereknél elhúzódó TCP-válaszokat okoz), és DHCP mellett is van
+   tartalék DNS (1.1.1.1, a router DNS-e után). Ha a Wi-Fi **rossz jelszó** miatt
+   esik ki, router reset helyett AP beállító mód jön.
 
 ### 3. Fizikai gombok
 
@@ -562,6 +580,8 @@ Amit ez hoz:
 | `firstStartDelay` | **max.** 10 perc | Első indítás utáni várakozás – ugyanígy korábban is véget érhet |
 | `ONLINE_PROBE_INTERVAL_MS` | 60 mp | Ilyen sűrűn nézzük a két hosszú várakozás alatt, hogy vége lehet-e |
 | `maxfailureEvents` | 5 | A reset esemény számláló határa → **4** tényleges router újraindítás után deep sleep |
+| `maxfailureEventsAfterSleep` | 2 | Az első „tartós kiesés" alvás után körönként már csak **1** router újraindítás |
+| `HOLD_OFF_MS` | 10 perc | Kihagyott reset után (az internet IP-n elérhető, egy reset már nem segített) ennyi múlva tesztel újra |
 | `wifi_maxRetries` | 3 | Wi-Fi újracsatlakozási próbálkozások |
 | `wifiInterval` | 30s | Szünet a próbálkozások között |
 | `MAX_RETRY_ROUNDS` | 33 | 33 × 25,5 perc + 32 × 60 perc = **46 óra** türelem, körönként egy router újraindítással (az utolsó kör már nem alszik) |

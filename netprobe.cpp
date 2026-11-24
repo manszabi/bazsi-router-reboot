@@ -11,6 +11,36 @@
 // ertek, mint a fomodul BUTTON_POLL_MS-e; itt sajat neven all, mert ez a modul
 // csak ennyit hasznal belole, es igy nem kell a fomodul konstansaira huzodnia.
 static constexpr uint32_t PROBE_POLL_MS = 10;
+
+// Az utolso HTTP teszt kodja (lasd lastHttpCode()). Csak a loop task irja es
+// olvassa.
+static int s_lastHttpCode = 0;
+
+int lastHttpCode() {
+  return s_lastHttpCode;
+}
+
+uint16_t httpCodeLogParam(int code) {
+  if (code >= 0) {
+    return (code > 65535) ? (uint16_t)65535 : (uint16_t)code;
+  }
+  const int abszolut = -code;
+  return (abszolut > 64535) ? (uint16_t)65535 : (uint16_t)(1000 + abszolut);
+}
+
+bool testDnsResolve(const char* host) {
+  IPAddress cim;
+  const int eredmeny = WiFi.hostByName(host, cim);
+  const bool ok = (eredmeny == 1) && ((uint32_t)cim != 0);
+  if (!ok) {
+    Serial.print("DNS hiba: ");
+    Serial.print(host);
+    Serial.print(" nem oldhato fel (kod ");
+    Serial.print(eredmeny);
+    Serial.println(")");
+  }
+  return ok;
+}
 static_assert(PROBE_POLL_MS == 10, "a gomb-pollozas uteme a fomodullal egyezzen");
 
 // Egy bájt, legfeljebb timeoutMs várakozással. -1: lejárt a határidő, vagy a
@@ -26,7 +56,15 @@ static int readByteBounded(WiFiClient& stream, uint32_t timeoutMs) {
     if (stream.available() > 0) {
       return stream.read();  // <0 is lehet: available() ígért, de elszállt
     }
-    // A szerver lezárta és nincs több adat: nincs értelme a timeoutot kivárni
+    // Megszakadt kapcsolat (RST, hiba): nincs mit kivárni.
+    //
+    // FIGYELEM: egy RENDES lezárást (FIN) ez NEM vesz észre. A core
+    // NetworkClient::connected() függvénye recv(MSG_PEEK)-kel néz, és a FIN
+    // utáni 0-s visszatérést "még kapcsolódva"-nak veszi (NetworkClient.cpp,
+    // az else ág: _connected = true). Content-Length nélküli válasznál ezért
+    // a végén kivárjuk a timeoutMs-et - ez lassít, de nem okoz hibás
+    // eredményt. Content-Length mellett pontosan annyit olvasunk, amennyi
+    // jön, így ott ez elő sem fordul.
     if (!stream.connected()) {
       return -1;
     }
@@ -135,6 +173,7 @@ bool testInternetHTTP(const char* url, const char* expectedResponse) {
 
   if (!http.begin(client, url)) {
     Serial.println("Error: HTTP begin failed");
+    s_lastHttpCode = HTTP_CODE_BEGIN_FAILED;
     return false;
   }
 
@@ -145,6 +184,7 @@ bool testInternetHTTP(const char* url, const char* expectedResponse) {
   http.collectHeaders(kCollectHeaders, 1);
 
   const int httpCode = http.GET();
+  s_lastHttpCode = httpCode;
   bool result = false;
 
   if (expectedResponse[0] == '\0') {
@@ -210,7 +250,21 @@ bool testInternetPing(const IPAddress& target, const char* targetName) {
   for (uint8_t j = 0; j < PING_ATTEMPTS; j++) {
     // A Ping.ping() érték szerint veszi a címet (ESPping: bool ping(IPAddress,
     // int16_t)), tehát a másolatot ő maga készíti - nem kell külön helyi példány.
-    const bool pingOK = Ping.ping(target, 1);  // 1 próbálkozás pingenként
+    //
+    // AZ averageTime() FELTÉTEL AZ ESPping 1.0.5 EGY HIBÁJA ELLEN VAN. Ha a
+    // csomagot el sem tudta küldeni (ping_send(): mem_malloc hiba), a
+    // transmitted 0 marad, és a callback _errors = 0, _success = count - 0
+    // értéket számol - a ping() tehát IGAZAT ad, válasz nélkül (ESPping.cpp,
+    // _ping_recv_cb ESP32 ága). Ilyenkor viszont nem volt mért válaszidő:
+    // az averageTime() 0. Valódi válasz mellett a mért idő mindig pozitív
+    // (a ping32.cpp gettimeofday()-jal, mikroszekundumra mér).
+    //
+    // A KÖNYVTÁR MÁSIK GYENGESÉGÉT ez nem szűri: minden ping ugyanazzal az
+    // azonosítóval és 1-es sorszámmal megy, így egy ELŐZŐ ping 1 mp után
+    // beérkező, késett válasza a következő próbát sikeresnek mutathatja. Ez
+    // csak akkor fordulhat elő, ha a cél egy másodperce TÉNYLEG válaszolt -
+    // ezért a ping sehol nem dönt egyedül a router újraindításáról.
+    const bool pingOK = Ping.ping(target, 1) && Ping.averageTime() > 0.0f;  // 1 próba pingenként
     Serial.print("Ping ");
     Serial.print(j + 1);
     if (pingOK) {

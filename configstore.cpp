@@ -36,6 +36,23 @@ bool isUsableIPv4(const IPAddress& addr) {
   return (uint32_t)addr != 0;
 }
 
+bool staticPairValid(const IPAddress& ip, const IPAddress& gateway) {
+  if (!isUsableIPv4(ip) || !isUsableIPv4(gateway)) {
+    return false;
+  }
+  // Az operator[] az oktetteket halozati sorrendben adja, a (uint32_t)
+  // konverzio bajtsorrendjetol fuggetlenul.
+  for (int i = 0; i < 3; i++) {
+    if (ip[i] != gateway[i]) {
+      return false;   // nem ugyanaz a /24 - a fix maszkkal nincs ut
+    }
+  }
+  if (ip[3] == 0 || ip[3] == 255 || gateway[3] == 0 || gateway[3] == 255) {
+    return false;     // halozati vagy broadcast cim
+  }
+  return ip[3] != gateway[3];   // az eszkoz nem lehet a gateway
+}
+
 // A fajlrendszer csatolasa. formatOnFail = true: az ELSO indulaskor magatol
 // megformazza a particiot, tehat nem kell kulon adatfeltoltes.
 bool initLittleFS() {
@@ -87,7 +104,8 @@ bool fileMatches(fs::FS& fs, const char* path, const char* value, size_t len) {
 }
 
 // Egy konfigurációs érték beolvasása fix méretű bufferbe (String allokáció nélkül)
-ConfigStatus readConfigValue(fs::FS& fs, const char* path, char* out, size_t outSize) {
+static ConfigStatus readValue(fs::FS& fs, const char* path, char* out, size_t outSize,
+                              bool trimAll) {
   out[0] = '\0';
 
   // A hiányzó fájl nem hiba: első indításkor és wifireset után is ez a helyzet.
@@ -121,9 +139,25 @@ ConfigStatus readConfigValue(fs::FS& fs, const char* path, char* out, size_t out
   if (nl != nullptr) {
     *nl = '\0';
   }
-  trimInPlace(out);
+  if (trimAll) {
+    trimInPlace(out);
+  } else {
+    // Csak a sorveg: Windows alatt szerkesztett fajlban a '\n' elott '\r' all.
+    const size_t hossz = strlen(out);
+    if (hossz > 0 && out[hossz - 1] == '\r') {
+      out[hossz - 1] = '\0';
+    }
+  }
   // Az üres tartalom is érvényes eredmény: a wifireset csonkolt fájlt hagy hátra.
   return CONFIG_OK;
+}
+
+ConfigStatus readConfigValue(fs::FS& fs, const char* path, char* out, size_t outSize) {
+  return readValue(fs, path, out, outSize, true);
+}
+
+ConfigStatus readSecretValue(fs::FS& fs, const char* path, char* out, size_t outSize) {
+  return readValue(fs, path, out, outSize, false);
 }
 
 // Írás ellenőrzéssel. true csak akkor, ha a tartalom vissza is olvasható.

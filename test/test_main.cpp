@@ -91,6 +91,20 @@ extern uint32_t rtcEvMagic;
 extern uint32_t rtcEvNext;
 enum EventCode : uint8_t;
 extern uint32_t rtcCarryRetryRounds;
+// A router reset elotti diagnozis es a tartos kieses korlatja (lasd a sketch
+// NetDiag leirasat es a maxfailureEventsAfterSleep-et).
+extern uint32_t rtcInternetFailRounds;
+extern uint32_t rtcCarryInternetFailRounds;
+extern bool pingOkResetUsed;
+extern bool holdOffActive;
+extern uint8_t lastSkipDiag;
+uint8_t diagnoseNetwork();
+void ensureFallbackDns();
+int lastHttpCode();
+uint16_t httpCodeLogParam(int code);
+bool testDnsResolve(const char* host);
+bool staticPairValid(const IPAddress& ip, const IPAddress& gateway);
+ConfigStatus readSecretValue(fs::FS& fs, const char* path, char* out, size_t outSize);
 // FIGYELEM: ennek BAJTROL BAJTRA egyeznie kell a sketch definiciojaval - nem
 // csak az RTC memoria elrendezese miatt, hanem mert ez a struktura megy ki a
 // LittleFS-re mentett naplofajlba is, tehat a FAJLFORMATUM resze.
@@ -302,7 +316,10 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   g_resetReason = deepSleepWake ? ESP_RST_DEEPSLEEP : ESP_RST_POWERON;
   if (!deepSleepWake) {
     rtcRetryRounds = 0;
+    rtcInternetFailRounds = 0;   // RTC_DATA_ATTR: csak a deep sleepet eli tul
   }
+  // Sima globalisok: minden ujraindulas nullazza oket.
+  pingOkResetUsed = false; holdOffActive = false; lastSkipDiag = 0;
   // Egy valodi hidegindulas ezeket is nullazza (sima globalisok). Enelkul egy
   // korabbi mentes utan beallitott halasztott ujrainditas atszivarogna a
   // "reboot" utanra, es kesobb, a scenario kozepen inditana ujra az eszkozt.
@@ -325,6 +342,7 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   g_gpioWakeMask = 0; g_gpioWakeMode = -1;
   g_isr.clear(); g_isrMode.clear();
   rtcCarryRetryRounds = 0;
+  rtcCarryInternetFailRounds = 0;
   btnResetLatched = false; btnWifiResetLatched = false;
   btnResetDownAt = 0; btnWifiResetDownAt = 0;
   // A GPIO hold a valosagban tuleli az ebredest (reset), csak az
@@ -2070,7 +2088,11 @@ static void scWDT7() {
   CHECK(serialHas("FIGYELEM"), "kiirja, hogy a watchdog nem vedi a loop()-ot");
   CHECK(g_wdtFeedNotSubscribed == 0,
         "egyetlen feliratkozas nelkuli etetes sincs (nincs log_e() aradat)");
-  CHECK(g_serialLog.size() - before < 60,
+  // A KUSZOB: egy log_e() aradat 10 ms-onkent egy sort irna, vagyis percenkent
+  // ~6000-et. Ebbe az ablakba a teszt-bukasok miatt egy teljes router-reset
+  // is beleesik (5 teszt + a reset elotti diagnozis + a pulzus): ez ~65 sor,
+  // es mind ertelmes. A 80 boven elvalasztja a kettot.
+  CHECK(g_serialLog.size() - before < 80,
         "1 perc alatt sem arasztja el a konzolt");
 }
 
@@ -3836,21 +3858,43 @@ static void merjResetUtem(uint32_t& elsoTav, int& resetek) {
 
 static void scRR1() {
   // ESET A: az internet IP szinten MEGY (a ping sikerul), csak a HTTP bukik.
-  // Ez a befagyott router-DNS - a router tenyleg elakadt, tehat a gyorsabb
-  // ujrainditasi utem HELYES. A korai kilepes itt rovidit.
+  //
+  // KORABBAN ez 4 resetet kapott, 3-7 percenkent, majd alvast - es az alvas
+  // utan ELOLROL, vegtelenul. Ha a hiba nem a routerben van (DNS-szuro,
+  // tiltott 80-as port, az ESP sajat gondja), ez napi ~65 felesleges
+  // aramtalanitas volt egy tokeletesen mukodo routernek. Ez volt a terepen
+  // jelentett "ok nelkul ujrainditja a routert" tunet.
+  //
+  // MOST: a router EGY eselyt kap (egy befagyott router-DNS/proxy ezt
+  // indokolja), de ha az nem segitett, tobbet nem aramtalanitunk - 10
+  // percenkent ujra tesztelunk, es a naplo megmondja, miert.
   coldBoot(true, "TestNet", "pw", "", "");
   g_httpCode = -1; g_httpFailMs = 15000;   // hallgato szerver
   pingSim.ok = true;                        // az IP ut viszont el
   setup();
   g_log.clear();
   uint32_t tav; int resetek;
-  merjResetUtem(tav, resetek);
-  printf("     [info] befagyott DNS: %d router reset, ket reset kozt %u perc %u mp\n",
-         resetek, tav / 60000, (tav / 1000) % 60);
-  CHECK(resetek == 4, "pontosan 4 tenyleges router ujrainditas, aztan alvas");
-  CHECK(tav >= 3u * 60 * 1000,
-        "ket ujrainditas kozt legalabb 3 perc telik (nem kapcsolgat)");
-  CHECK(tav <= 7u * 60 * 1000, "es legfeljebb ~7 perc (a korai kilepes rovidit)");
+  bool aludt = false;
+  {
+    // merjResetUtem() mintajara, de az alvast is jelezzuk
+    int guard = 0; size_t nezettIg = 0; tav = 0; resetek = 0;
+    try {
+      while (++guard < 900000) {
+        loop();
+        for (size_t i = nezettIg; i < g_log.size(); i++)
+          if (g_log[i] == RELAY_HIGH) resetek++;
+        nezettIg = g_log.size();
+      }
+    } catch (DeepSleepSignal&) { aludt = true; }
+  }
+  printf("     [info] ping megy, HTTP bukik: %d router reset %.1f ora alatt\n",
+         resetek, g_millis / 3600000.0);
+  CHECK(resetek == 1, "a router pontosan EGY esélyt kap, aztan nem kapcsolgatjuk");
+  CHECK(!aludt, "nem is alszik el - folyamatosan figyel tovabb");
+  CHECK(serialHas("A router reset ELMARAD"), "a soros porton kimondja, hogy elmarad");
+  CHECK(serialHas("A varakozas letelt"), "10 percenkent ujra tesztel");
+  CHECK(holdOffActive || currentState != (State)2, "es a teszteles tenyleg folyik");
+  (void)tav;
 }
 
 static void scRR2() {
@@ -3876,8 +3920,10 @@ static void scRR3() {
   // Egyetlen sikeres teszt NULLAZZA a reset-szamlalot: az eszkoz nem
   // "gyujtogeti" a resetet napokon at. Ha 3 reset utan visszajon a net, a
   // kovetkezo kieses megint 4 resetet kap, nem egyet.
+  // VALODI kieses (a ping sem megy): itt jar a teljes, 4 resetes kor. (Ping
+  // mellett a router csak egy eselyt kapna - azt az RR1 meri.)
   coldBoot(true, "TestNet", "pw", "", "");
-  g_httpCode = -1; g_httpFailMs = 15000; pingSim.ok = true;
+  g_httpCode = -1; g_httpFailMs = 15000; pingSim.ok = false;
   setup();
   int guard = 0, resetek = 0;
   size_t nezettIg = 0;
@@ -3892,7 +3938,7 @@ static void scRR3() {
   CHECK(resetek == 2, "ket reset megtortent");
   CHECK(testState.resetEvents == 2, "a szamlalo 2-n all");
   // Most visszajon az internet
-  g_httpCode = 200; g_httpBody = "Microsoft Connect Test";
+  g_httpCode = 200; g_httpBody = "Microsoft Connect Test"; pingSim.ok = true;
   guard = 0;
   try { while (++guard < 400000 && !serialHas("Successful Test")) loop(); }
   catch (DeepSleepSignal&) {}
@@ -7803,7 +7849,7 @@ static void propCheck(PropState& ps, uint32_t step) {
     const uint32_t db = (rtcEvNext < PROP_EVLOG_SIZE) ? rtcEvNext : PROP_EVLOG_SIZE;
     for (uint32_t i = 0; i < db; i++) {
       const uint8_t c = rtcEvents[i].code;
-      if (c < 1 || c > 14) {   // EV_BOOT .. EV_HEAP_RESTART
+      if (c < 1 || c > 17) {   // EV_BOOT .. EV_RESET_SKIPPED
         propViolate(ps, step, "ervenytelen esemenykod az esemenynaploban");
         break;
       }
@@ -8653,6 +8699,385 @@ static void scWEAR() {
          g_wearWrites * 33);
 }
 
+
+// ===========================================================================
+// A ROUTER RESET ELOTTI DIAGNOZIS, A KIHAGYOTT RESET ES A TARTOS KIESES KORLATJA
+// ===========================================================================
+
+// Esemenykodok (eventlog.h)
+static const uint8_t EVC_TEST_FAIL = 4, EVC_ROUTER_RESET = 5, EVC_AP_MODE = 6,
+                     EVC_HTTP_ERROR = 15, EVC_NET_DIAG = 16, EVC_RESET_SKIPPED = 17;
+
+// Hany bejegyzes van az RTC naplo gyurujeben ezzel a koddal (es ha param >= 0,
+// ezzel a parameterrel)?
+static int evCount(uint8_t code, int param = -1) {
+  const uint32_t db = (rtcEvNext < 32) ? rtcEvNext : 32;
+  int n = 0;
+  for (uint32_t k = rtcEvNext - db; k < rtcEvNext; k++) {
+    const EventEntry& e = rtcEvents[k % 32];
+    if (e.code == code && (param < 0 || e.param == (uint16_t)param)) n++;
+  }
+  return n;
+}
+
+static int relayPulses() {
+  int n = 0;
+  for (auto& l : g_log) if (l == RELAY_HIGH) n++;
+  return n;
+}
+
+// A loop() futtatasa, amig a feltetel teljesul vagy lejar az ido.
+// Visszaad: 0 = feltetel/ido, 1 = deep sleep, 2 = ujraindulas.
+template <class F>
+static int futtat(uint32_t maxMs, F kesz) {
+  const uint32_t t0 = g_millis;
+  int guard = 0;
+  try {
+    while (g_millis - t0 < maxMs && ++guard < 3000000 && !kesz()) loop();
+  } catch (DeepSleepSignal&) { return 1; }
+  catch (RestartSignal&) { return 2; }
+  return 0;
+}
+
+static void ujNaplo() { rtcEvMagic = 0; rtcEvNext = 0; }
+
+static void scND1() {
+  // BEFAGYOTT ROUTER-DNS: a ping megy, a nevfeloldas nem. A router EGY eselyt
+  // kap - es ha a reset megoldja, minden "nem segitett" emlek torlodik.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  monitorUzembe();
+  ujNaplo(); g_log.clear();
+  g_httpCode = -1; g_httpFailMs = 33000; pingSim.ok = true; wifiSim.dnsOk = false;
+  futtat(30u * 60 * 1000, [] { return serialHas("Reset is done in FAILURE_STATE."); });
+  CHECK(relayPulses() == 1, "egy router reset tortent");
+  CHECK(evCount(EVC_NET_DIAG, 2) == 1, "a naploban NET DIAG = 2 (a ping megy, a DNS nem)");
+  CHECK(evCount(EVC_HTTP_ERROR, 1001) == 1, "es a HTTP kod is: 1001 (= -1, kapcsolodasi hiba)");
+  CHECK(pingOkResetUsed, "a 'ping mellett mar kapott eselyt' jelzo all");
+  CHECK(serialHas("a nevfeloldas (DNS) nem mukodik"), "a soros porton is kimondja");
+  // A reset megoldotta: visszajon a DNS es a HTTP.
+  wifiSim.dnsOk = true; g_httpCode = 200; g_httpBody = "Microsoft Connect Test";
+  futtat(30u * 60 * 1000, [] { return serialHas("Successful Test"); });
+  CHECK(serialHas("Successful Test"), "a reset utan sikeres a teszt");
+  CHECK(!pingOkResetUsed && lastSkipDiag == 0, "a sikeres teszt torolte a jelzoket");
+  CHECK(relayPulses() == 1, "es tobb reset nem volt");
+}
+
+static void scND2() {
+  // A RESET NEM SEGIT (pl. szuro tiltja a teszt-cimeket): ping es DNS megy,
+  // a HTTP bukik. Egy reset, utana NINCS tobb - es a naplot sem sopri el.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  monitorUzembe();
+  ujNaplo(); g_log.clear();
+  g_httpCode = 403; g_httpFailMs = 200; pingSim.ok = true;
+  const int r = futtat(4u * 3600 * 1000, [] { return false; });
+  int varakozasok = 0;
+  for (auto& l : g_serialLog) if (l.find("A varakozas letelt") != std::string::npos) varakozasok++;
+  printf("     [info] 4 ora: %d reset, %d ujrateszteles, %u naplobejegyzes\n",
+         relayPulses(), varakozasok, rtcEvNext);
+  CHECK(r == 0, "nem alszik el es nem indul ujra");
+  CHECK(relayPulses() == 1, "4 ora alatt is egyetlen router reset");
+  CHECK(varakozasok >= 15, "kozben 10 percenkent ujra tesztel (nem adja fel)");
+  CHECK(evCount(EVC_NET_DIAG, 3) >= 1, "NET DIAG = 3: ping es DNS megy, csak a HTTP bukik");
+  CHECK(evCount(EVC_RESET_SKIPPED, 3) == 1,
+        "a RESET SKIPPED egyszer kerul a naploba, nem minden korben");
+  CHECK(evCount(EVC_HTTP_ERROR, 403) == 2,
+        "a HTTP kod (403) a reset elott es utan egyszer-egyszer - utana mar nem ismetli");
+  CHECK(rtcEvNext < 20, "a 32 elemu korpuffert 4 ora alatt sem sopri ki");
+}
+
+static void scND3() {
+  // A kihagyott-reset sorozat UTAN visszajon a net, majd ujra elromlik: az uj
+  // hibasorozatban a router ujra kap eselyt (nem marad orokre "tiltva").
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  monitorUzembe();
+  g_log.clear();
+  g_httpCode = -1; g_httpFailMs = 15000; pingSim.ok = true;
+  futtat(2u * 3600 * 1000, [] { return serialHas("A router reset ELMARAD"); });
+  CHECK(serialHas("A router reset ELMARAD"), "elobb eljutunk a kihagyott resetig");
+  CHECK(relayPulses() == 1, "addig egy reset");
+  g_httpCode = 200; g_httpBody = "Microsoft Connect Test";
+  futtat(30u * 60 * 1000, [] { return serialHas("Successful Test"); });
+  CHECK(serialHas("Successful Test"), "visszajott");
+  CHECK(!holdOffActive && !pingOkResetUsed, "a kihagyas allapota torlodott");
+  g_httpCode = -1;
+  futtat(30u * 60 * 1000, [] { return relayPulses() >= 2; });
+  CHECK(relayPulses() == 2, "az uj hibasorozat ujra kap egy resetet");
+}
+
+static void scND4() {
+  // VALODI KIESES: a ping sem megy -> NET DIAG = 1, a regi szabalyok szerint.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  monitorUzembe();
+  ujNaplo(); g_log.clear();
+  g_httpCode = -1; g_httpFailMs = 15000; pingSim.ok = false;
+  futtat(30u * 60 * 1000, [] { return relayPulses() >= 1; });
+  CHECK(evCount(EVC_NET_DIAG, 1) == 1, "NET DIAG = 1 (nincs ut az internetre)");
+  CHECK(relayPulses() == 1, "es jon a reset");
+  CHECK(!pingOkResetUsed, "a ping-alapu eselyt NEM hasznalta el");
+  // Wi-Fi nelkul a diagnozis nem is pingel.
+  wifiSim.willConnect = false; wifiSim.begun = false;
+  const int elotte = pingSim.calls;
+  CHECK(diagnoseNetwork() == 1, "Wi-Fi nelkul a diagnozis: nincs ut");
+  CHECK(pingSim.calls == elotte, "es nem is pingelt feleslegesen");
+}
+
+static void scND5() {
+  // A DIAGNOZIS ELEG, HA BARMELYIK DNS-NEV FELOLDHATO - de mindkettot nem
+  // probalja, ha az elso sikerult.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  wifiSim.dnsQueries = 0;
+  CHECK(diagnoseNetwork() == 3, "ping es DNS megy -> 3");
+  CHECK(wifiSim.dnsQueries == 1, "egy sikeres feloldas utan nem kerdez tovabb");
+  wifiSim.dnsOk = false; wifiSim.dnsQueries = 0;
+  CHECK(diagnoseNetwork() == 2, "a DNS halott -> 2");
+  CHECK(wifiSim.dnsQueries == 2, "ket fuggetlen nevet is megprobalt");
+}
+
+static void scSLP1() {
+  // A VEGTELEN KOR VEGE. Korabban a resetEvents (sima RAM) az 1 oras alvas
+  // utan nullarol indult, tehat tartos hibanal a kor sosem allt meg: 85
+  // percenkent 4 reset. Most az elso kor utan minden ebredes csak 1 resetet ad.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpCode = -1; g_httpFailMs = 15000; pingSim.ok = false;
+  setup();
+  g_log.clear();
+  int r = futtat(6u * 3600 * 1000, [] { return false; });
+  CHECK(r == 1, "az elso kor alvassal zarul");
+  CHECK(relayPulses() == 4, "az elso korben 4 reset");
+  CHECK(rtcInternetFailRounds == 1, "a tartos-kieses szamlalo 1");
+
+  // Ebredes, a hiba tart.
+  coldBoot(true, "TestNet", "pw", "", "", 500, true);
+  g_httpCode = -1; g_httpFailMs = 15000; pingSim.ok = false;
+  CHECK(rtcInternetFailRounds == 1, "a szamlalo tulelte a deep sleepet");
+  setup();
+  g_log.clear();
+  r = futtat(6u * 3600 * 1000, [] { return false; });
+  CHECK(r == 1, "a masodik kor is alvassal zarul");
+  CHECK(relayPulses() == 1, "de mar csak EGY resettel");
+  CHECK(rtcInternetFailRounds == 2, "a szamlalo 2");
+  CHECK(serialHas("Tartos internetkieses kor: 2"), "a soros porton is latszik");
+
+  // Ebredes, a net visszajott: a szamlalo nullazodik.
+  coldBoot(true, "TestNet", "pw", "", "", 500, true);
+  setup();
+  monitorUzembe();
+  futtat(30u * 60 * 1000, [] { return serialHas("Successful Test"); });
+  CHECK(serialHas("Successful Test"), "sikeres teszt");
+  CHECK(rtcInternetFailRounds == 0, "a sikeres teszt nullazta a szamlalot");
+}
+
+static void scSLP2() {
+  // ...es bekapcsolaskor (aramszunet utan) tiszta lap: RTC_DATA_ATTR.
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcInternetFailRounds = 5;
+  coldBoot(true, "TestNet", "pw", "", "");   // bekapcsolas
+  CHECK(rtcInternetFailRounds == 0, "bekapcsolaskor nullazodik");
+}
+
+static void scSLP3() {
+  // A heap miatti ujraindulas NEM nullazhatja a tartos-kieses szamlalot -
+  // kulonben a router ujra a teljes, 4 resetes kort kapna.
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcHeapMagic = 0;
+  setup();
+  rtcInternetFailRounds = 3;
+  g_freeHeap = 5000; g_maxAllocHeap = 4000;
+  bool restarted = false;
+  int guard = 0;
+  try { while (!restarted && ++guard < 200000) { checkHeap(g_millis); g_millis += 1000; } }
+  catch (RestartSignal&) { restarted = true; }
+  CHECK(restarted, "a heap miatt ujraindult");
+  CHECK(rtcCarryInternetFailRounds == 3, "az atvitel rogzitette a szamlalot");
+  const uint32_t hm = rtcHeapMagic, hr = rtcHeapRestarts, ci = rtcCarryInternetFailRounds;
+  const uint8_t ce = rtcCarryResetEvents; const uint32_t cr = rtcCarryRetryRounds;
+  coldBoot(true, "TestNet", "pw", "", "");
+  CHECK(rtcInternetFailRounds == 0, "a szoftveres reset nullazta volna");
+  rtcHeapMagic = hm; rtcHeapRestarts = hr; rtcCarryResetEvents = ce;
+  rtcCarryRetryRounds = cr; rtcCarryInternetFailRounds = ci;
+  setup();
+  CHECK(rtcInternetFailRounds == 3, "az atvitel utan a szamlalo folytatodik");
+}
+
+static void scHC1() {
+  // A HTTP KOD NAPLOZHATO ALAKJA.
+  CHECK(httpCodeLogParam(200) == 200, "200 valtozatlan");
+  CHECK(httpCodeLogParam(204) == 204, "204 valtozatlan");
+  CHECK(httpCodeLogParam(403) == 403, "403 valtozatlan");
+  CHECK(httpCodeLogParam(-1) == 1001, "-1 -> 1001");
+  CHECK(httpCodeLogParam(-11) == 1011, "-11 -> 1011");
+  CHECK(httpCodeLogParam(-100) == 1100, "a begin hiba -> 1100");
+  CHECK(httpCodeLogParam(70000) == 65535, "tulnagy pozitiv: telitodik");
+  CHECK(httpCodeLogParam(-70000) == 65535, "tulnagy negativ: telitodik");
+  // A kod rogzitese.
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_httpCode = -11;
+  testInternetHTTP("http://x/", "valami");
+  CHECK(lastHttpCode() == -11, "a GET kodja megmarad");
+  g_httpBeginOk = false;
+  testInternetHTTP("http://x/", "valami");
+  CHECK(lastHttpCode() == -100, "a begin hiba sajat kodot kap");
+}
+
+static void scHC2() {
+  // AZ ELSO BUKAS a kodot is naplozza, kozvetlenul a TEST FAIL utan.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  monitorUzembe();
+  ujNaplo();
+  g_httpCode = -11;
+  futtat(60u * 1000, [] { return testState.failedCount >= 1; });
+  CHECK(evCount(EVC_TEST_FAIL, 1) == 1, "TEST FAIL 1");
+  CHECK(evCount(EVC_HTTP_ERROR, 1011) == 1, "HTTP ERROR 1011 (idotullepes)");
+  CHECK(rtcEvents[(rtcEvNext - 1) % 32].code == EVC_HTTP_ERROR,
+        "a kod a TEST FAIL utani bejegyzes");
+}
+
+static void scDNS1() {
+  // A hostByName() hibanal POZITIV kodot ad (202): a puszta igazsagertek
+  // sikert mutatna. A testDnsResolve() ezt nem dolhet be.
+  coldBoot(true, "TestNet", "pw", "", "");
+  wifiSim.dnsOk = false;
+  CHECK(!testDnsResolve("www.google.com"), "a bukott feloldas hamis");
+  CHECK(serialHas("DNS hiba: www.google.com"), "es kiirja");
+  wifiSim.dnsOk = true;
+  CHECK(testDnsResolve("www.google.com"), "a sikeres feloldas igaz");
+}
+
+static void scFB1() {
+  // TARTALEK DNS DHCP MELLETT: a fallback helyre (2) kerul az 1.1.1.1.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  CHECK(wifiSim.staDns[2].str() == "1.1.1.1", "DHCP: a tartalek DNS 1.1.1.1");
+  CHECK(wifiSim.staDns[0].isZero() && wifiSim.staDns[1].isZero(),
+        "a router DNS-et (0, 1) nem irja felul");
+  // ...es minden teszt elott megismetli (auto-reconnect utan is el).
+  monitorUzembe();
+  const int elotte = wifiSim.dnsSetCount;
+  futtat(60u * 1000, [] { return serialHas("Beginning Test."); });
+  CHECK(wifiSim.dnsSetCount > elotte, "a teszt elott is beallitja");
+  // Statikus IP-nel a WiFi.config() mar beallitotta - itt nem nyul hozza.
+  coldBoot(true, "TestNet", "pw", "192.168.1.200", "192.168.1.1");
+  setup();
+  CHECK(wifiSim.dnsSetCount == 0, "statikus IP mellett nem allit kulon DNS-t");
+  CHECK(wifiSim.cfgDns2.str() == "1.1.1.1", "ott a config() dns2-je a tartalek");
+}
+
+static void scSL1() {
+  // A MODEM-ALVAS ki van kapcsolva, a csatlakozas ELOTT.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  CHECK(!wifiSim.sleepEnabled, "a Wi-Fi modem-alvas kikapcsolva");
+  CHECK(logIndex("WiFi.setSleep(false)") >= 0
+        && logIndex("WiFi.setSleep(false)") < logIndex("WiFi.begin"),
+        "a WiFi.begin() elott");
+}
+
+static void scWL1() {
+  // WI-FI VESZTES ROSSZ JELSZOVAL (pl. a routeren jelszot csereltek): nem a
+  // router hibas, a reset ertelmetlen - AP mod kell, hogy javithato legyen.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  monitorUzembe();
+  futtat(60u * 1000, [] { return serialHas("Successful Test"); });
+  g_log.clear();
+  wifiSim.authFail = true; wifiSim.willConnect = false; wifiSim.begun = false;
+  futtat(30u * 60 * 1000, [] { return deviceMode != (DeviceMode)0 || relayPulses() > 0; });
+  CHECK(deviceMode == (DeviceMode)1, "AP beallito modba ment");
+  CHECK(relayPulses() == 0, "a routert NEM aramtalanitotta");
+  CHECK(serialHas("router reset helyett AP mod"), "es megmondja, miert");
+}
+
+static void scWL2() {
+  // ...de ha a halozat egyszeruen eltunt (nem jelszohiba), marad a reset.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  monitorUzembe();
+  futtat(60u * 1000, [] { return serialHas("Successful Test"); });
+  g_log.clear();
+  wifiSim.willConnect = false; wifiSim.begun = false;
+  futtat(30u * 60 * 1000, [] { return relayPulses() > 0; });
+  CHECK(relayPulses() == 1, "a router reset megtortent");
+  CHECK(deviceMode == (DeviceMode)0, "monitor modban maradt");
+}
+
+static void scSP1() {
+  // A STATIKUS IP PAR ellenorzese.
+  auto ip = [](const char* s) { IPAddress a; a.fromString(s); return a; };
+  CHECK(staticPairValid(ip("192.168.1.50"), ip("192.168.1.1")), "ugyanaz a /24 -> jo");
+  CHECK(!staticPairValid(ip("192.168.1.50"), ip("192.168.0.1")), "mas /24 -> rossz");
+  CHECK(!staticPairValid(ip("10.0.0.5"), ip("192.168.1.1")), "teljesen mas halozat -> rossz");
+  CHECK(!staticPairValid(ip("192.168.1.1"), ip("192.168.1.1")), "az eszkoz nem lehet a gateway");
+  CHECK(!staticPairValid(ip("192.168.1.0"), ip("192.168.1.1")), "halozati cim -> rossz");
+  CHECK(!staticPairValid(ip("192.168.1.255"), ip("192.168.1.1")), "broadcast cim -> rossz");
+  CHECK(!staticPairValid(ip("192.168.1.50"), ip("192.168.1.255")), "broadcast gateway -> rossz");
+  CHECK(!staticPairValid(ip("192.168.1.50"), ip("192.168.1.0")), "halozati gateway -> rossz");
+  CHECK(!staticPairValid(IPAddress(), ip("192.168.1.1")), "0.0.0.0 -> rossz");
+}
+
+static void scSP2() {
+  // Egy REGI firmware altal mentett, osszeillo par nelkuli konfig: DHCP-re
+  // esunk vissza (ugy az eszkoz mukodik, es a portalon javithato).
+  coldBoot(true, "TestNet", "pw", "192.168.1.50", "192.168.0.1");
+  setup();
+  CHECK(wifiSim.configCount == 0, "nem allit be statikus IP-t");
+  CHECK(!staticConfigActive, "DHCP");
+  CHECK(serialHas("nem illik ossze"), "es kiirja, miert");
+  CHECK(deviceMode == (DeviceMode)0, "attol meg csatlakozik");
+}
+
+static void scSP3() {
+  // A PORTAL nem enged ilyet elmenteni.
+  coldBoot(false, "", "", "", "");
+  setup();
+  std::string body;
+  const int code = postConfig("MyNetwork", "titkosjelszo", "192.168.1.50", "192.168.0.1", &body);
+  CHECK(code != 200, "elutasitja");
+  CHECK(body.find("nem illik ossze") != std::string::npos, "es megmondja, miert");
+  CHECK(!g_fs.count("/ip.txt") || g_fs["/ip.txt"].empty(), "az IP nem kerult a flashbe");
+  const int ok = postConfig("MyNetwork", "titkosjelszo", "192.168.1.50", "192.168.1.1");
+  CHECK(ok == 200, "egy osszeillo par viszont mentheto");
+}
+
+static void scPW1() {
+  // REGI, NYILT SZOVEGU jelszo szokozzel: a szokoz a jelszo resze.
+  coldBoot(true, "TestNet", " titok jelszo ", "", "");
+  setup();
+  CHECK(wifiSim.lastPass == " titok jelszo ", "a vezeto/zaro szokoz megmaradt");
+  // Windows sorveg: a CR/LF viszont nem resze.
+  coldBoot(true, "TestNet", "jelszo123\r\n", "", "");
+  setup();
+  CHECK(wifiSim.lastPass == "jelszo123", "a CR/LF lekerult");
+  // A kodolt alak ugyanugy mukodik, mint eddig.
+  char enc[160];
+  encodeSecret("ab cd", enc, sizeof(enc));
+  coldBoot(true, "TestNet", enc, "", "");
+  setup();
+  CHECK(wifiSim.lastPass == "ab cd", "a kodolt jelszo is helyes");
+  // Az SSID es a tobbi mezo tovabbra is vagodik.
+  char out[40];
+  g_fs["/x.txt"] = "  ertek  ";
+  readConfigValue(LittleFS, "/x.txt", out, sizeof(out));
+  CHECK(std::string(out) == "ertek", "a tobbi mezo tovabbra is vagodik");
+  readSecretValue(LittleFS, "/x.txt", out, sizeof(out));
+  CHECK(std::string(out) == "  ertek  ", "a titok nem");
+}
+
+static void scPG2() {
+  // AZ ESPping 1.0.5 FANTOM-SIKERE: elkuldeni sem tudta a csomagot, megis
+  // igazat ad. A valaszido 0 - ezt szurjuk.
+  coldBoot(true, "TestNet", "pw", "", "");
+  pingSim.phantomSuccess = true;
+  CHECK(!testInternetPing(IPAddress(1, 1, 1, 1), "teszt"), "a fantom-siker bukasnak szamit");
+  pingSim.phantomSuccess = false;
+  CHECK(testInternetPing(IPAddress(1, 1, 1, 1), "teszt"), "a valodi valasz tovabbra is siker");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -8997,6 +9422,28 @@ static const Scenario kScenarios[] = {
   { "COV4: konyvtar egy konfig utvonalon", scCOV4 },
   { "COV5: a wifireset foglalt zarnal nem torol es nem indit ujra", scCOV5 },
   { "COV6: a gateway-ellenorzes vedelmi aga ertelmezhetetlen cimnel", scCOV6 },
+
+  // --- A router reset elotti diagnozis es a tartos kieses korlatja ---
+  { "ND1: befagyott router-DNS - egy reset, ami megoldja", scND1 },
+  { "ND2: a reset nem segit - 4 ora alatt egyetlen reset, naplo-spam nelkul", scND2 },
+  { "ND3: kihagyott reset utan uj hibasorozat - ujra kap eselyt", scND3 },
+  { "ND4: valodi kieses - NET DIAG 1, a regi szabalyok", scND4 },
+  { "ND5: a DNS-diagnozis ket fuggetlen nevvel", scND5 },
+  { "SLP1: a tartos kieses kore veges - az elso alvas utan 1 reset/kor", scSLP1 },
+  { "SLP2: bekapcsolaskor a tartos-kieses szamlalo nullazodik", scSLP2 },
+  { "SLP3: a heap-ujraindulas atviszi a tartos-kieses szamlalot", scSLP3 },
+  { "HC1: a HTTP kod naplozhato alakja es rogzitese", scHC1 },
+  { "HC2: az elso bukas a HTTP kodot is naplozza", scHC2 },
+  { "DNS1: a hostByName() pozitiv hibakodja nem siker", scDNS1 },
+  { "FB1: tartalek DNS DHCP mellett is", scFB1 },
+  { "SL1: a Wi-Fi modem-alvas kikapcsolva", scSL1 },
+  { "WL1: Wi-Fi vesztes rossz jelszoval - AP mod, nem router reset", scWL1 },
+  { "WL2: Wi-Fi vesztes jelszohiba nelkul - marad a router reset", scWL2 },
+  { "SP1: a statikus IP par ellenorzese", scSP1 },
+  { "SP2: osszeillo par nelkuli regi konfig - DHCP", scSP2 },
+  { "SP3: a portal nem ment osszeillo par nelkuli statikus IP-t", scSP3 },
+  { "PW1: a jelszo szokozei megmaradnak, a sorveg nem", scPW1 },
+  { "PG2: az ESPping fantom-sikere bukasnak szamit", scPG2 },
 };
 
 

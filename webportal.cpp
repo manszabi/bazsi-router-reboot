@@ -380,6 +380,25 @@ static bool parseConfigPost(AsyncWebServerRequest* request, ConfigDraft& d,
     }
   }
 
+  // A PAR egyutt is ervenyes legyen: ugyanaz a /24 (a maszk fix), nem
+  // halozati/broadcast cim, es nem a gateway sajat cime. Lasd a
+  // staticPairValid() indoklasat - enelkul a mentes "sikerult", az eszkoz
+  // viszont IP szinten sehova nem jutott volna el.
+  if (ipFinal[0] != '\0' && gwFinal[0] != '\0') {
+    IPAddress ipCim;
+    IPAddress gwCim;
+    if (!ipCim.fromString(ipFinal) || !gwCim.fromString(gwFinal)
+        || !staticPairValid(ipCim, gwCim)) {
+      saveOk = false;
+      if (failReason == nullptr) {
+        failReason = "Az IP cim es a gateway nem illik ossze: ugyanabban a "
+                     "/24-es halozatban kell lenniuk (az elso harom szam "
+                     "egyezzen), az utolso szam 1-254 legyen, es a ket cim "
+                     "ne legyen azonos.";
+      }
+    }
+  }
+
   return saveOk;
 }
 
@@ -681,6 +700,18 @@ static void sendDiagnosticLog(AsyncWebServerRequest* request) {
              "<li>LOW HEAP: a szabad heap KB-ban a kuszob atlepesekor</li>"
              "<li>HEAP RESTART: a szabad heap KB-ban az onkentes "
              "ujraindulas elott</li>"
+             "<li>HTTP ERROR: a bukott HTTP teszt kodja. 200/204/403/5xx: a "
+             "szerver valasza (200 = jott valasz, de nem a vart szoveg). "
+             "1000 felett kliens hiba, 1000 + a kod: 1001 = nem sikerult "
+             "kapcsolodni vagy a nevet feloldani, 1011 = nem jott valasz "
+             "idoben, 1100 = a kerest nem lehetett inditani</li>"
+             "<li>NET DIAG: a router reset elotti vizsgalat. 1 = nincs ut "
+             "az internetre (a ping sem megy, vagy nincs Wi-Fi), 2 = a ping "
+             "megy, a nevfeloldas (DNS) nem, 3 = a ping es a DNS is megy, "
+             "csak a HTTP tesztek buknak</li>"
+             "<li>RESET SKIPPED: a router reset ELMARADT, mert az internet "
+             "IP-n elerheto, es egy ujrainditas mar nem segitett (a param a "
+             "NET DIAG erteke). 10 perc mulva ujra tesztelunk.</li>"
              "</ul>"));
   r->print(F("<p><i>Az uptime minden indulaskor nullarol indul, ezert a "
              "BOOT sorok jelzik az ujraindulasokat. A naplo az "

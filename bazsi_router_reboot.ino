@@ -86,6 +86,15 @@ constexpr uint32_t firstStartDelay = 10 * 60 * 1000;
 // A reset ESEMÉNY számláló határa. A számláló még a reset ELŐTT nő, ezért
 // 4 tényleges router újraindítás után következik az egy órás alvás.
 constexpr uint8_t maxfailureEvents = 5;
+// ...de csak az ELSŐ körben. Ha már volt "tartós internetkiesés" alvás (és
+// azóta egyetlen sikeres teszt sem), minden ébredés után a router csak EGY
+// esélyt kap, aztán újra alvás.
+//
+// MIÉRT? A resetEvents sima RAM-változó: az 1 órás deep sleep nullázza.
+// Korábban ezért a kör SOSEM ért véget - tartós hiba mellett az eszköz 85
+// percenként 4-szer, vagyis naponta ~65-ször áramtalanította a routert. Így
+// az első kör után legfeljebb óránként egyszer.
+constexpr uint8_t maxfailureEventsAfterSleep = 2;
 // Egységes Wi-Fi újrapróbálkozási politika MINDEN ágon: 3 próba, köztük 30 mp.
 constexpr uint8_t wifi_maxRetries = 3;
 constexpr uint32_t wifiInterval = 30 * 1000;
@@ -389,6 +398,52 @@ RTC_NOINIT_ATTR uint32_t rtcWdtResets;
 // felhasználói beavatkozás tiszta 2 napos ablakkal indít.
 RTC_DATA_ATTR uint32_t rtcRetryRounds = 0;
 
+// Hány "tartós internetkiesés" alvás (internetFailSleep) volt egymás után,
+// sikeres teszt nélkül. RTC_DATA_ATTR: a deep sleepet túléli, bekapcsoláskor
+// nullázódik. Ez dönti el, hány router reset jár egy körben (lásd
+// maxfailureEventsAfterSleep). Egy sikeres HTTP teszt nullázza.
+RTC_DATA_ATTR uint32_t rtcInternetFailRounds = 0;
+
+// --- A ROUTER RESET ELŐTTI DIAGNÓZIS ----------------------------------------
+//
+// MIÉRT KELL? A tesztek mind HTTP-k, a "visszajött-e" kérdést viszont ping
+// dönti el (onlineProbe). Ha a HTTP valami olyan okból bukik, amin a router
+// újraindítása NEM segít - az ESP-nek nincs működő DNS-e, egy szűrő tiltja a
+// teszt-címeket, vagy a 80-as port blokkolt -, a ping viszont megy, akkor az
+// eszköz körbe-körbe indította újra a teljesen jó routert: 5 bukott teszt,
+// reset, a ping 1 perc múlva "rendben", újra 5 bukott teszt, újra reset.
+//
+// Ezért a reset ELŐTT megnézzük, hol a hiba:
+//   DIAG_NO_PATH  - a ping sem megy (vagy nincs Wi-Fi): valódi kiesés, a
+//                   reset a helyes válasz, a régi szabályok szerint.
+//   DIAG_DNS      - IP-n elérjük az internetet, de a névfeloldás bukik.
+//   DIAG_HTTP     - a ping és a DNS is megy, csak a HTTP tesztek buknak.
+// A két utóbbinál a router EGY esélyt kap (egy befagyott router-DNS vagy
+// -proxy ezt indokolja), de ha az a reset nem segített, többet nem
+// áramtalanítunk: 10 percenként újra tesztelünk, és a naplóba kerül, miért.
+enum NetDiag : uint8_t {
+  DIAG_NO_PATH = 1,
+  DIAG_DNS = 2,
+  DIAG_HTTP = 3
+};
+// Két, egymástól független üzemeltető neve: a DNS akkor működik, ha
+// BÁRMELYIK feloldható. Szándékosan NEM a teszt-végpontok neve - azokat egy
+// DNS-szűrő épp tilthatja, és az nem "a DNS nem működik".
+constexpr const char* DIAG_DNS_HOSTS[] = { "www.google.com", "www.cloudflare.com" };
+// A kihagyott reset utáni várakozás, mielőtt újra tesztelünk.
+constexpr uint32_t HOLD_OFF_MS = 10 * 60 * 1000;
+
+// Kapott-e már a router esélyt "pinggel elérhető internet" mellett ebben a
+// hibasorozatban? Egy sikeres HTTP teszt nullázza.
+bool pingOkResetUsed = false;
+// Fut-e a kihagyott reset utáni várakozás (a kezdete: timing.stateStart).
+bool holdOffActive = false;
+// A legutóbbi KIHAGYOTT reset diagnózisa (0 = nincs ilyen sorozat). A
+// spam-védelemhez kell: a 10 percenként ismétlődő kör ugyanazt a négy
+// bejegyzést írná újra és újra, és pár óra alatt kiszorítaná a 32 elemű
+// körpufferből a fontos eseményeket. Csak a változás kerül a naplóba.
+uint8_t lastSkipDiag = 0;
+
 // A diagnosztikai lap szamlaloi egy egeszkent (app_hooks.h). A szamlalok itt
 // maradnak, mert a watchdog-politika es az ujraprobalkozasi ablak a fomodul
 // dontesei - a portal csak megjeleniti oket.
@@ -431,6 +486,9 @@ RTC_NOINIT_ATTR uint8_t  rtcCarryResetEvents;  // atvitt resetEvents (CARRY_NONE
 // menne AP beallito modba: orokke ujraprobalkozna, es a felhasznalo sosem
 // kapna eselyt a konfiguracio javitasara. Ezert ezt is atvisszuk.
 RTC_NOINIT_ATTR uint32_t rtcCarryRetryRounds;
+// ...es ugyanezert a tartos internetkieses-korok szamlaloja is: nelkule egy
+// heap-ujraindulas visszaadna a routernek a teljes, 4 resetes kort.
+RTC_NOINIT_ATTR uint32_t rtcCarryInternetFailRounds;
 
 // ---------------------------------------------------------------------------
 // KET TASK, EGY MEMORIA - mi vedi a kozos allapotot?
@@ -514,6 +572,8 @@ void applyHeapCarry();
 bool initWiFi();
 bool reconnectWifi();
 bool gatewayUnreachable();
+uint8_t diagnoseNetwork();
+void ensureFallbackDns();
 
 
 // Végzetes hiba: a konfiguráció nem tölthető be. Ilyenkor a program nem fut
@@ -541,6 +601,7 @@ void initHeapState() {
     rtcHeapRestarts = 0;
     rtcCarryResetEvents = CARRY_NONE;
     rtcCarryRetryRounds = 0;
+    rtcCarryInternetFailRounds = 0;
   }
 }
 
@@ -556,6 +617,7 @@ void applyHeapCarry() {
   // rtcCarryResetEvents egyben az ervenyesseg jelzoje is, tehat a kettot
   // egyutt irjuk es egyutt is hasznaljuk fel.
   rtcRetryRounds = rtcCarryRetryRounds;
+  rtcInternetFailRounds = rtcCarryInternetFailRounds;
   rtcCarryResetEvents = CARRY_NONE;
   printUptime();
   Serial.print("Heap miatti ujraindulas utan folytatjuk: router reset szamlalo = ");
@@ -698,6 +760,7 @@ void checkHeap(uint32_t now) {
   // hibat okozna.
   rtcCarryResetEvents = testState.resetEvents;
   rtcCarryRetryRounds = rtcRetryRounds;
+  rtcCarryInternetFailRounds = rtcInternetFailRounds;
   rtcHeapRestarts++;
   logEvent(EV_HEAP_RESTART, (uint16_t)(szabad / 1024));
 
@@ -1253,6 +1316,14 @@ bool initWiFi() {
   // A módot a config() előtt kell beállítani, különben egyes core verziókban
   // az "STA Failed to configure" hibával elszáll.
   WiFi.mode(WIFI_STA);
+  // A modem-alvás KIKAPCSOLÁSA. Az alapérték (WIFI_PS_MIN_MODEM) mellett a
+  // rádió a beacon-ok között alszik, és a bejövő csomagokat csak a következő
+  // DTIM-nél veszi át. Bizonyos routereknél ez elhúzódó vagy elvesző TCP
+  // válaszokat - vagyis bukó HTTP teszteket - okoz, miközben a ritkább ping
+  // még átmegy. Az eszköz hálózatról kap áramot (relét hajt), az
+  // energiatakarékosságnak itt nincs értéke. A beállítást a core megjegyzi
+  // és minden STA indításkor alkalmazza (WiFiGeneric: _sleepEnabled).
+  WiFi.setSleep(false);
 
   // Statikus IP csak akkor, ha meg is adták. Üres mező = DHCP, nem hiba.
   bool staticOk = false;
@@ -1270,6 +1341,16 @@ bool initWiFi() {
       Serial.println("❌ Invalid gateway format (csak IPv4 hasznalhato)!");
     }
     staticOk = ipValid && gatewayValid;
+    // A PÁR is legyen érvényes (ugyanaz a /24, nem hálózati/broadcast cím,
+    // nem a gateway saját címe). Régebbi firmware ezt nem ellenőrizte
+    // mentéskor, tehát egy ilyen konfig a flashben lehet. Vele a Wi-Fi
+    // társítás sikerülne, de IP szinten nem lenne út sehová - DHCP-vel
+    // viszont az eszköz működik, és a portálon javítható.
+    if (staticOk && !staticPairValid(localIP, localGateway)) {
+      Serial.println("❌ Az IP es a gateway nem illik ossze (nem ugyanaz a /24,");
+      Serial.println("   vagy halozati/broadcast cim, vagy azonosak) - DHCP-t hasznalunk.");
+      staticOk = false;
+    }
   }
 
   if (staticOk) {
@@ -1307,6 +1388,8 @@ bool initWiFi() {
     }
   }
 
+  ensureFallbackDns();
+
   printUptime();
   Serial.print("Connected to: ");
   Serial.println(WiFi.SSID());
@@ -1321,7 +1404,11 @@ bool initWiFi() {
 bool reset_device() {
   if (testState.resetStep == 0) {
     testState.resetEvents++;
-    if (testState.resetEvents >= maxfailureEvents) {
+    // Az első körben 4 reset, minden további körben (azóta egy sikeres teszt
+    // sem volt) csak 1 - lásd maxfailureEventsAfterSleep.
+    const uint8_t korlat = (rtcInternetFailRounds == 0) ? maxfailureEvents
+                                                        : maxfailureEventsAfterSleep;
+    if (testState.resetEvents >= korlat) {
       internetFailSleep();
     }
     logEvent(EV_ROUTER_RESET, (uint16_t)testState.resetEvents);
@@ -1466,8 +1553,19 @@ void enterDeepSleep(uint64_t timerUs) {
 void internetFailSleep() {
   printUptime();
   Serial.print("A router ujrainditasa ");
-  Serial.print(maxfailureEvents - 1);
+  // A TÉNYLEGES szám: a számláló a reset ELŐTT nő, és a körönkénti korlát
+  // az első alvás után kisebb (lásd maxfailureEventsAfterSleep).
+  Serial.print(testState.resetEvents - 1);
   Serial.println(" alkalommal sem hozta vissza az internetet.");
+  // Telítődő: egy uint32_t sosem fordul körbe, de a szándék így kimondott.
+  if (rtcInternetFailRounds < 0xFFFFFFFFUL) {
+    rtcInternetFailRounds++;
+  }
+  Serial.print("Tartos internetkieses kor: ");
+  Serial.print(rtcInternetFailRounds);
+  Serial.print(" - a kovetkezo korben ");
+  Serial.print(maxfailureEventsAfterSleep - 1);
+  Serial.println(" router reset jar, aztan ujra alvas.");
   Serial.print("Alvas ");
   Serial.print((unsigned long)(SLEEP_DURATION_US / 60000000ULL));
   Serial.println(" percre, utana automatikus ujraprobalkozas.");
@@ -1815,6 +1913,61 @@ bool gatewayUnreachable() {
   return !testInternetPing(gw, "sajat gateway");
 }
 
+// Hol a hiba, mielőtt a routert áramtalanítanánk? Lásd a NetDiag leírását.
+//
+// Ideje: Wi-Fi nélkül azonnali; különben a ping legfeljebb ~4 mp, a DNS
+// szerverenként ~7 mp. A hosszú, etetés nélküli szakasz a hostByName() - egy
+// halott DNS mellett ugyanaz a ~28 mp, amire a WDT_TIMEOUT_MS már méretezve
+// van (ott a http.GET() ugyanezt a hívást teszi).
+uint8_t diagnoseNetwork() {
+  printUptime();
+  Serial.println("Diagnozis a router reset elott...");
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Diagnozis: nincs Wi-Fi kapcsolat.");
+    return DIAG_NO_PATH;
+  }
+  const IPAddress target(PROBE_PING_IP[0], PROBE_PING_IP[1],
+                         PROBE_PING_IP[2], PROBE_PING_IP[3]);
+  if (!testInternetPing(target, "internet, diagnozis")) {
+    Serial.println("Diagnozis: az internet IP-n sem erheto el - valodi kieses.");
+    return DIAG_NO_PATH;
+  }
+  bool dnsOk = false;
+  for (const char* host : DIAG_DNS_HOSTS) {
+    feedWatchdog();
+    if (testDnsResolve(host)) {
+      dnsOk = true;
+      break;
+    }
+  }
+  if (!dnsOk) {
+    Serial.println("Diagnozis: a ping megy, de a nevfeloldas (DNS) nem mukodik.");
+    return DIAG_DNS;
+  }
+  // Lehetséges ok: szűrő/tűzfal a 80-as porton vagy a teszt-címeken.
+  Serial.println("Diagnozis: ping es DNS rendben - csak a HTTP tesztek buknak (szuro?).");
+  return DIAG_HTTP;
+}
+
+// Tartalék DNS DHCP mellett is.
+//
+// MIÉRT? Statikus IP-nél eddig is volt (1.1.1.1 a második szerver), DHCP-nél
+// viszont az ESP KIZÁRÓLAG a router által adott DNS-t használta. Ha az nem
+// válaszol, minden HTTP teszt elbukik - miközben az asztali gép (más DNS-sel
+// vagy a böngésző saját titkosított DNS-ével) gond nélkül böngészik.
+//
+// A FALLBACK helyre (2-es index, ESP_NETIF_DNS_FALLBACK) tesszük: a DHCP csak
+// az első kettőt írja felül, tehát a router DNS-e továbbra is az elsődleges.
+// A lwIP a következő szerverre lép, ha az előző nem válaszolt. A beállítás
+// olcsó, és minden csatlakozás után megismételjük: egy újraindult netif
+// elveszítheti.
+void ensureFallbackDns() {
+  if (staticConfigActive) {
+    return;  // ott a WiFi.config() már beállította (dns2 = 1.1.1.1)
+  }
+  WiFi.STA.dnsIP(2, IPAddress(1, 1, 1, 1));
+}
+
 void handleFirstStart(uint32_t currentMillis) {
   // A várakozás korai lezárása. Az órát a setup() állítja be úgy, hogy az ELSŐ
   // próba azonnal esedékes legyen: a tipikus eset ugyanis az, hogy a kapcsolat
@@ -2033,7 +2186,8 @@ void setup() {
     // dekódoljuk. A puffer csak itt él, a veremben - nem globális.
     {
       char passRaw[SECRET_ENC_MAX + 1];
-      if (readConfigValue(LittleFS, passPath, passRaw, sizeof(passRaw)) == CONFIG_ERROR) {
+      // readSecretValue(): a szóköz a jelszó része lehet, nem vágjuk le.
+      if (readSecretValue(LittleFS, passPath, passRaw, sizeof(passRaw)) == CONFIG_ERROR) {
         st = CONFIG_ERROR;
         pass[0] = '\0';
       } else {
@@ -2227,6 +2381,17 @@ void runTestingState() {
       return;
     }
 
+    // Rossz jelszónál (a router eközben látszik, csak nem enged be) a router
+    // újraindítása értelmetlen - ugyanaz a döntés, mint a first start és a
+    // reset utáni ágon: AP beállító mód.
+    if (wifiAuthFailed()) {
+      printUptime();
+      Serial.println("WiFi hitelesitesi hiba - router reset helyett AP mod.");
+      digitalWrite(wifiledPin, LOW);
+      wifiGiveUp();
+      return;
+    }
+
     // Nem jött vissza: azonnal router újraindítás, nem várunk további
     // teszt ciklusokat. A FAILURE_STATE reset ágát így élesítjük - nincs
     // hálózat, amin bármelyik végpont elérhető lenne, nincs mit végigpróbálni.
@@ -2256,6 +2421,11 @@ void runTestingState() {
   Serial.print("Teszt ciklus index = ");
   Serial.println(testState.cycleIndex + 1);
 
+  // DHCP mellett a tartalék DNS. Itt is, nem csak az initWiFi()-ben: a
+  // kapcsolat több úton jöhet létre (auto-reconnect, a korai kilépés
+  // próbája), és azok nem mennek át az initWiFi()-n.
+  ensureFallbackDns();
+
   // Mind az ot teszt HTTP, mert az ICMP nem bizonyit sem nevfeloldast, sem
   // TCP-t: egy befagyott router-DNS mellett a ping tokeletesen megy, kozben
   // egyetlen eszkoz sem eri el az internetet. Nem veletlen, hogy egyetlen
@@ -2269,15 +2439,25 @@ void runTestingState() {
     testState.cycleIndex = 0;
     testState.failedCount = 0;
     testState.resetEvents = 0;
+    // Működik az internet: minden "a reset nem segített" emlék törlődik.
+    rtcInternetFailRounds = 0;
+    pingOkResetUsed = false;
+    lastSkipDiag = 0;
     currentState = SUCCESS_STATE;
   } else {
     testState.failedCount++;
     // Csak a hibasorozat első tagját naplózzuk: a 12 mp-enként ismétlődő
     // bejegyzések különben percek alatt kiszorítanák a fontos eseményeket.
-    if (testState.failedCount == 1) {
+    // Egy már kihagyott-reset sorozatban (lastSkipDiag) sem: ott a 10
+    // percenként ismétlődő kör ugyanazt írná újra.
+    if (testState.failedCount == 1 && lastSkipDiag == 0) {
       // 1-alapú, hogy a /log oldal ugyanazt a számot mutassa, mint a
       // soros port "Teszt ciklus index" sora.
       logEvent(EV_TEST_FAIL, (uint16_t)(testState.cycleIndex + 1));
+      // ...és a MIÉRT: a HTTP kód. Enélkül a napló csak azt őrizte meg, hogy
+      // a teszt bukott - azt nem, hogy kapcsolódni sem tudott, vagy idegen
+      // választ kapott.
+      logEvent(EV_HTTP_ERROR, httpCodeLogParam(lastHttpCode()));
     }
     printUptime();
     // A már megnövelt számláló: ez a mostani bukással együtt hány
@@ -2297,6 +2477,21 @@ void runTestingState() {
 // FAILURE_STATE: vagy a kovetkezo vegpontra lep, vagy - ha mind az ot elbukott -
 // levezenyli a router ujrainditasat es az utana kovetkezo ellenorzeseket.
 void runFailureState(uint32_t currentMillis) {
+  // A kihagyott reset utáni várakozás. Itt nincs korai kilépés: a ping
+  // "rendben"-je épp az, ami ebben a helyzetben nem bizonyít semmit.
+  if (holdOffActive) {
+    if (currentMillis - timing.stateStart >= HOLD_OFF_MS) {
+      printUptime();
+      Serial.println("A varakozas letelt - ujra teszteljuk az internetet.");
+      holdOffActive = false;
+      testState.cycleIndex = 0;
+      testState.failedCount = 0;
+      currentState = TESTING_STATE;
+      timing.stateStart = currentMillis;
+    }
+    return;
+  }
+
   // Mind az ot vegpont elbukott: a 4-es indexen a Google-t is probaltuk,
   // tehat a 0..4 mind lefutott es mind bukott. Mivel a ket szamlalo egyutt
   // lep (failedCount == cycleIndex + 1), ez pontosan 5 egymas utani bukas -
@@ -2308,6 +2503,36 @@ void runFailureState(uint32_t currentMillis) {
   if (testState.cycleIndex > RESET_TRIGGER_CYCLE) {
 
     if (!uiFlags.resetPrinted) {
+      // DIAGNÓZIS a reset előtt - lásd a NetDiag leírását.
+      const uint8_t diag = diagnoseNetwork();
+      if (diag != DIAG_NO_PATH) {
+        if (pingOkResetUsed) {
+          // A router már kapott egy esélyt ugyanilyen helyzetben, és nem
+          // segített: a hiba nem a routerben van. Nem áramtalanítunk.
+          printUptime();
+          Serial.println("A router reset ELMARAD: az internet IP-n elerheto, es egy");
+          Serial.println("ujrainditas mar nem segitett. A hiba nem a routerben van.");
+          Serial.print(HOLD_OFF_MS / 60000);
+          Serial.println(" perc mulva ujra tesztelunk.");
+          if (diag != lastSkipDiag) {
+            logEvent(EV_NET_DIAG, diag);
+            logEvent(EV_RESET_SKIPPED, diag);
+            lastSkipDiag = diag;
+          }
+          holdOffActive = true;
+          timing.stateStart = millis();
+          return;
+        }
+        // Az első ilyen alkalom: egy befagyott router-DNS vagy -proxy
+        // indokolhatja a resetet - egy esélyt kap.
+        pingOkResetUsed = true;
+      } else {
+        // Valódi kiesés: a régi szabályok érvényesek, és egy korábbi
+        // "kihagyott" sorozat lezárult.
+        lastSkipDiag = 0;
+      }
+      logEvent(EV_NET_DIAG, diag);
+
       // Statikus IP mellett: ha a saját gateway-ünket sem érjük el, a hiba
       // helyi, és a router újraindítása nem javíthatja. Egy esélyt azért
       // adunk neki (hátha tényleg a router akadt meg) - a döntés a reset

@@ -53,8 +53,29 @@ void setFilesystemReady(bool ready);
 // Hasznalhato-e ez a cim statikus IPv4 konfiguracionak?
 bool isUsableIPv4(const IPAddress& addr);
 
+// A STATIKUS IP PAR ellenorzese: ervenyes-e EGYUTT a cim es a gateway?
+//
+// MIERT KELL? Az initWiFi() a maszkot FIXEN 255.255.255.0-ra allitja, tehat a
+// gateway csak akkor erheto el kozvetlenul, ha az elso harom oktett egyezik.
+// Korabban ezt senki nem nezte: egy 192.168.1.50 / 192.168.0.1 par gond
+// nelkul elmentodott, a Wi-Fi tarsitas sikerult (az 2. reteg), de IP szinten
+// nem volt ut sehova - es az eszkoz a teljesen jo routert indithatta ujra.
+// A tovabbi ket feltetel ugyanebbol a /24-bol kovetkezik: a .0 a halozat, a
+// .255 a broadcast cime - egyik sem lehet allomas -, es az eszkoz nem kaphatja
+// a gateway sajat cimet.
+bool staticPairValid(const IPAddress& ip, const IPAddress& gateway);
+
 // Egy ertek beolvasasa. A vezeto/zaro whitespace-t levagja.
 ConfigStatus readConfigValue(fs::FS& fs, const char* path, char* out, size_t outSize);
+
+// Egy TITOK (a jelszo) beolvasasa - ugyanaz, mint a readConfigValue(), de a
+// szokozoket NEM vagja le, csak a sorveget (CR/LF).
+//
+// MIERT? A WPA2 jelszo ELEJEN es VEGEN is allhat szokoz, es az a jelszo
+// resze. A kodolt (hexa) alakra a levagas ugyan artalmatlan, de egy regebbi
+// firmware altal nyilt szovegkent mentett jelszo csendben megvaltozott volna:
+// " titok " -> "titok", es az eszkoz soha tobbe nem csatlakozott volna.
+ConfigStatus readSecretValue(fs::FS& fs, const char* path, char* out, size_t outSize);
 
 // Egy ertek kiirasa, VISSZAOLVASASOS ellenorzessel. Hamis, ha az iras nem
 // sikerult, vagy a visszaolvasott tartalom nem egyezik.

@@ -38,7 +38,14 @@ enum EventCode : uint8_t {
   EV_STUCK_BUTTON = 11, // param: 0 = reset gomb, 1 = wifireset gomb
   EV_GW_UNREACHABLE = 12, // param: 1 = reset elott, 2 = a reset utan is
   EV_LOW_HEAP = 13,     // param: a szabad heap KiB-ban, a kuszob atlepesekor
-  EV_HEAP_RESTART = 14  // param: a szabad heap KiB-ban az ujrainditas elott
+  EV_HEAP_RESTART = 14, // param: a szabad heap KiB-ban az ujrainditas elott
+  EV_HTTP_ERROR = 15,   // param: a bukott HTTP teszt kodja (httpCodeLogParam:
+                        //   200/204/403... valtozatlan, negativ -> 1000+|kod|)
+  EV_NET_DIAG = 16,     // param: diagnozis a router reset elott (1 = nincs ut
+                        //   az internetre / nincs Wi-Fi, 2 = a ping megy, a
+                        //   DNS nem, 3 = ping es DNS megy, csak a HTTP bukik)
+  EV_RESET_SKIPPED = 17 // param: a diagnozis (2 vagy 3) - a router reset
+                        //   ELMARADT, mert egy reset mar nem segitett
 };
 
 // Pontosan 12 bájt. A kitöltő mező explicit, hogy a RTC memóriában tárolt

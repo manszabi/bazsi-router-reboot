@@ -37,7 +37,7 @@ stateDiagram-v2
     Setup --> StuckSleep: beragadt gomb
     MODE_MONITOR --> MODE_CONFIG: rossz jelszó / 33 kör letelt / rossz statikus IP
     MODE_MONITOR --> RetrySleep: hálózat nincs (1 óra, max 33 kör)
-    MODE_MONITOR --> NetFailSleep: 4 router reset után sincs internet (1 óra)
+    MODE_MONITOR --> NetFailSleep: 4 (később 1) router reset után sincs internet (1 óra)
     MODE_MONITOR --> Restart: tartósan kritikus heap (önkéntes újraindulás)
     MODE_MONITOR --> MODE_FATAL: 3x heap-újraindulás sem segített
     MODE_CONFIG --> ApSleep: 5 perc tétlenség (csak gombbal ébred)
@@ -182,12 +182,16 @@ Router reset csak akkor indul, ha **mind az öt** üzemeltető végpontja elbuko
 
 ```mermaid
 flowchart TD
-    IN([Mind az 5 végpont elbukott]) --> GW1{"Statikus IP aktív ÉS<br>a saját gateway sem pingelhető?"}
+    IN([Mind az 5 végpont elbukott]) --> DG{"diagnoseNetwork()<br>Wi-Fi? ping 1.1.1.1? DNS?<br>EV_NET_DIAG(1/2/3)"}
+    DG -->|"1: nincs út (valódi kiesés)"| GW1
+    DG -->|"2/3: IP-n elérhető,<br>első alkalom"| GW1
+    DG -->|"2/3: egy reset már<br>nem segített"| SKIP["EV_RESET_SKIPPED<br>NINCS reset, 10 perc múlva<br>újra teszt (HOLD_OFF_MS)"]
+    GW1{"Statikus IP aktív ÉS<br>a saját gateway sem pingelhető?"}
     GW1 -->|igen| GWL["EV_GW_UNREACHABLE(1)<br>a router kap még egy esélyt"]
     GW1 -->|nem| CNT
     GWL --> CNT["resetEvents++"]
-    CNT --> MX{"resetEvents >= 5?"}
-    MX -->|"igen (már 4 reset volt)"| NFS["internetFailSleep()<br>EV_SLEEP(2)<br>deep sleep 1 óra"]
+    CNT --> MX{"resetEvents >= 5?<br>(az első alvás után: >= 2)"}
+    MX -->|"igen (már 4, ill. 1 reset volt)"| NFS["internetFailSleep()<br>EV_SLEEP(2)<br>deep sleep 1 óra"]
     MX -->|nem| LOGSV["EV_ROUTER_RESET<br>saveEventLog() – a napló kiírása<br>a fájlrendszerre, MÉG a relé előtt"]
     LOGSV --> P1["Relé = HIGH: router áram nélkül<br>90 s (RESET_PULSE)<br>státusz LED VILLOG 2 Hz, Wi-Fi LED sötét"]
     P1 --> P2["Relé = LOW: router bootol<br>max 10 perc várakozás (RESET_DELAY)<br>gombok + watchdog élnek"]
@@ -290,7 +294,7 @@ flowchart TD
 | Alvás | Kiváltó ok | Napló | Timer | Reset gomb ébreszt? |
 |---|---|---|:---:|:---:|
 | `retrySleep()` | a hálózat nem látszik, kör < 33 | `EV_SLEEP(1)` | 1 óra | igen |
-| `internetFailSleep()` | 4 router reset után sincs internet | `EV_SLEEP(2)` | 1 óra | igen |
+| `internetFailSleep()` | 4 router reset után sincs internet (az első ilyen alvás után körönként már 1 reset után) | `EV_SLEEP(2)` | 1 óra | igen |
 | `apSleep()` | AP portál 5 perc tétlenség | `EV_SLEEP(3)` | – | igen |
 | `fatalSleep()` | végzetes hiba, 5 perc villogás után | `EV_SLEEP(4)` | – | igen |
 | beragadt gomb\* | reset/wifireset LOW induláskor **és 3 s után is** | `EV_STUCK_BUTTON` | 60 s | **nem** (szándékosan) |
