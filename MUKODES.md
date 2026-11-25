@@ -120,7 +120,7 @@ Teszttel kimérve (`PO1`–`PO3`):
    (aszinkron `WiFi.begin()`, nem vár rá), és kilép. A kudarcnak **nincs
    következménye**: nem nő számláló, nem változik állapot. A „3 próba, aztán
    router reset" eszkaláció ettől független, az a várakozás *lejárta után* jön.
-2. **Internet – csak meglévő kapcsolat mellett.** Ping a `1.1.1.1`-re. Hálózat
+2. **Internet – csak meglévő kapcsolat mellett.** Ping a `1.1.1.1`-re (ha nem válaszol, a `8.8.8.8`-ra). Hálózat
    nélkül el sem indul, mert értelmetlen lenne.
 
 A várakozás akkor zárul korábban, ha **mindkét lépés** sikerül. A próba
@@ -211,7 +211,7 @@ HTTP sorozat dönt.
 Sikeres teszt → minden számláló nullázódik, a ciklus újra az 1. végponttal
 indul. A soros portra ilyenkor csak a `Successful Test` kerül ki: a
 `testInternetHTTP()` siker esetén nem írja ki sem a kapott törzset, sem külön
-nyugtázó sort. Eltéréskor viszont igen (a kapott törzs + `Hamis érték!`), mert
+nyugtázó sort. Eltéréskor viszont igen (a kapott törzs + `Hamis ertek!`), mert
 ott az a kérdés, mi jött vissza a várt válasz helyett.
 
 ---
@@ -224,8 +224,8 @@ még nem áramtalanít, hanem megnézi, **hol** a hiba (`diagnoseNetwork()`):
 | `NET DIAG` | Mit talált | Mi történik |
 |:---:|---|---|
 | **1 – router hiba** | nincs Wi-Fi vagy gateway-cím, vagy **sem a router, sem az internet** nem válaszol (és ismert, hogy a router pingre válaszolni szokott) | **azonnali reset** |
-| **2 – szolgáltatói hiba** | a router válaszol, az internet (1.1.1.1) nem – vagy egyik sem, de a router pingelhetősége nem ismert | **3 perces megerősítő kör**, utána kiesésenként **egy** reset |
-| **3 – csak HTTP** | az internet válaszol pingre (a router tehát továbbít), csak a HTTP tesztek buknak | **nincs reset** |
+| **2 – szolgáltatói hiba** | a router válaszol, az internet (1.1.1.1 és 8.8.8.8) nem – vagy egyik sem, de a router pingelhetősége nem ismert | **3 perces megerősítő kör**, utána kiesésenként **egy** reset |
+| **3 – csak HTTP** | az internet (1.1.1.1 vagy 8.8.8.8) válaszol pingre (a router tehát továbbít), csak a HTTP tesztek buknak | **nincs reset** |
 
 Ha a reset elmarad (3-as eset, vagy 2-es, amikor a kiesés már kapott egy
 resetet), a naplóba egyszer `RESET SKIPPED` kerül, és **10 perc múlva**
@@ -245,14 +245,15 @@ számít (lásd lejjebb).
 Az első teszt indulásától a relé megszólalásáig, router hibánál:
 
 ```
-5 × 15 mp (HTTP timeout)  +  4 × 12 mp (PROBE_DELAY)  +  ~10 mp (diagnózis)  =  133 mp
-5 × 33 mp (halott DNS)    +  4 × 12 mp (PROBE_DELAY)  +  ~10 mp (diagnózis)  =  223 mp
+5 × 15 mp (HTTP timeout)  +  4 × 12 mp (PROBE_DELAY)  +  ~15 mp (diagnózis)  =  138 mp
+5 × 33 mp (halott DNS)    +  4 × 12 mp (PROBE_DELAY)  +  ~15 mp (diagnózis)  =  228 mp
 ```
 
 Ha a kiesés közvetlenül egy sikeres teszt után jön, ehhez a `SUCCESS_DELAY`
-hátralévő része adódik: legrosszabb esetben **60 + 223 = 283 mp ≈ 4,7 perc**
-(mérve: `R7`; az első bukástól a resetig `RD1`: 98 mp). A diagnózis a router
-és az internet pingjét is elvégzi (két hallgató célpont: ~2 × 5 mp).
+hátralévő része adódik: legrosszabb esetben **60 + 228 = 288 mp ≈ 4,8 perc**
+(mérve: `R7`; az első bukástól a resetig `RD1`: 103 mp). A diagnózis a router
+és a két internetes célpont (1.1.1.1, 8.8.8.8) pingjét is elvégzi: három
+hallgató célpont ~3 × 5 mp.
 
 Szolgáltatói hibánál ehhez jön a 3 perces megerősítő kör és egy második
 sorozat: mérve (`RD2`) a reset a kiesés kezdete után **~8 perccel** jön.

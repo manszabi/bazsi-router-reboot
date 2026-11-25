@@ -1,11 +1,13 @@
 # 🔄 Bazsi Router Reboot
 
-ESP32-C3 alapú automatikus router újraindító rendszer. Az eszköz folyamatosan figyeli az internetkapcsolatot, és ha kiesést észlel, relén keresztül automatikusan újraindítja a routert.
+ESP32-C3 alapú automatikus router újraindító rendszer. Az eszköz folyamatosan figyeli az internetkapcsolatot, és ha a hiba a routerben van, relén keresztül automatikusan újraindítja a routert.
+
+> **Egyoldalas összefoglaló: [ATTEKINTES.md](ATTEKINTES.md)** – bekötés, első beállítás, működés és napló röviden.
 
 ## 📋 Jellemzők
 
 - **Automatikus internetkapcsolat-figyelés** – öt HTTP teszt, öt különböző üzemeltető felé
-- **Automatikus router újraindítás** – relé segítségével áramtalanítja, majd visszakapcsolja a routert
+- **Automatikus router újraindítás** – relé segítségével áramtalanítja, majd visszakapcsolja a routert; előtte a router és az internet pingjével eldönti, hogy a router-e a hibás
 - **Wi-Fi Manager** – böngészőből konfigurálható SSID, jelszó, IP-cím és gateway
 - **Beépített beállító weboldal** – a programba fordítva, nincs feltöltendő fájlrendszer-tartalom
 - **LittleFS** – a beállítások áramszünet után is megmaradnak
@@ -226,13 +228,13 @@ egy téves reset ára ~11,5 perc kiesés, a plusz szigorúságé viszont csak
 
 > **A soros kimenet két száma, és hogy miért ott áll, ahol.**
 > A `Teszt ciklus index = N` a teszt **előtt** áll, mert azt mondja meg, melyik
-> végpont következik (`1`…`5`). A `Test failed. | Hibák száma = N / 5` viszont a
+> végpont következik (`1`…`5`). A `Test failed. | Hibak szama = N / 5` viszont a
 > teszt **után**, mert az már az eredmény – hány egymás utáni bukás van, és hány
 > után jön a diagnózis.
 >
 > **Sikeres teszt csak a `Successful Test` sort adja.** A `testInternetHTTP()`
 > siker esetén hallgat: sem a kapott törzset, sem külön nyugtázó sort nem ír ki.
-> Eltéréskor viszont kiírja a **kapott törzset** és a `Hamis érték!` sort – ott
+> Eltéréskor viszont kiírja a **kapott törzset** és a `Hamis ertek!` sort – ott
 > ugyanis épp az a kérdés, mi jött vissza a várt válasz helyett (captive portál,
 > megváltozott végpont).
 
@@ -246,7 +248,7 @@ implementáció sem ICMP-vel validál: a NetworkManager (libcurl HTTP), a Firefo
 A ping arra kell, hogy az öt bukott teszt után kiderüljön, **hol** a hiba – a
 router újraindítása ugyanis csak az egyik esetben segít:
 
-| Az internet (1.1.1.1) pingje | A router (gateway) pingje | Diagnózis | Router reset |
+| Az internet pingje (1.1.1.1, ha nem válaszol: 8.8.8.8) | A router (gateway) pingje | Diagnózis | Router reset |
 |---|---|---|---|
 | válaszol | – (a router továbbít) | csak a HTTP bukik (szűrő, Wi-Fi-zavar) | **nincs** |
 | nem válaszol | válaszol | szolgáltatói hiba | 3 perces megerősítő kör után, kiesésenként **egyszer** |
@@ -430,6 +432,10 @@ bazsi-router-reboot/
 │
 ├── partitions_custom.csv     # Egyedi partíciós tábla: OTA nélkül, 512 KiB LittleFS
 ├── test/                     # host tesztkészlet (361 forgatókönyv)
+│
+├── ATTEKINTES.md             # egyoldalas összefoglaló
+├── MUKODES.md                # minden időzítés és döntés táblázatban
+├── FOLYAMATABRA.md           # folyamatábrák
 └── LICENSE                   # MIT License
 ```
 
@@ -599,7 +605,7 @@ Connected to: MyNetwork
 IP Address: 192.168.1.200
 Signal strength (RSSI): -45 dBm
 WIFI OK!
-Ping teszt futtatása (internet - 1.1.1.1)...
+Ping teszt futtatasa (internet - 1.1.1.1)...
 Ping 1 sikeres.
 Ping 2 sikeres.
 ✅ Ping teszt sikeres.
@@ -913,7 +919,7 @@ kétlépcsős próba, és a **sorrend a lényeg**:
    a várakozás megy tovább. Ehhez semmi köze a „3 próba, aztán router reset"
    eszkalációnak – az csak a `firstStartDelay` *lejárta után* kezdődik.
 2. **Internet – csak ha az 1. lépés szerint van kapcsolat.** Ilyenkor megy ki
-   egy ping a `1.1.1.1`-re. Hálózat nélkül **el sem indul**: pingelni
+   egy ping a `1.1.1.1`-re (ha nem válaszol, a `8.8.8.8`-ra). Hálózat nélkül **el sem indul**: pingelni
    értelmetlen (és pazarlás) lenne, ha a csomag ki sem tudna menni.
 
 A várakozás akkor ér véget korábban, ha **mindkét lépés** sikerül; ekkor jöhet

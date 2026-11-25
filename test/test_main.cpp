@@ -1414,10 +1414,10 @@ static void scR7() {
   const int elo = merd(15000);
   printf("     [info] elo DNS, hallgato szerver: %d mp\n", elo);
 
-  CHECK(elo >= 131 && elo <= 135, "elo DNS mellett 133 mp (a doksi szama)");
+  CHECK(elo >= 136 && elo <= 140, "elo DNS mellett 138 mp (a doksi szama)");
   const int halott = merd(33000);
   printf("     [info] halott DNS: %d mp\n", halott);
-  CHECK(halott >= 221 && halott <= 225, "halott DNS mellett 223 mp");
+  CHECK(halott >= 226 && halott <= 230, "halott DNS mellett 228 mp");
 }
 
 static void scR8() {
@@ -2025,7 +2025,7 @@ static void scH8() {
 
   bool csakProbeCel = true;
   for (auto& t : pingSim.targets) {
-    if (t != "1.1.1.1" && t != "192.168.1.1") csakProbeCel = false;
+    if (t != "1.1.1.1" && t != "8.8.8.8" && t != "192.168.1.1") csakProbeCel = false;
   }
   CHECK(csakProbeCel,
         "ping csak a proba es a diagnozis celpontjaira ment (internet, router)");
@@ -5624,7 +5624,7 @@ static void scSERidx() {
   catch (DeepSleepSignal&) {}
   CHECK(serialHas("Teszt ciklus index = 1"), "az elso teszt sorszama 1, nem 0");
   CHECK(!serialHas("Teszt ciklus index = 0"), "0-dik teszt SEHOL nem jelenik meg");
-  CHECK(serialHas("Test failed. | Hibák száma = 1 / 5"),
+  CHECK(serialHas("Test failed. | Hibak szama = 1 / 5"),
         "a hibaszamlalo a teszt UTAN, mar novelve jelenik meg");
   CHECK(serialIndex("Teszt ciklus index = 1") < serialIndex("Test failed."),
         "a sorszam a teszt ELOTT, a hibaszam a teszt UTAN all");
@@ -5638,7 +5638,7 @@ static void scSERquiet() {
   try { while (++guard < 100000 && !serialHas("Successful Test")) loop(); }
   catch (DeepSleepSignal&) {}
   CHECK(serialHas("Successful Test"), "a siker kiirodik");
-  CHECK(!serialHas("Igaz érték!"), "de az 'Igaz érték!' mar nem");
+  CHECK(!serialHas("Igaz ertek!"), "de az 'Igaz ertek!' mar nem");
   CHECK(!serialHas("Microsoft Connect Test"),
         "es a kapott torzset sem irjuk ki sikernel");
 
@@ -5646,9 +5646,9 @@ static void scSERquiet() {
   g_httpCode = 200; g_httpBody = "captive portal login"; pingSim.ok = true;
   setup();
   guard = 0;
-  try { while (++guard < 100000 && !serialHas("Hamis érték!")) loop(); }
+  try { while (++guard < 100000 && !serialHas("Hamis ertek!")) loop(); }
   catch (DeepSleepSignal&) {}
-  CHECK(serialHas("Hamis érték!"), "elteresnel megmarad a jelzes");
+  CHECK(serialHas("Hamis ertek!"), "elteresnel megmarad a jelzes");
   CHECK(serialHas("captive portal login"),
         "es a KAPOTT torzs is - abbol derul ki, mi ult a keresre");
 }
@@ -7135,6 +7135,7 @@ static std::vector<double> ftJatszik(uint32_t percek, M menetrend) {
       g_httpBody = "Microsoft Connect Test";
       pingSim.perTarget["192.168.1.1"] = a.gwOk;
       pingSim.perTarget["1.1.1.1"] = a.inetOk;
+      pingSim.perTarget["8.8.8.8"] = a.inetOk;
       loop();
       for (size_t i = nezett; i < g_log.size(); i++)
         if (g_log[i] == RELAY_HIGH) resetek.push_back((g_millis - t0) / 60000.0);
@@ -7160,11 +7161,11 @@ static void scRD1() {
   auto r = ftJatszik(20, [](uint32_t) { return FtPerc{ false, false, false }; });
   CHECK(!r.empty(), "router hiba: reset");
   CHECK(!serialHas("megerosito kor"), "megerosito kor nelkul");
-  const int fail = serialIndex("Test failed. | Hibák száma = 1 / 5");
+  const int fail = serialIndex("Test failed. | Hibak szama = 1 / 5");
   const int reset = serialIndex("Beginning Reset in FAILURE_STATE.");
   const int dt = uptimeSecAt((size_t)reset) - uptimeSecAt((size_t)fail);
   printf("     [info] router hiba: elso bukas -> reset %d mp\n", dt);
-  CHECK(dt > 0 && dt <= 4 * 12 + 4 * 11 + 10, "azonnal: csak az ot teszt ideje");
+  CHECK(dt > 0 && dt <= 4 * 12 + 4 * 11 + 15, "azonnal: csak az ot teszt es a diagnozis ideje");
   CHECK(evCount(EVC_NET_DIAG, 1) >= 1 && evCount(EVC_NET_DIAG) == evCount(EVC_NET_DIAG, 1),
         "NET DIAG = 1 (router hiba)");
 }
@@ -7282,7 +7283,7 @@ static void scRD11() {
 static void scRD12() {
   // Router hiba, reset - de utana rossz jelszo miatt nem sikerul visszacsatlakozni: AP mod.
   ftIndit();
-  pingSim.perTarget["192.168.1.1"] = false; pingSim.perTarget["1.1.1.1"] = false;
+  pingSim.perTarget["192.168.1.1"] = false; pingSim.perTarget["1.1.1.1"] = false; pingSim.perTarget["8.8.8.8"] = false;
   g_httpCode = -11;
   futtat(30u * 60 * 1000, [] { return relayPulses() >= 1 && serialHas("Reset is done in FAILURE_STATE."); });
   CHECK(relayPulses() == 1, "router hiba: reset");
@@ -7290,6 +7291,30 @@ static void scRD12() {
   futtat(30u * 60 * 1000, [] { return deviceMode != (DeviceMode)0; });
   CHECK(deviceMode == (DeviceMode)1, "a reset utan rossz jelszo: AP beallito mod");
   CHECK(relayPulses() == 1, "es nem indit ujabb resetet");
+}
+
+static void scRD13() {
+  // Az 1.1.1.1 nem valaszol (pl. a szolgaltato szuri), a 8.8.8.8 igen: az internet el.
+  ftIndit();
+  std::vector<double> r;
+  {
+    const uint32_t t0 = g_millis; int guard = 0; size_t nezett = g_log.size();
+    try {
+      while (g_millis - t0 < 40u * 60 * 1000 && ++guard < 3000000) {
+        g_httpCode = -11;
+        pingSim.perTarget["192.168.1.1"] = false;
+        pingSim.perTarget["1.1.1.1"] = false;
+        pingSim.perTarget["8.8.8.8"] = true;
+        loop();
+        for (size_t i = nezett; i < g_log.size(); i++) if (g_log[i] == RELAY_HIGH) r.push_back(0);
+        nezett = g_log.size();
+      }
+    } catch (DeepSleepSignal&) {}
+  }
+  CHECK(r.empty(), "a tartalek celpont valaszol: nincs reset");
+  CHECK(evCount(EVC_NET_DIAG, 3) >= 1, "NET DIAG 3: csak a HTTP bukik");
+  CHECK(std::count(pingSim.targets.begin(), pingSim.targets.end(), std::string("8.8.8.8")) > 0,
+        "a 8.8.8.8-at tenyleg pingelte");
 }
 
 static void scRD9() {
@@ -7502,7 +7527,7 @@ static const Scenario kScenarios[] = {
   { "FS10: a fileMatches() minden elbukási módja", scFS10 },
   { "R5: a rossz jelszó csak a 2. próbálkozástól látszik (STA.cpp)", scR5 },
   { "R6: egy újrapróbálkozási kör ébren töltött ideje 25,5 perc", scR6 },
-  { "R7: a felismerési idő router hibánál 133 mp élő és 223 mp halott DNS mellett", scR7 },
+  { "R7: a felismerési idő router hibánál 138 mp élő és 228 mp halott DNS mellett", scR7 },
   { "R8: 33 kör, 32 alvás - a tényleges türelem ~46 óra", scR8 },
   { "CH1: a chunked válasz keretbájtjai nem buktatják el a tesztet", scCH1 },
   { "CH2: több darabra vágott választ is összefűz", scCH2 },
@@ -7686,6 +7711,7 @@ static const Scenario kScenarios[] = {
   { "RD10: Wi-Fi van, gateway nincs: router hiba", scRD10 },
   { "RD11: a router mar nem valaszol pingre, az internet el: nincs reset", scRD11 },
   { "RD12: reset utan rossz jelszo: AP mod", scRD12 },
+  { "RD13: az 1.1.1.1 hallgat, a 8.8.8.8 valaszol: nincs reset", scRD13 },
 
   { "APP1: az elso portal-inditas egyedi, eros AP jelszot general", scAPP1 },
   { "APP2: az AP jelszo allando, indulaskor kiirva, normal uzemben nincs iras", scAPP2 },

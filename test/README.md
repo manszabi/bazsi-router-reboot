@@ -169,7 +169,7 @@ helyes eszköz – egy rossz globális küszöb csak zajt adna.
 | `W1`–`W9` | Wi-Fi: konfig portál, DHCP vs. statikus IP, DNS, timeout, újracsatlakozás, netif-elvesztés |
 | `S1`–`S6` | Deep sleep: beragadt gomb, kimenetek állapota alvás előtt, ébresztőforrások, RTC-láb megkötés, **a relé láb (`D10` = GPIO10) hold-ja alvás alatt és a feloldása ébredéskor** |
 | `RL1`–`RL2` | Relé: a 90 másodperces reset pulzus hossza, elalvás N reset után |
-| `R6`–`R8` | **A dokumentált idők mérése**: egy újrapróbálkozási kör ébren töltött 25,5 perce, a felismerési idő router hibánál 133 mp (élő DNS) / 223 mp (halott DNS), és mind a 33 kör végigjátszása (46,0 óra türelem) |
+| `R6`–`R8` | **A dokumentált idők mérése**: egy újrapróbálkozási kör ébren töltött 25,5 perce, a felismerési idő router hibánál 138 mp (élő DNS) / 228 mp (halott DNS), és mind a 33 kör végigjátszása (46,0 óra türelem) |
 | `H1`–`H9` | HTTP teszt: CR/LF vágás, hibás státusz, captive portal, Content-Length nélküli válasz, beragadt szerver, **204-es ellenőrzés**, az eszkaláció végpont-sorrendje; ha a router és az internet pingje él, csak a HTTP bukik: **nincs router reset** |
 | `CH1`–`CH5` | **Chunked keretezés**: egy és több darab, darab-kiterjesztés, nagybetűs hexa, szabálytalan és túlcsorduló méret, 50 kB-os darabfolyam |
 | `PG1`–`PG3` | Ping: 2-a-4-ből szabály és korai kilépés; az **ESPping 1.0.5 fantom-sikere** (el sem küldött csomagra igaz) bukásnak számít |
@@ -217,7 +217,7 @@ helyes eszköz – egy rossz globális küszöb csak zajt adna.
 | `LED4`–`LED6` | **LED-ek őszintesége**: a Wi-Fi LED legfeljebb egy `SUCCESS_DELAY`-ig késhet (mérve: 60 mp), a státusz LED normál üzemben végig világít, AP módban a mentés utáni türelmi idő alatt is villog |
 | `WDT8b` | **A LittleFS formázása** is belefér a watchdog ablakába: 7,5 mp tipikus és 51,5 mp rossz eset, mindkettő a 90 mp alatt |
 | `RR1`–`RR3` | **A router újraindításának üteme**: ha a router és az internet él, de a HTTP bukik, 3 óra alatt **nulla** reset; router hibánál 4 reset, köztük 13 p 43 mp (a 10 perces bootvárakozás érintetlen); egyetlen sikeres teszt nullázza a reset-számlálót |
-| `RD1`–`RD10` | **A reset előtti diagnózis** (funkcióteszt, percre bontott menetrenddel): router hiba (a router és az internet is hallgat) → azonnali reset (98 mp az első bukástól); szolgáltatói hiba → 3 perces megerősítő kör, kiesésenként **egy** reset; 1–4 perces zavar → nincs reset; **a 2026-11-22-i terepi nap → 0 reset**; pingre nem válaszoló router → a router-jel kimarad; a tanulás óránként legfeljebb egyszer; külön kiesések külön resetet kapnak; a megerősítő kör alatt elhaló router → azonnali reset; heap-átvitel; Wi-Fi van, gateway nincs; ha a router már nem válaszol pingre, de az internet él → nincs reset, a jelző törlődik |
+| `RD1`–`RD13` | **A reset előtti diagnózis** (funkcióteszt, percre bontott menetrenddel): router hiba (a router és az internet is hallgat) → azonnali reset (103 mp az első bukástól); szolgáltatói hiba → 3 perces megerősítő kör, kiesésenként **egy** reset; 1–4 perces zavar → nincs reset; **a 2026-11-22-i terepi nap → 0 reset**; pingre nem válaszoló router → a router-jel kimarad; a tanulás óránként legfeljebb egyszer; külön kiesések külön resetet kapnak; a megerősítő kör alatt elhaló router → azonnali reset; heap-átvitel; Wi-Fi van, gateway nincs; ha a router már nem válaszol pingre, de az internet él → nincs reset, a jelző törlődik; reset után rossz jelszó → AP mód; az 1.1.1.1 hallgat, de a 8.8.8.8 válaszol → nincs reset |
 | `SLP1`–`SLP3` | **A sikertelen reset-kör véges**: 4 reset + alvás után ébredésenként 1; a számláló és a router pingelhetősége túléli a deep sleepet, bekapcsoláskor nullázódik, a heap-újraindulás átviszi |
 | `HC1`–`HC2` | A **HTTP hibakód** naplózható alakja (1000 + \|kód\|) és az első bukáskor a naplóba kerül |
 | `FB1`, `SL1` | DHCP mellett **tartalék DNS** (1.1.1.1 a fallback helyen, a router DNS-ét nem írja felül); a Wi-Fi **modem-alvás kikapcsolva** a csatlakozás előtt |
@@ -260,253 +260,229 @@ A stubok **nem** emulálják az ESP32-t. Azt ellenőrzik, hogy a firmware
 vezérlési logikája, időzítései és API-használata helyes-e. A valódi rádió,
 lwIP, LittleFS és a relé viselkedését hardveren kell igazolni.
 
-## Veletlen allapotgep-bejaras (PROP1-PROP8)
+## Véletlen állapotgép-bejárás (PROP1–PROP8)
 
-A tobbi forgatokonyv **kezzel irt**: pontosan azokat az utakat jarja be,
-amikre a szerzo gondolt. A PROP forgatokonyvek forditva dolgoznak - veletlen
-kornyezeti esemenysorozatot generalnak (WiFi-szakadas, gombnyomas tetszoleges
-pillanatban, HTTP-valasz, heap-eses, fajlrendszer-hiba), es nem azt allitjak,
-hogy MI TORTENJEN, hanem hogy mi **nem tortenhet soha**:
+A többi forgatókönyv **kézzel írt**: pontosan azokat az utakat járja be, amikre
+a szerző gondolt. A PROP forgatókönyvek fordítva dolgoznak: véletlen környezeti
+eseménysorozatot generálnak (Wi-Fi-szakadás, gombnyomás tetszőleges
+pillanatban, HTTP-válasz, heap-esés, fájlrendszer-hiba), és nem azt állítják,
+hogy MI TÖRTÉNJEN, hanem hogy mi **nem történhet soha**:
 
-| | Tulajdonsag |
+| | Tulajdonság |
 |---|---|
-| P1 | a rele sosem marad behuzva a pulzusnal tovabb (a router aram nelkul) |
-| P2 | a `cycleIndex` sosem lep ki a `TEST_ENDPOINTS[]` tablabol |
-| P3 | `resetEvents` / `rtcRetryRounds` a sajat korlatjuk alatt |
-| P4 | az esemenynaploban csak ervenyes esemenykod all |
-| P5 | a nyilt szovegu jelszo soha nincs egyetlen fajlban sem |
-| P6 | a nyilt szovegu jelszo soha nem kerul a soros kimenetre |
-| P7 | a `MODE_CONFIG` / `MODE_FATAL` terminalis (csak ujraindulassal van kiut) |
+| P1 | a relé sosem marad behúzva a pulzusnál tovább (a router áram nélkül) |
+| P2 | a `cycleIndex` sosem lép ki a `TEST_ENDPOINTS[]` táblából |
+| P3 | `resetEvents` / `rtcRetryRounds` a saját korlátjuk alatt |
+| P4 | az eseménynaplóban csak érvényes eseménykód áll |
+| P5 | a nyílt szövegű jelszó soha nincs egyetlen fájlban sem |
+| P6 | a nyílt szövegű jelszó soha nem kerül a soros kimenetre |
+| P7 | a `MODE_CONFIG` / `MODE_FATAL` terminális (csak újraindulással van kiút) |
 
-**Determinisztikus**: a magok fixek, a CI-ban mindig ugyanaz a nyolc bejaras fut.
-Egy veletlenszeruen bukdacsolo teszt hasznalhatatlan lenne. Helyben tovabb lehet
-keresni ugyanezzel a keszlettel:
+**Determinisztikus**: a magok fixek, a CI-ban mindig ugyanaz a nyolc bejárás
+fut. Egy véletlenszerűen bukdácsoló teszt használhatatlan lenne. Helyben tovább
+lehet keresni ugyanezzel a készlettel:
 
 ```
 RNDSEED=12345 RNDSTEPS=2000000 build/run-idf5 PROP
 ```
 
-**Az ELERES is merve van** (`[eleres]` sor), es kovetelve: minden bejarasnak el
-kell jutnia a program valamelyik erdemi againak. Ez nem oncel - a fejlesztes
-kozben **ketszer** fordult elo, hogy egy tulajdonsag URESEN ment at:
+**Az elérés is mérve van** (`[eleres]` sor), és követelve: minden bejárásnak el
+kell jutnia a program valamelyik érdemi ágáig. Ez nem öncél – a fejlesztés
+közben **kétszer** fordult elő, hogy egy tulajdonság üresen ment át:
 
-1. Az elso valtozat a `loop()` hivasok **kozott** mintavetelezte a rele labat -
-   es igy sosem latta HIGH-on, mert a 90 mp-es pulzus egyetlen `loop()`
-   iteracion belul zajlik le. A meres ezert a stubba kerult (`g_relayMaxHighMs`),
-   ugyanoda, ahova a watchdog-rese.
-2. Ket tulajdonsag maga volt hibas: az `rtcEvNext` **monoton szamlalo**, nem
-   gyuruindex, a `terminalSeen` jelzot pedig nem nullazta az ujraindulas.
-   Nyolcbol nyolc, illetve nyolcbol ot bejaras "bukott" - egyik sem a program
+1. Az első változat a `loop()` hívások **között** mintavételezte a relé lábát,
+   és így sosem látta HIGH-on, mert a 90 mp-es pulzus egyetlen `loop()`
+   iteráción belül zajlik le. A mérés ezért a stubba került (`g_relayMaxHighMs`),
+   ugyanoda, ahová a watchdog-résé.
+2. Két tulajdonság maga volt hibás: az `rtcEvNext` **monoton számláló**, nem
+   gyűrűindex, a `terminalSeen` jelzőt pedig nem nullázta az újraindulás.
+   Nyolcból nyolc, illetve nyolcból öt bejárás „bukott” – egyik sem a program
    miatt.
 
-Mutacioval igazolva, mind a negy a **helyes** tulajdonsagot buktatja:
+Mutációval igazolva, mind a négy a **helyes** tulajdonságot buktatja:
 
-| Mutacio | Elkapja |
+| Mutáció | Elkapja |
 |---|---|
-| `RESET_PULSE` 90 -> 200 mp | P1, 8/8 bejaras |
-| `MAX_CYCLE_INDEX` 4 -> 5 | P2, 8/8 |
-| a jelszo kiirasa a soros portra | P6, 8/8 |
-| a jelszo kiirasa egy fajlba | P5, 8/8 |
+| `RESET_PULSE` 90 → 200 mp | P1, 8/8 bejárás |
+| `MAX_CYCLE_INDEX` 4 → 5 | P2, 8/8 |
+| a jelszó kiírása a soros portra | P6, 8/8 |
+| a jelszó kiírása egy fájlba | P5, 8/8 |
 
 ## Fuzzing: `make fuzz` (clang libFuzzer)
 
-Minden mas teszt - a 320 kezzel irt forgatokonyv es a 8 veletlen bejaras is -
-**ervenyes vagy legalabbis elkepzelt** bemenetekkel dolgozik. A fuzzer nem:
-kifejezetten olyan bajtsorozatokat keres, amikre senki nem gondolt, es a
-lefedettseg alapjan tanul, merre erdemes menni.
+Minden más teszt – a kézzel írt forgatókönyvek és a 8 véletlen bejárás is –
+**érvényes vagy legalábbis elképzelt** bemenetekkel dolgozik. A fuzzer nem:
+kifejezetten olyan bájtsorozatokat keres, amikre senki nem gondolt, és a
+lefedettség alapján tanulja meg, merre érdemes menni.
 
-| Celpont | Mit elemez | Ki irja a bemenetet |
+| Célpont | Mit elemez | Ki írja a bemenetet |
 |---|---|---|
-| `fuzz-post` | a POST urlap-elemzo | **barki, aki AP modban csatlakozik** |
-| `fuzz-secret` | `decodeSecretInPlace()` / `encodeSecret()` | a `/pass.txt` (serult vagy atirt) |
-| `fuzz-evlog` | az `/evlog.bin` betolto | a naplofajl (felbeszakadt iras) |
-| `fuzz-config` | `readConfigValue()`, `fileMatches()` | a negy konfig fajl |
+| `fuzz-post` | a POST űrlap-elemző | **bárki, aki AP módban csatlakozik** |
+| `fuzz-secret` | `decodeSecretInPlace()` / `encodeSecret()` | a `/pass.txt` (sérült vagy átírt) |
+| `fuzz-evlog` | az `/evlog.bin` betöltő | a naplófájl (félbeszakadt írás) |
+| `fuzz-config` | `readConfigValue()`, `fileMatches()` | a négy konfigfájl |
 
-A **`fuzz-post` a lenyeg**: ez az egyetlen felulet, aminek a tuloldalan
-tenyleges tamado ulhet. A masik harom olyan adatot olvas, amit maga az eszkoz
-irt ki - ott a "serult flash" a realis fenyegetes, nem a rosszindulat.
+A **`fuzz-post` a lényeg**: ez az egyetlen felület, aminek a túloldalán
+tényleges támadó ülhet. A másik három olyan adatot olvas, amit maga az eszköz
+írt ki – ott a sérült flash a reális fenyegetés, nem a rosszindulat.
 
-Mind a negy **ASan + UBSan alatt** fut: a fuzzer onmagaban csak az
-osszeomlast latna, a csendes puffertulcsordulast nem.
+Mind a négy **ASan + UBSan alatt** fut: a fuzzer önmagában csak az összeomlást
+látná, a csendes puffertúlcsordulást nem.
 
 ```
-make fuzz               minden celpont 30 mp
+make fuzz               minden célpont 30 mp
 FUZZSEC=600 make fuzz   hosszabban
 build/fuzz-post -runs=100000
-build/fuzz-post crash-<hash>    egy talalat ujrajatszasa
+build/fuzz-post crash-<hash>    egy találat újrajátszása
 ```
 
-**MUTACIOVAL IGAZOLVA, hogy a negy harness tenyleg eleri a kodot** - egy
-fuzz-teszt legveszelyesebb hibaja az, ha nulla talalattal fut, mert nem jut el
-sehova:
+**Mutációval igazolva, hogy a négy harness tényleg eléri a kódot** – egy
+fuzz-teszt legveszélyesebb hibája az, ha nulla találattal fut, mert nem jut el
+sehová:
 
-| Mutacio | Eredmeny |
+| Mutáció | Eredmény |
 |---|---|
-| a POST-elemzo `candidate` pufferje 16 bajt + `strcpy` | **elkapva** 60 mp alatt (stack-buffer-overflow) |
-| az evlog-betoltobol kivéve a sajat `count` hatarellenorzes | **elkapva** 60 mp alatt |
-| `decodeSecretInPlace`: tulcsordulas CSAK a `v1:9f` bemenetnel | **elkapva** 50 mp alatt (a fuzzer maga talalta meg a prefixet) |
-| `readConfigValue`: tulcsordulas CSAK egy adott pufferméretnél | **elkapva** 50 mp alatt |
+| a POST-elemző `candidate` puffere 16 bájt + `strcpy` | **elkapva** 60 mp alatt (stack-buffer-overflow) |
+| az evlog-betöltőből kivéve a saját `count` határellenőrzés | **elkapva** 60 mp alatt |
+| `decodeSecretInPlace`: túlcsordulás CSAK a `v1:9f` bemenetnél | **elkapva** 50 mp alatt (a fuzzer maga találta meg az előtagot) |
+| `readConfigValue`: túlcsordulás CSAK egy adott pufferméretnél | **elkapva** 50 mp alatt |
 
-Egy otodik mutacio **NEM** bukott el, es ezt is kimondjuk: a `d.ssid` tulirasa
-a `ConfigDraft` **strukturan belul** marad, azt pedig az ASan alapertelmezesben
-nem latja. Ez a modszer valos hatara, nem a harnesse.
+Egy ötödik mutáció **nem** bukott el, és ezt is kimondjuk: a `d.ssid` túlírása a
+`ConfigDraft` **struktúrán belül** marad, azt pedig az ASan alapértelmezésben
+nem látja. Ez a módszer valós határa, nem a harnessé.
 
-### A meres hatara
+### A mérés határa
 
-Ez **hoston** fut, stub Arduino API-k felett. Amit megfog: puffertulcsordulas,
-hataron tuli olvasas, definialatlan viselkedes, vegtelen ciklus - **a sajat
-kodunkban**. Amit nem: a valodi ESPAsyncWebServer / lwIP hibait (nem a mi
-kodunk, es nem is forognak itt), es az `IPAddress::fromString()`-et sem, mert az
-a hoston stub - azt fuzzolni a sajat stubunk teszteles lenne, nem a firmware-e.
+Ez **hoston** fut, stub Arduino API-k felett. Amit megfog: puffertúlcsordulás,
+határon túli olvasás, definiálatlan viselkedés, végtelen ciklus – **a saját
+kódunkban**. Amit nem: a valódi ESPAsyncWebServer / lwIP hibáit (nem a mi
+kódunk, és nem is futnak itt), és az `IPAddress::fromString()`-et sem, mert az a
+hoston stub – azt fuzzolni a saját stubunk tesztelése lenne, nem a firmware-é.
 
-## A ket task tenyleges osszefonasa (ILV1-ILV5)
+## A két task tényleges összefonása (ILV1–ILV5)
 
-A program **ket taskon** fut: a loop task mer, dont es alszik, az async_tcp
-task futtatja a HTTP kezeloket. A ket task kozos allapoton dolgozik
-(`savingConfig`, `restartPending`, `restartAt`, `apDeadline`), es epp ezert van
-a `portMUX` spinlock. Eddig azt bizonyitottuk, hogy a kritikus szakasz sosem
-agyazodik egymasba - azt viszont soha, hogy a ket task **tetszoleges pontokon
-valtakozva** is helyesen viselkedik.
+A program **két taskon** fut: a loop task mér, dönt és alszik, az async_tcp
+task futtatja a HTTP kezelőket. A két task közös állapoton dolgozik
+(`savingConfig`, `restartPending`, `restartAt`, `apDeadline`), és épp ezért van
+a `portMUX` spinlock. Azt már bizonyítottuk, hogy a kritikus szakasz sosem
+ágyazódik egymásba – ezek a forgatókönyvek azt mérik, hogy a két task
+**tetszőleges pontokon váltakozva** is helyesen viselkedik.
 
-**Hol vannak a valodi megszakitasi pontok?** Egyetlen magon a taskvaltas nem
-barhol tortenik, hanem ott, ahol az utemezo szohoz jut:
+**Hol vannak a valódi megszakítási pontok?** Egyetlen magon a taskváltás nem
+bárhol történik, hanem ott, ahol az ütemező szóhoz jut:
 
-| Horog | Irany | Mit modellez |
+| Horog | Irány | Mit modellez |
 |---|---|---|
-| `g_onDelay` | loop() → HTTP kezelo | a loop blokkolo szakaszai; az async_tcp magasabb prioritasu (3 vs 1), tehat bevag |
-| `g_onFsWrite` | HTTP kezelo → loop() | a flash-iras ideje; ilyenkor az async_tcp **mar a zar birtokaban van**, de meg nem engedte el |
+| `g_onDelay` | loop() → HTTP kezelő | a loop blokkoló szakaszai; az async_tcp magasabb prioritású (3 vs 1), tehát bevág |
+| `g_onFsWrite` | HTTP kezelő → loop() | a flash-írás ideje; ilyenkor az async_tcp **már a zár birtokában van**, de még nem engedte el |
 
-| | Mit rogzit |
+| | Mit rögzít |
 |---|---|
-| ILV1 | `/ping` a loop **minden** `delay()`-eben (3999 osszefonas) - a keep-alive a versenyben is hat |
-| ILV2 | `/log` olvasas a naplo irasa kozben - a gyuru ep marad |
-| ILV3 | POST mentes a loop koze ekelve; az injektalas abbahagyasa utan a halasztott ujrainditas **pontosan egyszer** fut le, a zarat megszerezve |
-| ILV4 | a loop a **flash-iras kozben** - a lejart AP hatarido ellenere sem alszik el |
-| ILV5 | mindket irany egyszerre, veletlen suruseggel |
+| ILV1 | `/ping` a loop **minden** `delay()`-ében (3999 összefonás) – a keep-alive a versenyben is hat |
+| ILV2 | `/log` olvasás a napló írása közben – a gyűrű ép marad |
+| ILV3 | POST mentés a loop közé ékelve; az injektálás abbahagyása után a halasztott újraindítás **pontosan egyszer** fut le, a zárat megszerezve |
+| ILV4 | a loop a **flash-írás közben** – a lejárt AP határidő ellenére sem alszik el |
+| ILV5 | mindkét irány egyszerre, véletlen sűrűséggel |
 
 ### Amit az ILV4 megmutatott
 
-Azt akartam merni, hogy a mentes alatt elalvo loop atmegy-e a
-`lockConfigBeforeShutdown()`-on. **Nem alszik el, es nem is jut el a zarig**: a
-`handleConfigMode()` mar a DONTESNEL kizarja.
+A cél annak mérése volt, hogy a mentés alatt elalvó loop átmegy-e a
+`lockConfigBeforeShutdown()`-on. **Nem alszik el, és nem is jut el a zárig**: a
+`handleConfigMode()` már a döntésnél kizárja.
 
 ```cpp
 if (!configWriteInProgress() && !restartRequested() &&
     (int32_t)(currentMillis - apDeadline) >= 0) { apSleep(); }
 ```
 
-A vedelem tehat **ket retegu**: az elso itt van (a loop ra sem lep az alvas
-agara), a masodik a `lockConfigBeforeShutdown()`, ami azokat az utakat fogja
-(gomb, watchdog), amik nem ezen a felteteten at jonnek. Az ILV4 az elso reteget
-rogziti - es kulon ellenorzi, hogy az ablak tenyleg **nyitva volt** (a zar allt,
-a hatarido lejart, a loop tenyleg futott), kulonben az allitas ures lenne.
+A védelem tehát **kétrétegű**: az első itt van (a loop rá sem lép az alvás
+ágára), a második a `lockConfigBeforeShutdown()`, ami azokat az utakat fogja
+(gomb, watchdog), amelyek nem ezen a feltételen át jönnek. Az ILV4 az első
+réteget rögzíti, és külön ellenőrzi, hogy az ablak tényleg **nyitva volt** (a zár
+állt, a határidő lejárt, a loop tényleg futott), különben az állítás üres lenne.
 
-### Mutacioval igazolva
+### Mutációval igazolva
 
-| Mutacio | Elkapja |
+| Mutáció | Elkapja |
 |---|---|
-| a `!configWriteInProgress()` feltetel kivéve az alvas-dontesbol | **ILV4** (es a kilepes tenyleg bekovetkezik) |
-| a halasztott ujrainditas hatarideje sosem jar le | **ILV3** |
-| beagyazott `portENTER_CRITICAL` a naplozasban | **10 ellenorzes** az ILV-kben |
+| a `!configWriteInProgress()` feltétel kivéve az alvás-döntésből | **ILV4** (és a kilépés tényleg bekövetkezik) |
+| a halasztott újraindítás határideje sosem jár le | **ILV3** |
+| beágyazott `portENTER_CRITICAL` a naplózásban | **10 ellenőrzés** az ILV-kben |
 
-## A stubok igazolasa: `make stubcheck`
+## A stubok igazolása: `make stubcheck`
 
-**A teljes host-tesztkeszlet ervenyessege ezen all.** Az 1946 ellenorzes mind a
-`test/stubs/` alatti modelleken keresztul lat: ha egy stub teved, a teszt
-**zold**, az eszkoz meg hibazik - es semmi nem szolna. Ez volt a tesztelesi
-piramis egyetlen meg nem vizsgalt alapja.
+**A teljes host-tesztkészlet érvényessége ezen áll.** Mind a 2140 ellenőrzés a
+`test/stubs/` alatti modelleken keresztül lát: ha egy stub téved, a teszt
+**zöld**, az eszköz meg hibázik – és semmi nem szólna.
 
-Mennyire eles ez? A rele a **D10**-en van. Ha a XIAO_ESP32C3 variansaban a D10
-szama valaha megvaltozik, a sketch tovabbra is lefordul, minden teszt zold marad
-(a teszt is a sajat konstansat hasznalja) - es az eszkoz **egy masik labat**
+Mennyire éles ez? A relé a **D10**-en van. Ha a XIAO_ESP32C3 variánsában a D10
+száma valaha megváltozik, a sketch továbbra is lefordul, minden teszt zöld marad
+(a teszt is a saját konstansát használja), és az eszköz **egy másik lábat**
 kapcsolgatna.
 
-Amit osszevet (50 allitas):
+Amit összevet (50 állítás):
 
 | | |
 |---|---|
-| labkiosztas | D0/D1/D3/D4/D10 a valodi `variants/XIAO_ESP32C3/pins_arduino.h`-bol |
-| `wl_status_t` | a modellezett ertekek a valodi `WiFiType.h`-bol |
-| `esp_reset_reason_t` | a felsorolas **sorrendje** (az ertekek implicitek, egy beszurt elem mindent elcsusztatna) |
-| `esp_task_wdt_config_t` | mezonevek es tipusok, sorrendben |
-| `ESP_OK` / `ESP_FAIL` / `ESP_ERR_*` | a modellezett kodok |
+| lábkiosztás | D0/D1/D3/D4/D10 a valódi `variants/XIAO_ESP32C3/pins_arduino.h`-ból |
+| `wl_status_t` | a modellezett értékek a valódi `WiFiType.h`-ból |
+| `esp_reset_reason_t` | a felsorolás **sorrendje** (az értékek implicitek, egy beszúrt elem mindent elcsúsztatna) |
+| `esp_task_wdt_config_t` | mezőnevek és típusok, sorrendben |
+| `ESP_OK` / `ESP_FAIL` / `ESP_ERR_*` | a modellezett kódok |
 | `HTTPClient` | `setTimeout(uint16_t)`, `setConnectTimeout(int32_t)` |
-| `ESPAsyncWebServer` | `params()`, `getParam(size_t)`, `name()`/`value()` **referenciat** ad, `isPost()` |
-| **viselkedes** | `STA.cpp`: az AUTH_FAIL ag `!first_connect` feltetele - a `WifiSim::authFail` modellje ezen all |
-| **viselkedes** | `main.cpp`: a loopTask minden iteracioban etet, ha fel van iratkozva - a `coreLoopStep()` ezt modellezi |
+| `ESPAsyncWebServer` | `params()`, `getParam(size_t)`, `name()`/`value()` **referenciát** ad, `isPost()` |
+| **viselkedés** | `STA.cpp`: az AUTH_FAIL ág `!first_connect` feltétele – a `WifiSim::authFail` modellje ezen áll |
+| **viselkedés** | `main.cpp`: a loopTask minden iterációban etet, ha fel van iratkozva – a `coreLoopStep()` ezt modellezi |
 | Wi-Fi | `setSleep(bool)`, `WiFi.STA.dnsIP(uint8_t, IPAddress)` (a `STA` tag publikus), `gatewayIP()` |
-| **viselkedes** | `NetworkInterface::gatewayIP()`: netif nelkul 0.0.0.0, kulonben a netif atjaroja - a diagnozis erre epul |
-| `IPAddress` | `operator[](int) const` (a statikus IP par ellenorzese) |
-| ESPping | `averageTime()` tipusa, es az 1.0.5 fantom-sikerenek oka (`_success = _expected_count - _errors`) |
-| `esp_random()` | szignatura, es a dokumentalt feltetel: bekapcsolt Wi-Fi mellett valodi veletlen |
+| **viselkedés** | `NetworkInterface::gatewayIP()`: netif nélkül 0.0.0.0, különben a netif átjárója – a diagnózis erre épül |
+| `IPAddress` | `operator[](int) const` (a statikus IP pár ellenőrzése) |
+| ESPping | `averageTime()` típusa, és az 1.0.5 fantom-sikerének oka (`_success = _expected_count - _errors`) |
+| `esp_random()` | szignatúra, és a dokumentált feltétel: bekapcsolt Wi-Fi mellett valódi véletlen |
 
-A **viselkedesi** allitasok azert vannak benne, mert a program dontesei es a
-dokumentacio indoklasa ezekre epul. Ha azok elmozdulnak, a rajuk epulo
-indoklas is ervenyet veszti.
+A **viselkedési** állítások azért vannak benne, mert a program döntései és a
+dokumentáció indoklása ezekre épül. Ha azok elmozdulnak, a rájuk épülő
+indoklás is érvényét veszti.
 
 A CI a **firmware-build** jobban futtatja: az az egyetlen hely, ahol a pontosan
-kituzott verziok a lemezen vannak. Helyben:
+kitűzött verziók a lemezen vannak. Helyben:
 
 ```
 STUBROOTS="$HOME/.arduino15 $HOME/Arduino/libraries" make stubcheck
 ```
 
-**Mutacioval igazolva** - hat kulonbozo elcsuszast kap el:
+**Mutációval igazolva** – hét különböző elcsúszást kap el:
 
-| Mutacio | Elkapja |
+| Mutáció | Elkapja |
 |---|---|
-| a rele laba 10 → 11 a tesztben | igen |
+| a relé lába 10 → 11 a tesztben | igen |
 | `WL_CONNECT_FAILED` 4 → 5 a stubban | igen |
-| egy `ESP_RST_` elem kiesik (a tobbi elcsuszik) | igen, a **2.** indextol |
+| egy `ESP_RST_` elem kiesik (a többi elcsúszik) | igen, a **2.** indextől |
 | `bool trigger_panic` → `int` | igen |
-| az `isPost()` eltunik a stubbol | igen |
-| a **valodi** header formaja valtozik (a minta nem illeszkedik) | igen - "NEM SIKERULT KIOLVASNI", nem csendes atmenet |
-| hianyzo valodi forras (rossz gyoker) | igen - "NEM TALALHATO" |
+| az `isPost()` eltűnik a stubból | igen |
+| a **valódi** header formája változik (a minta nem illeszkedik) | igen – „NEM SIKERULT KIOLVASNI”, nem csendes átmenet |
+| hiányzó valódi forrás (rossz gyökér) | igen – „NEM TALALHATO” |
 
-Ezen felul **uresseg-vedelem**: 24 allitas alatt a futas megbukik. Ket
-ellenorzo mar volt ebben a projektben, ami azert volt "tiszta", mert nem
-vizsgalt semmit; harmadik ne legyen.
+Ezen felül **üresség-védelem**: 24 állítás alatt a futás megbukik. Egy
+ellenőrző, ami azért „tiszta”, mert nem vizsgál semmit, rosszabb a semminél.
 
-## A maradek hibaagak (COV1-COV6)
-
-A lefedettseg akkor 98,71% volt. A hianyzo resz nagy reszet olyan fuggvenyek zaro
-kapcsos zarojele adta, amik **sosem ternek vissza normalisan** (alszanak vagy
-ujrainditanak) - az nem hianyossag. Maradt viszont nehany **valodi hibaag**,
-amit egyetlen forgatokonyv sem erintett. Ezek epp azok, amik akkor futnak le,
-amikor mar amugy is baj van.
+## A maradék hibaágak (COV1–COV6)
 
 | | Mit fed le |
 |---|---|
-| COV1 | `eventName()` ismeretlen kodra (`"?"`) - a naplo tuleli a firmware-frissitest is |
-| COV2 | a naplo-betolto **sajat** hatarellenorzese, a hivotol fuggetlenul |
-| COV3 | a naplofajl eltunik a fejlec es a bejegyzesek olvasasa **kozott** |
-| COV4 | **konyvtar** egy konfig utvonalon |
-| COV5 | a wifireset foglalt zarnal nem torol es nem indit ujra |
-| COV6 | a statikus gateway-ellenorzes a `WiFi.gatewayIP()` alapjan (kapcsolat nelkul 0.0.0.0 -> elerhetetlen, vakon nem pingel) |
+| COV1 | `eventName()` ismeretlen kódra (`"?"`) – a napló túléli a firmware-frissítést is |
+| COV2 | a napló-betöltő **saját** határellenőrzése, a hívótól függetlenül |
+| COV3 | a naplófájl eltűnik a fejléc és a bejegyzések olvasása **között** |
+| COV4 | **könyvtár** egy konfig útvonalon |
+| COV5 | a wifireset foglalt zárnál nem töröl és nem indít újra |
+| COV6 | a statikus gateway-ellenőrzés a `WiFi.gatewayIP()` alapján (kapcsolat nélkül 0.0.0.0 → elérhetetlen, vakon nem pingel) |
 
-A COV4 kedveert a stub megtanult **konyvtarat** modellezni (`g_fsDirs`). Egy
-stub, ami egy valos allapotot nem tud eloallitani, csendben csokkenti a
-tesztek erejet: az az ag addig lefedhetetlen volt.
+A COV4 kedvéért a stub megtanult **könyvtárat** modellezni (`g_fsDirs`). Egy
+stub, ami egy valós állapotot nem tud előállítani, csendben csökkenti a tesztek
+erejét: az az ág addig lefedhetetlen volt.
 
-**Lefedettseg: 98,71% -> 99,14%**, a kapu kuszobe 97,0% -> 98,8%.
-
-### Amit ez a kor megtanitott
-
-**Ket sajat hibat az ASan talalt meg, a sima build atengedte:**
-
-1. A COV2/COV3 ujradeklaralta az `EvFileHeader`-t - **12 bajtosra a valodi 20
-   helyett**. Ket forditasi egyseg, ugyanaz a nev, elteroformatum: az
-   egydefinicios szabaly serult, es a valodi kod tulirta a teszt pufferet.
-   Mostantol `static_assert(sizeof(EvFileHeader) == 20)` all mellette.
-2. A COV6 egy 18 bajtos szoveget masolt a 16 bajtos `gatewayStr`-be.
-
-**Es egy teszt jo eredmenyt kapott rossz uton.** A COV2 elso valtozata csak
-azt allitotta, hogy a betolto hamisat ad - de fajl hijan a **hianyzo fajl**
-miatt adott hamisat, nem a hatarellenorzes miatt. Mutacioval derult ki: a
-felso korlat kivetele utan a teszt **valtozatlanul atment**. Most van ervenyes,
-nagy naplofajl, es a puffer moge **orszemek** kerulnek - igy nem a
-visszateresi erteken mulik.
-
-Mutacioval igazolva mind a negy: a naplo-betolto felso korlatja, a
-konyvtar-ellenorzes, a wifireset zarszerzese es a gateway-cim ellenorzese -
-mindegyik kivetele megbuktatja a hozza tartozo forgatokonyvet.
+A COV2 a puffer mögé **őrszemeket** tesz, így nem a visszatérési értéken múlik:
+az első változata azért ment át, mert fájl híján a **hiányzó fájl** miatt adott
+hamisat, nem a határellenőrzés miatt (mutációval derült ki). Az `EvFileHeader`
+mellett `static_assert(sizeof(EvFileHeader) == 20)` áll: a teszt egyszer 12
+bájtosra deklarálta újra, és csak az ASan vette észre, hogy a valódi kód
+túlírja a teszt pufferét.

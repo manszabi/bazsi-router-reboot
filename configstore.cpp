@@ -42,10 +42,10 @@ bool staticPairValid(const IPAddress& ip, const IPAddress& gateway) {
 
 bool initLittleFS() {
   if (!LittleFS.begin(true)) {
-    Serial.println("LittleFS mount FAILED (a formázási kísérlet után is).");
-    Serial.println("Valószínű ok: a használt partíciós séma nem tartalmaz");
-    Serial.println("'spiffs' cimkéju partíciót. Használd a partitions_custom.csv-t,");
-    Serial.println("vagy az Arduino IDE-ben egy SPIFFS-et tartalmazó sémát");
+    Serial.println("LittleFS mount FAILED (a formazasi kiserlet utan is).");
+    Serial.println("Valoszinu ok: a hasznalt particios sema nem tartalmaz");
+    Serial.println("'spiffs' cimkeju particiot. Hasznald a partitions_custom.csv-t,");
+    Serial.println("vagy az Arduino IDE-ben egy SPIFFS-et tartalmazo semat");
     Serial.println("(Tools > Partition Scheme).");
     fsReady = false;
     return false;
@@ -155,7 +155,7 @@ bool writeConfigValue(fs::FS& fs, const char* path, const char* message) {
     Serial.print((unsigned)written);
     Serial.print(" / ");
     Serial.print((unsigned)len);
-    Serial.println(" bájt (megtelt a fájlrendszer?)");
+    Serial.println(" bajt (megtelt a fajlrendszer?)");
     return false;
   }
   if (!fileMatches(fs, path, message, len)) {

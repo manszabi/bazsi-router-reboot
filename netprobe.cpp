@@ -151,7 +151,7 @@ bool testInternetHTTP(const char* url, const char* expectedResponse) {
 
       if (!result) {
         Serial.println(payload);
-        Serial.println("Hamis érték!");
+        Serial.println("Hamis ertek!");
       }
     }
   } else {
@@ -165,7 +165,7 @@ bool testInternetHTTP(const char* url, const char* expectedResponse) {
 
 // Az ESPping 1.0.5 el sem küldött csomagra is igazat adhat: ezt az averageTime() > 0 szűri.
 bool testInternetPing(const IPAddress& target, const char* targetName) {
-  Serial.print("Ping teszt futtatása (");
+  Serial.print("Ping teszt futtatasa (");
   Serial.print(targetName);
   Serial.print(" - ");
   Serial.print(target);
@@ -182,7 +182,7 @@ bool testInternetPing(const IPAddress& target, const char* targetName) {
     } else {
       Serial.println(" sikertelen.");
       if (j == 0) {
-        Serial.println("⚠️ Első ping hiba — lehet, hogy a hálózat ébred.");
+        Serial.println("⚠️ Elso ping hiba - lehet, hogy a halozat ebred.");
       }
     }
     // Korai kilépés, ha az eredmény már eldőlt.
@@ -193,6 +193,6 @@ bool testInternetPing(const IPAddress& target, const char* targetName) {
     waitWithButtons(PING_GAP_MS);
   }
   const bool ok = successCount >= PING_MIN_SUCCESS;
-  Serial.println(ok ? "✅ Ping teszt sikeres." : "❌ Ping teszt sikertelen — hálózati probléma valószínű.");
+  Serial.println(ok ? "✅ Ping teszt sikeres." : "❌ Ping teszt sikertelen - halozati problema valoszinu.");
   return ok;
 }

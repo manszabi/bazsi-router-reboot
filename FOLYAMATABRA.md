@@ -187,7 +187,7 @@ A diagnózis csak akkor indul, ha **mind az öt** üzemeltető végpontja elbuko
 flowchart TD
     IN([Mind az 5 végpont elbukott]) --> W{"Van Wi-Fi és<br>gateway-cím?"}
     W -->|nem| R1["NET DIAG 1: router hiba"]
-    W -->|igen| P["ping: router (gateway) és internet (1.1.1.1)"]
+    W -->|igen| P["ping: router (gateway) és internet<br>(1.1.1.1, ha nem válaszol: 8.8.8.8)"]
     P --> IP{"Az internet<br>válaszol?"}
     IP -->|"igen (a router továbbít)"| H3["NET DIAG 3: csak a HTTP bukik<br>(ha a router már nem válaszol:<br>gwAnswersPing = false)"] --> SKIP
     IP -->|nem| GP{"A router<br>válaszol?"}
@@ -206,7 +206,7 @@ flowchart TD
     MX -->|nem| LOGSV["EV_ROUTER_RESET<br>saveEventLog() – a napló kiírása<br>a fájlrendszerre, MÉG a relé előtt"]
     LOGSV --> P1["Relé = HIGH: router áram nélkül<br>90 s (RESET_PULSE)<br>státusz LED VILLOG 2 Hz, Wi-Fi LED sötét"]
     P1 --> P2["Relé = LOW: router bootol<br>max 10 perc várakozás (RESET_DELAY)<br>gombok + watchdog élnek"]
-    P2 --> PRB{"60 s-onként: onlineProbe()<br>1. Wi-Fi: van kapcsolat? (ha nincs: csak<br>aszinkron begin(), következmény nélkül)<br>2. CSAK ha van: ping 1.1.1.1"}
+    P2 --> PRB{"60 s-onként: onlineProbe()<br>1. Wi-Fi: van kapcsolat? (ha nincs: csak<br>aszinkron begin(), következmény nélkül)<br>2. CSAK ha van: ping 1.1.1.1, ha nem válaszol: 8.8.8.8"}
     PRB -->|"mindkettő OK"| GW2
     PRB -->|"még nem, és letelt a 10 perc"| P3["WiFi.disconnect(true)<br>reconnectWifi(): 3 próba, 30 s szünet<br>(a statikus IP/DNS újra beáll)"]
     PRB -->|"még nem, és van hátra idő"| P2

@@ -170,3 +170,20 @@ if ido_hibak:
 
 print(f"3. Ido-osszehasonlitas: rendben, mind atfordulas-biztos "
       f"({len(ido_nevek)} ido-valtozot figyelve).")
+
+# 4. A firmware szoveg-literaljaiban (soros uzenetek, weboldal) nincs ekezetes betu.
+EKEZET = set('áéíóöőúüűÁÉÍÓÖŐÚÜŰ')
+ekezet_hibak = []
+for f in FORRASOK:
+    for n, sor in enumerate((GYOKER / f).read_text(encoding='utf-8').split('\n'), 1):
+        if sor.strip().startswith('//'):
+            continue
+        for m in re.finditer(r'"(\\.|[^"\\])*"', sor):
+            if EKEZET & set(m.group(0)):
+                ekezet_hibak.append(f"{f}:{n}: {m.group(0)[:70]}")
+if ekezet_hibak:
+    print("\nAz ekezetek ellenorzese MEGBUKOTT (a soros uzenetek ekezet nelkuliek):")
+    for h in ekezet_hibak:
+        print("  " + h)
+    sys.exit(1)
+print("4. Ekezetes betu a szoveg-literalokban: nincs.")

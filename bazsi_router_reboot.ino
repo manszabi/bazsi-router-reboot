@@ -88,7 +88,9 @@ constexpr uint32_t MAX_HEAP_RESTARTS = 3;
 
 // A hosszú várakozások alatt ilyen sűrűn nézzük, visszajött-e a hálózat (Wi-Fi + ping).
 constexpr uint32_t ONLINE_PROBE_INTERVAL_MS = 60 * 1000;
+// Két független üzemeltető (Cloudflare, Google): az internet elérhető, ha bármelyik válaszol.
 constexpr uint8_t PROBE_PING_IP[4] = { 1, 1, 1, 1 };
+constexpr uint8_t PROBE_PING_IP2[4] = { 8, 8, 8, 8 };
 
 // Öt független üzemeltető végpontja; mind az ötnek buknia kell a diagnózis előtt.
 constexpr uint8_t MAX_CYCLE_INDEX = 4;
@@ -231,6 +233,7 @@ void blockingDelay(uint32_t duration);
 void waitWithButtons(uint32_t duration);
 bool waitWithButtonsUntilOnline(uint32_t duration);
 bool onlineProbe();
+bool internetPingOk();
 bool onlineProbeDue(uint32_t& lastProbe, uint32_t now);
 void lockConfigBeforeShutdown();
 void routerFailSleep();
@@ -266,7 +269,7 @@ void enterFatal(const char* reason) {
   Serial.println("!!! VEGZETES HIBA !!!");
   Serial.println(reason);
   Serial.println("A program leallt, mindket LED gyorsan villog.");
-  Serial.println("Reset gomb: ujraindítas. Wifireset gomb: mentett adatok torlese.");
+  Serial.println("Reset gomb: ujrainditas. Wifireset gomb: mentett adatok torlese.");
   Serial.print(FATAL_SLEEP_AFTER_MS / 60000);
   Serial.println(" perc mulva az eszkoz elalszik (magatol nem ebred fel).");
 }
@@ -565,6 +568,15 @@ void waitWithButtons(uint32_t duration) {
 }
 
 // Van-e Wi-Fi és internet (ping)? Wi-Fi nélkül csak aszinkron újracsatlakozást kezdeményez.
+bool internetPingOk() {
+  const IPAddress elso(PROBE_PING_IP[0], PROBE_PING_IP[1], PROBE_PING_IP[2], PROBE_PING_IP[3]);
+  if (testInternetPing(elso, "internet")) {
+    return true;
+  }
+  const IPAddress masodik(PROBE_PING_IP2[0], PROBE_PING_IP2[1], PROBE_PING_IP2[2], PROBE_PING_IP2[3]);
+  return testInternetPing(masodik, "internet (tartalek)");
+}
+
 bool onlineProbe() {
   if (WiFi.status() != WL_CONNECTED) {
     if (ssid[0] != '\0') {
@@ -574,9 +586,7 @@ bool onlineProbe() {
     return false;
   }
 
-  const IPAddress target(PROBE_PING_IP[0], PROBE_PING_IP[1],
-                         PROBE_PING_IP[2], PROBE_PING_IP[3]);
-  return testInternetPing(target, "internet");
+  return internetPingOk();
 }
 
 bool onlineProbeDue(uint32_t& lastProbe, uint32_t now) {
@@ -1047,7 +1057,7 @@ void doWifiReset() {
   cleared &= clearConfigValue(LittleFS, ipPath);
   cleared &= clearConfigValue(LittleFS, gatewayPath);
   if (!cleared) {
-    Serial.println("!!! A mentett wifi adatok törlése NEM sikerült !!!");
+    Serial.println("!!! A mentett wifi adatok torlese NEM sikerult !!!");
     logEvent(EV_FATAL, 4);
 
     endConfigWrite();
@@ -1141,8 +1151,7 @@ uint8_t diagnoseNetwork() {
     return DIAG_ROUTER;
   }
   const bool gwOk = testInternetPing(gw, "router");
-  const IPAddress inet(PROBE_PING_IP[0], PROBE_PING_IP[1], PROBE_PING_IP[2], PROBE_PING_IP[3]);
-  const bool inetOk = testInternetPing(inet, "internet");
+  const bool inetOk = internetPingOk();
   if (inetOk) {
     // Az internet elérhető: a router továbbít, tehát nem a router a hibás.
     if (gwOk) {
@@ -1491,7 +1500,7 @@ void runTestingState() {
     }
     printUptime();
 
-    Serial.print("Test failed. | Hibák száma = ");
+    Serial.print("Test failed. | Hibak szama = ");
     Serial.print(testState.failedCount);
     Serial.print(" / ");
     Serial.println(MAX_CYCLE_INDEX + 1);
