@@ -65,6 +65,7 @@ std::vector<std::string> g_httpUrls;
 bool g_httpChunked = false;
 size_t g_httpChunkSize = 0;
 std::string g_httpRawOverride;
+bool g_httpAutoOk = false;
 uint32_t g_httpOkMs = 200;
 uint32_t g_httpFailMs = 15000;
 bool     g_wdtEnabled = false;

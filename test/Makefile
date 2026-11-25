@@ -1,4 +1,4 @@
-# Host build: a valódi sketch és modulok, stub Arduino/ESP32 API-k felett; IDF 5 és IDF 6 ágon.
+# Host build: a valódi sketch és modulok, stub Arduino/ESP32 API-k felett; IDF 6 és IDF 5 ágon.
 CXX      ?= g++
 CXXFLAGS ?= -std=gnu++17 -Wall -Wextra -Wshadow -Wno-unused-parameter -Wno-overloaded-virtual -Istubs -I..
 SKETCH   := ../bazsi_router_reboot.ino
@@ -9,12 +9,12 @@ DEPS     := $(BUILD)/sketch.cpp $(MODULES) $(wildcard ../*.h) test_main.cpp \
             stubs/main_stub.cpp $(wildcard stubs/*.h) $(wildcard stubs/driver/*.h)
 
 .PHONY: test san cov covgate lint warn stack clean
-test: $(BUILD)/run-idf5 $(BUILD)/run-idf6
-	@echo "=== IDF 5 (ESP32 Arduino 3.3.11) ==="
-	@$(BUILD)/run-idf5
-	@echo
-	@echo "=== IDF 6 (előretekintő ág) ==="
+test: $(BUILD)/run-idf6 $(BUILD)/run-idf5
+	@echo "=== IDF 6 (ESP32 Arduino 4.0.0) ==="
 	@$(BUILD)/run-idf6
+	@echo
+	@echo "=== IDF 5 (ESP32 Arduino 3.3.x) ==="
+	@$(BUILD)/run-idf5
 
 $(BUILD)/sketch.cpp: $(SKETCH) | $(BUILD)
 	@cp $(SKETCH) $@
@@ -28,15 +28,15 @@ $(BUILD)/run-idf6: $(DEPS)
 # ASan + UBSan alatt ugyanazok a forgatókönyvek.
 $(BUILD)/run-san: $(DEPS)
 	$(CXX) $(CXXFLAGS) -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer \
-	  -DESP_IDF_VERSION_MAJOR=5 -o $@ $(SRC)
+	  -DESP_IDF_VERSION_MAJOR=6 -o $@ $(SRC)
 
 san: $(BUILD)/run-san
-	@echo "=== ASan + UBSan (IDF 5) ==="
+	@echo "=== ASan + UBSan (IDF 6) ==="
 	@ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 $(BUILD)/run-san
 
 # Sorlefedettség; a covgate küszöb alatt bukik.
 $(BUILD)/run-cov: $(DEPS)
-	$(CXX) $(CXXFLAGS) -O0 --coverage -DESP_IDF_VERSION_MAJOR=5 -DCOVERAGE_BUILD -o $@ $(SRC)
+	$(CXX) $(CXXFLAGS) -O0 --coverage -DESP_IDF_VERSION_MAJOR=6 -DCOVERAGE_BUILD -o $@ $(SRC)
 
 cov: $(BUILD)/run-cov
 	@rm -f *.gcov $(BUILD)/*.gcda
@@ -61,7 +61,7 @@ WARNFLAGS := -O2 -Wall -Wextra -Wshadow -Wno-unused-parameter -Wno-overloaded-vi
 
 warn: $(BUILD)/sketch.cpp
 	@for f in $(BUILD)/sketch.cpp $(MODULES); do \
-	   $(CXX) -std=gnu++17 $(WARNFLAGS) -Istubs -I.. -DESP_IDF_VERSION_MAJOR=5 \
+	   $(CXX) -std=gnu++17 $(WARNFLAGS) -Istubs -I.. -DESP_IDF_VERSION_MAJOR=6 \
 	          -c $$f -o /dev/null || exit 1; \
 	 done
 	@echo "Szigoru figyelmeztetesek (-O2, csonkolas/tulcsordulas): tiszta."
@@ -71,7 +71,7 @@ STACK_LIMIT ?= 1200
 
 stack:
 	@rm -f $(BUILD)/*.su
-	@$(CXX) -std=gnu++17 -O2 -fstack-usage -Istubs -I.. -DESP_IDF_VERSION_MAJOR=5 \
+	@$(CXX) -std=gnu++17 -O2 -fstack-usage -Istubs -I.. -DESP_IDF_VERSION_MAJOR=6 \
 	        -c ../webportal.cpp -o $(BUILD)/stack.o
 	@python3 ../tools_stack.py $(BUILD)/stack.su $(STACK_LIMIT)
 
@@ -84,7 +84,7 @@ clean:
 # libFuzzer a négy bemenet-elemzőre (POST, titok, naplófájl, konfig).
 FUZZCXX  ?= clang++
 FUZZSEC  ?= 30
-FUZZFLAGS = -std=gnu++17 -g -O1 -Istubs -I.. -DESP_IDF_VERSION_MAJOR=5 \
+FUZZFLAGS = -std=gnu++17 -g -O1 -Istubs -I.. -DESP_IDF_VERSION_MAJOR=6 \
             -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer \
             -Wno-unused-parameter -Wno-overloaded-virtual
 FUZZSRC   = $(BUILD)/sketch.cpp $(MODULES) stubs/main_stub.cpp fuzz_main.cpp

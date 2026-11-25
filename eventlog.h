@@ -24,8 +24,7 @@ enum EventCode : uint8_t {
   EV_LOW_HEAP = 13,
   EV_HEAP_RESTART = 14,
   EV_HTTP_ERROR = 15,
-  EV_NET_DIAG = 16,
-  EV_RESET_SKIPPED = 17
+  EV_NET_DIAG = 16
 };
 
 // 12 bájt: a fájlformátum része.

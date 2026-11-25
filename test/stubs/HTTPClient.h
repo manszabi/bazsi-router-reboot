@@ -22,12 +22,16 @@ extern size_t   g_httpChunkSize;
 
 extern std::string g_httpRawOverride;
 
+// Igaz: minden végpont a saját, helyes válaszát adja (élő internet).
+extern bool g_httpAutoOk;
+
 class HTTPClient {
 public:
 
   bool begin(WiFiClient& c, const char* url) {
     g_httpUrls.push_back(url ? url : "");
     if (!g_httpBeginOk) return false;
+    if (g_httpAutoOk) autoValasz(url ? url : "");
     c.setData(rawStream());
     return true;
   }
@@ -64,6 +68,14 @@ public:
 
 private:
   std::vector<std::string> keys_;
+
+  static void autoValasz(const std::string& url) {
+    g_httpCode = 200; g_httpSize = -2; g_httpChunked = false; g_httpRawOverride.clear();
+    if (url.find("generate_204") != std::string::npos) { g_httpCode = 204; g_httpBody = ""; }
+    else if (url.find("msftconnecttest") != std::string::npos) g_httpBody = "Microsoft Connect Test";
+    else if (url.find("firefox") != std::string::npos) g_httpBody = "success";
+    else if (url.find("gnome") != std::string::npos) g_httpBody = "NetworkManager is online";
+  }
 
   static std::string rawStream() {
     if (!g_httpRawOverride.empty()) return g_httpRawOverride;

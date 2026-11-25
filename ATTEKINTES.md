@@ -1,8 +1,9 @@
 # Röviden: hogyan működik
 
-Egy ESP32-C3 figyeli az internetet, és ha **a router** a hibás, egy relével
-90 másodpercre áramtalanítja. Ha a hiba máshol van (szolgáltató, szűrő,
-Wi-Fi-zavar), a routerhez nem vagy csak egyszer nyúl.
+Egy ESP32-C3 percenként megnézi, van-e internet. Ha egy ideje nincs, egy
+relével 90 másodpercre áramtalanítja a routert: 2 perc után, ha a router sem
+válaszol, 15 perc után, ha csak a szolgáltató felé szakadt meg. Ha ez nem
+segít, egyre ritkábban próbálja újra.
 
 ## Bekötés
 
@@ -24,27 +25,28 @@ Wi-Fi-zavar), a routerhez nem vagy csak egyszer nyúl.
 
 ## Normál működés
 
-- Percenként egy HTTP teszt, öt független üzemeltető végpontja közül a
-  soron következőre (Microsoft, Cloudflare, Mozilla, GNOME, Google).
-- Egy bukott teszt után 12 mp múlva a következő végpont jön. Bármelyik siker
-  mindent nulláz.
+Percenként megnézi, van-e internet: ping az `1.1.1.1`-re, ha nem válaszol, a
+`8.8.8.8`-ra, és ha az sem, egy HTTP teszt (öt üzemeltető közül a soron
+következő). Bármelyik siker elég, és mindent nulláz.
 
-## Ha mind az öt teszt bukik
+## Ha nincs internet
 
-Az eszköz megnézi, hol a hiba:
+Minden körben a router pingjét is megnézi:
 
-| Az internet pingje (1.1.1.1 vagy 8.8.8.8) | A router pingje | Döntés |
-|---|---|---|
-| válaszol | – | csak a HTTP bukik → **nincs reset**, 10 perc múlva újra teszt |
-| nem válaszol | válaszol | szolgáltatói hiba → 3 perc múlva újra 5 teszt, és ha az is bukik, **egy** reset kiesésenként |
-| nem válaszol | nem válaszol | router hiba → **azonnali reset** |
+| Helyzet | Router reset |
+|---|---|
+| a router **sem** válaszol (vagy nincs Wi-Fi) | **2 perc** után |
+| a router válaszol, az internet nem (szolgáltatói hiba) | **15 perc** után |
+| a reset nem segített | a következő **30 perc → 1 óra → 2 óra → 4 óra** múlva, onnan 4 óránként |
 
 A **reset**: 90 mp áramtalanítás, legfeljebb 10 perc várakozás a router
 bootolására (korábban véget ér, ha a hálózat visszajött), majd újracsatlakozás.
-Ha 4 reset sem segít, 1 óra alvás, utána ébredésenként 1 reset.
+Alvás ezen az ágon nincs: az eszköz végig figyel.
 
-Ha a router pingre sosem válaszol, az eszköz ezt megtanulja, és ilyenkor csak
-az internet pingje alapján dönt.
+Ha a router pingre sosem válaszol, a szolgáltatói kiesés is 2 perc után kap
+resetet; reset-hurok ebből sem lesz, mert a lépcső ritkítja.
+
+Ismert korlát: ha a routernek csak a DNS-e fagy le, a ping megy, és nincs reset.
 
 ## Ha nincs Wi-Fi
 
@@ -57,9 +59,9 @@ az internet pingje alapján dönt.
 
 - Soros porton: `LOG` (vagy `/log`) – a teljes eseménynapló.
 - Beállító módban: a `192.168.4.1/log` oldal.
-- A legfontosabb bejegyzések: `TEST FAIL` + `HTTP ERROR` (melyik teszt bukott
-  és miért), `NET DIAG` (hol volt a hiba), `ROUTER RESET`, `RESET SKIPPED`
-  (miért maradt el a reset).
+- A legfontosabb bejegyzések: `TEST FAIL` + `HTTP ERROR` (a kiesés kezdete),
+  `NET DIAG` (1 = a router sem válaszolt, 2 = szolgáltatói hiba),
+  `ROUTER RESET` (hányadik ebben a kiesésben).
 
 ## Tovább
 

@@ -68,20 +68,11 @@ extern uint32_t rtcEvNext;
 enum EventCode : uint8_t;
 extern uint32_t rtcCarryRetryRounds;
 
-extern uint32_t rtcRouterFailRounds;
-extern uint32_t rtcCarryRouterFailRounds;
-extern bool gwAnswersPing;
-extern uint32_t gwLearnLast;
-extern bool wanResetDone;
-extern bool confirmPending;
-extern uint32_t holdOffMs;
-extern bool holdOffActive;
-extern uint8_t lastHoldDiag;
-extern uint32_t rtcCarryDiagState;
 extern int g_randomCalls;
 extern uint32_t g_randomState;
 extern uint64_t g_efuseMac;
-uint8_t diagnoseNetwork();
+bool internetOk();
+bool gatewayPingOk();
 void ensureFallbackDns();
 int lastHttpCode();
 uint16_t httpCodeLogParam(int code);
@@ -93,14 +84,14 @@ struct EventEntry { uint32_t uptimeSec; uint32_t epoch; uint16_t param;
 static_assert(sizeof(EventEntry) == 12, "az EventEntry merete a fajlformatum resze");
 extern EventEntry rtcEvents[];
 
-struct TestState { uint8_t cycleIndex = 0; uint8_t failedCount = 0;
-                   uint8_t resetEvents = 0; uint8_t resetStep = 0; };
+struct TestState { uint8_t endpointIndex = 0; uint8_t resetEvents = 0;
+                   uint8_t resetStep = 0; bool outage = false;
+                   uint32_t outageStart = 0; uint32_t lastResetAt = 0; };
 struct TimingState { uint32_t stateStart = 0; uint32_t resetPulseStart = 0;
                      uint32_t startMillis = 0; uint32_t resetBtnDownSince = 0;
                      uint32_t wifiResetBtnDownSince = 0; uint32_t blinkLast = 0;
                      uint32_t fatalStart = 0; };
-struct UIFlags { bool successPrinted = false; bool resetPrinted = false;
-                 bool firstStartPrinted = false; bool firstStart = true;
+struct UIFlags { bool firstStartPrinted = false; bool firstStart = true;
                  bool blinkOn = false; };
 extern TestState testState;
 extern TimingState timing;
@@ -243,12 +234,7 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   g_resetReason = deepSleepWake ? ESP_RST_DEEPSLEEP : ESP_RST_POWERON;
   if (!deepSleepWake) {
     rtcRetryRounds = 0;
-    rtcRouterFailRounds = 0;
   }
-
-  if (!deepSleepWake) gwAnswersPing = false;
-  gwLearnLast = 0; wanResetDone = false;
-  confirmPending = false; holdOffActive = false; holdOffMs = 10u * 60 * 1000; lastHoldDiag = 0;
 
   clearRestartRequest(); endConfigWrite();
 
@@ -264,8 +250,6 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   g_gpioWakeMask = 0; g_gpioWakeMode = -1;
   g_isr.clear(); g_isrMode.clear();
   rtcCarryRetryRounds = 0;
-  rtcCarryRouterFailRounds = 0;
-  rtcCarryDiagState = 0;
   g_randomCalls = 0;
   btnResetLatched = false; btnWifiResetLatched = false;
   btnResetDownAt = 0; btnWifiResetDownAt = 0;
@@ -274,6 +258,7 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   if (!deepSleepWake) { g_heldPins.clear(); g_deepSleepHoldEnabled = false; }
   g_httpCode = 200; g_httpSize = -2; g_httpBeginOk = true; g_httpBody = "Microsoft NCSI";
   g_httpChunked = false; g_httpChunkSize = 0; g_httpRawOverride.clear();
+  g_httpAutoOk = false;
   g_httpUrls.clear();
   wifiSim.reset(); pingSim = PingSim();
   wifiSim.willConnect = willConnect; wifiSim.latencyMs = latency;
@@ -286,7 +271,7 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
 }
 
 static const uint8_t EVC_TEST_FAIL = 4, EVC_ROUTER_RESET = 5, EVC_AP_MODE = 6,
-                     EVC_HTTP_ERROR = 15, EVC_NET_DIAG = 16, EVC_RESET_SKIPPED = 17;
+                     EVC_HTTP_ERROR = 15, EVC_NET_DIAG = 16;
 
 static int evCount(uint8_t code, int param = -1) {
   const uint32_t db = (rtcEvNext < 32) ? rtcEvNext : 32;
@@ -313,6 +298,16 @@ static int futtat(uint32_t maxMs, F kesz) {
   } catch (DeepSleepSignal&) { return 1; }
   catch (RestartSignal&) { return 2; }
   return 0;
+}
+
+void retrySleep();
+
+// Egy router reset pulzus, majd a Wi-Fi nelkuli ujraprobalkozas alvasa; a visszateres az ebresztesi ido.
+static uint64_t egyResetUtanAlvas() {
+  int guard = 0;
+  while (!reset_device() && ++guard < 200000) { yield(); }
+  try { retrySleep(); } catch (DeepSleepSignal& d) { return d.us; }
+  return UINT64_MAX;
 }
 
 static void ujNaplo() { rtcEvMagic = 0; rtcEvNext = 0; }
@@ -443,12 +438,7 @@ static void sc10() {
   coldBoot(true, "TestNet", "pw", "", "");
   setup();
   {
-    try {
-      for (int c = 0; c < 10; c++) {
-        int guard = 0;
-        while (!reset_device() && ++guard < 200000) { yield(); }
-      }
-    } catch (DeepSleepSignal&) {}
+    egyResetUtanAlvas();
     CHECK(g_pinState[PIN_RELAY] == LOW,  "relé (GPIO10) LOW - a router kap áramot");
     CHECK(g_pinState[6] == LOW,  "státusz LED (GPIO6) LOW");
     CHECK(g_pinState[5] == LOW,  "wifi LED (GPIO5) LOW");
@@ -466,12 +456,7 @@ static void sc10() {
 static void sc11() {
   coldBoot(true, "TestNet", "pw", "", "");
   setup();
-  try {
-    for (int c = 0; c < 10; c++) {
-      int guard = 0;
-      while (!reset_device() && ++guard < 200000) { yield(); }
-    }
-  } catch (DeepSleepSignal&) {}
+  egyResetUtanAlvas();
   CHECK(g_gpioWakeMask != 0, "armolt gomb-ébresztést");
   {
     bool allRtc = true;
@@ -486,7 +471,7 @@ static void sc12() {
   setup();
   CHECK(g_millis > 0, "friss boot");
   CHECK(deviceMode == (DeviceMode)0 && currentState == (State)0,
-        "ébredés után TESTING_STATE / MONITOR (RTC memóriát nem használunk)");
+        "ébredés után ellenőrzés / MONITOR (RTC memóriát nem használunk)");
 }
 
 static void sc13() {
@@ -503,20 +488,6 @@ static void sc13() {
     CHECK(logIndex(RELAY_HIGH) >= 0, "relé bekapcsolt (router áramtalanítva)");
     CHECK(logIndex(RELAY_HIGH) < logIndex(RELAY_LOW), "előbb be, aztán ki");
     CHECK(g_pinState[PIN_RELAY] == LOW, "a végén a router visszakapta az áramot"); }
-}
-
-static void sc14() {
-  coldBoot(true, "TestNet", "pw", "", "");
-  setup();
-  { int cycles = 0; bool slept = false;
-    try {
-      for (; cycles < 10; cycles++) {
-        int guard = 0;
-        while (!reset_device() && ++guard < 200000) { yield(); }
-      }
-    } catch (DeepSleepSignal&) { slept = true; }
-    CHECK(slept, "elaludt");
-    CHECK(cycles == 4, "4 tényleges reset után az 5. eseménynél alszik el"); }
 }
 
 static void sc15() {
@@ -839,14 +810,8 @@ static void scFT7() {
 static void scFT8() {
   coldBoot(true, "TestNet", "pw", "", "");
   setup();
-  uint64_t us = 0;
-  try {
-    for (int c = 0; c < 10; c++) {
-      int guard = 0;
-      while (!reset_device() && ++guard < 200000) { yield(); }
-    }
-  } catch (DeepSleepSignal& d) { us = d.us; }
-  CHECK(us == 3600ULL * 1000000ULL, "1 órás ébresztés megmaradt az internet-hiba útvonalon");
+  const uint64_t us = egyResetUtanAlvas();
+  CHECK(us == 3600ULL * 1000000ULL, "1 órás ébresztés megmaradt a router reset utáni útvonalon");
 }
 
 static void scWF1() {
@@ -1026,13 +991,13 @@ static void scE1() {
   loop();
   CHECK(deviceMode == (DeviceMode)0, "monitor mód");
   loop();
-  CHECK(currentState == (State)2, "sikeres teszt -> SUCCESS_STATE");
+  CHECK(currentState == (State)1, "sikeres ellenőrzés -> várakozás");
   CHECK(g_pinState[5] == HIGH, "wifi LED világít");
-  const uint32_t t0 = g_millis;
+  const uint32_t korKezdete = timing.stateStart;
   int guard = 0;
-  while (currentState == (State)2 && ++guard < 100000) { loop(); g_millis += 10; }
-  CHECK(g_millis - t0 >= 60000, "SUCCESS_DELAY teljes 1 perc volt");
-  CHECK(g_millis - t0 < 62000, "és nem több");
+  while (currentState == (State)1 && ++guard < 100000) { loop(); g_millis += 10; }
+  CHECK(g_millis - korKezdete >= 60000, "a következő ellenőrzés 1 perccel az előző kezdete után");
+  CHECK(g_millis - korKezdete < 60100, "és nem később");
 }
 
 static void scE2() {
@@ -1051,7 +1016,7 @@ static void scE2() {
 
   guard = 0;
   while (currentState != (State)0 && ++guard < 300000) { loop(); g_millis += 10; }
-  CHECK(guard < 300000, "visszatért TESTING_STATE-be a reset után");
+  CHECK(guard < 300000, "visszatért az ellenőrzéshez a reset után");
   CHECK(deviceMode == (DeviceMode)0, "monitor módban maradt (a WiFi jó volt)");
 }
 
@@ -1197,7 +1162,7 @@ static void scCPU1() {
   setup();
   loop();
   loop();
-  CHECK(currentState == (State)2, "SUCCESS_STATE");
+  CHECK(currentState == (State)1, "várakozás két ellenőrzés között");
   const uint32_t before = g_millis;
   loop();
   CHECK(g_millis > before, "a loop() ténylegesen várakozik (delay), nem pörög");
@@ -1305,7 +1270,7 @@ static bool routerAppearsAt(uint32_t appearMs, uint32_t* decidedAtMs) {
   try {
     while (++guard < 2000000) {
       if (deviceMode != (DeviceMode)0) break;
-      if (serialHas("Beginning Test.")) break;
+      if (serialHas("Internet ellenorzes.")) break;
       loop();
     }
   } catch (DeepSleepSignal&) { slept = true; }
@@ -1399,25 +1364,24 @@ static void scR7() {
     loop();
     g_httpCode = -1;
     pingSim.ok = false;
-    gwAnswersPing = true;
     g_httpFailMs = failMs;
     g_serialLog.clear(); g_log.clear();
     int guard = 0;
     try { while (logIndex(RELAY_HIGH) < 0 && ++guard < 500000) loop(); }
     catch (DeepSleepSignal&) {}
     g_httpFailMs = 15000; g_httpCode = 200;
-    const int elsoTeszt = serialIndex("Beginning Test.");
-    const int reset     = serialIndex("Beginning Reset in FAILURE_STATE.");
+    const int elsoTeszt = serialIndex("Internet ellenorzes.");
+    const int reset     = serialIndex("Router reset indul.");
     if (elsoTeszt < 0 || reset < 0) return -1;
     return uptimeSecAt((size_t)reset) - uptimeSecAt((size_t)elsoTeszt);
   };
   const int elo = merd(15000);
   printf("     [info] elo DNS, hallgato szerver: %d mp\n", elo);
 
-  CHECK(elo >= 136 && elo <= 140, "elo DNS mellett 138 mp (a doksi szama)");
+  CHECK(elo >= 148 && elo <= 152, "elo DNS mellett 150 mp (a doksi szama)");
   const int halott = merd(33000);
   printf("     [info] halott DNS: %d mp\n", halott);
-  CHECK(halott >= 226 && halott <= 230, "halott DNS mellett 228 mp");
+  CHECK(halott >= 166 && halott <= 170, "halott DNS mellett 168 mp");
 }
 
 static void scR8() {
@@ -1760,12 +1724,11 @@ static void scOV1() {
   coldBoot(true, "TestNet", "pw", "", "");
   g_httpBody = "Rossz"; pingSim.ok = false;
   setup();
-  gwAnswersPing = true;
   loop();
   int guard = 0;
   uint32_t resets = 0;
   try {
-    while (++guard < 400000) {
+    while (++guard < 2000000) {
       const size_t before = g_log.size();
       loop(); g_millis += 10;
       for (size_t i = before; i < g_log.size(); i++)
@@ -1774,7 +1737,8 @@ static void scOV1() {
     }
   } catch (DeepSleepSignal&) {}
   CHECK(resets >= 3, "több router reset ciklus lefutott");
-  CHECK(guard < 400000, "nem ragadt be végtelen ciklusba");
+  CHECK(guard < 2000000, "nem ragadt be végtelen ciklusba");
+  CHECK(testState.resetEvents == 3, "a számláló pontosan követi a reseteket");
 }
 
 static void scWDT6() {
@@ -1993,66 +1957,26 @@ static void scH8() {
   coldBoot(true, "TestNet", "pw", "", "");
   g_httpCode = -1; pingSim.ok = false;
   setup();
-  gwAnswersPing = true;
   g_httpUrls.clear(); pingSim.targets.clear();
 
-  int guard = 0; bool relay = false;
-  try {
-    while (++guard < 400000 && !relay) {
-      const size_t before = g_log.size();
-      loop();
-      for (size_t i = before; i < g_log.size(); i++)
-        if (g_log[i] == RELAY_HIGH) relay = true;
-    }
-  } catch (DeepSleepSignal&) {}
+  int guard = 0;
+  try { while (++guard < 2000000 && g_httpUrls.size() < 5) loop(); }
+  catch (DeepSleepSignal&) {}
 
-  CHECK(relay, "az eszkaláció végén elindul a router reset");
-  CHECK(g_httpUrls.size() == 5, "mind az 5 teszt HTTP volt");
+  CHECK(g_httpUrls.size() == 5, "öt tartalék HTTP teszt futott");
   if (g_httpUrls.size() == 5) {
-    CHECK(g_httpUrls[0] == "http://www.msftconnecttest.com/connecttest.txt",
-          "0: Microsoft");
-    CHECK(g_httpUrls[1] == "http://cp.cloudflare.com/generate_204",
-          "1: Cloudflare");
-    CHECK(g_httpUrls[2] == "http://detectportal.firefox.com/success.txt",
-          "2: Mozilla");
+    CHECK(g_httpUrls[0] == "http://www.msftconnecttest.com/connecttest.txt", "0: Microsoft");
+    CHECK(g_httpUrls[1] == "http://cp.cloudflare.com/generate_204", "1: Cloudflare");
+    CHECK(g_httpUrls[2] == "http://detectportal.firefox.com/success.txt", "2: Mozilla");
     CHECK(g_httpUrls[3] == "http://nmcheck.gnome.org/check_network_status.txt",
           "3: GNOME / NetworkManager");
-    CHECK(g_httpUrls[4] == "http://connectivitycheck.gstatic.com/generate_204",
-          "4: Google");
-    std::set<std::string> uniq(g_httpUrls.begin(), g_httpUrls.end());
-    CHECK(uniq.size() == 5, "öt különböző végpont, egyik sem ismétlődik");
+    CHECK(g_httpUrls[4] == "http://connectivitycheck.gstatic.com/generate_204", "4: Google");
   }
-
   bool csakProbeCel = true;
   for (auto& t : pingSim.targets) {
     if (t != "1.1.1.1" && t != "8.8.8.8" && t != "192.168.1.1") csakProbeCel = false;
   }
-  CHECK(csakProbeCel,
-        "ping csak a proba es a diagnozis celpontjaira ment (internet, router)");
-}
-
-static void scH9() {
-  // Router es internet-ping rendben, csak a HTTP bukik: nincs router reset.
-  coldBoot(true, "TestNet", "pw", "", "");
-  g_httpCode = -1;
-  pingSim.ok = true;
-  setup();
-  ujNaplo();
-  int guard = 0, relays = 0;
-  const uint32_t t0 = g_millis;
-  size_t before = g_log.size();
-  try {
-    while (++guard < 900000 && g_millis - t0 < 30u * 60 * 1000) {
-      loop();
-      for (size_t i = before; i < g_log.size(); i++)
-        if (g_log[i] == RELAY_HIGH) relays++;
-      before = g_log.size();
-    }
-  } catch (DeepSleepSignal&) {}
-  CHECK(relays == 0, "nincs router reset, ha a router es az internet is el");
-  CHECK(evCount(EVC_RESET_SKIPPED, 3) == 1, "a naploban egyszer: RESET SKIPPED 3");
-  CHECK(g_httpUrls.size() >= 10, "kozben tovabb tesztel");
-  CHECK(!pingSim.targets.empty(), "a diagnozis tenyleg pingelt");
+  CHECK(csakProbeCel, "ping csak az internet és a router címére ment");
 }
 
 static void scIP1() {
@@ -2209,7 +2133,6 @@ static void scL6() {
   logEvent((EventCode)14, 11);
   logEvent((EventCode)15, 1011);
   logEvent((EventCode)16, 2);
-  logEvent((EventCode)17, 3);
 
   AsyncWebServerRequest req;
   g_handlers["/log#1"](&req);
@@ -2218,10 +2141,10 @@ static void scL6() {
                          ">ROUTER RESET<", ">AP MODE<", ">CONFIG SAVED<",
                          ">SLEEP<", ">FATAL<", ">WDT RESET<", ">STUCK BUTTON<",
                          ">GW UNREACH<", ">LOW HEAP<", ">HEAP RESTART<",
-                         ">HTTP ERROR<", ">NET DIAG<", ">RESET SKIPPED<" };
+                         ">HTTP ERROR<", ">NET DIAG<" };
   bool all = true;
   for (const char* w : want) if (b.find(w) == std::string::npos) { all = false; printf("     [info] hianyzik: %s\n", w); }
-  CHECK(all, "MIND a 17 esemenykod olvashato cimket kap");
+  CHECK(all, "MIND a 16 esemenykod olvashato cimket kap");
   CHECK(b.find(">?<") == std::string::npos, "nincs ismeretlen kod a naplóban");
 }
 
@@ -2314,7 +2237,7 @@ static void scE6() {
   g_log.clear();
   int guard = 0;
   try { while (++guard < 100000 && logIndex(RELAY_HIGH) < 0
-               && !serialHas("Beginning Test.")) loop(); }
+               && !serialHas("Internet ellenorzes.")) loop(); }
   catch (...) {}
   CHECK(logIndex(RELAY_HIGH) < 0, "NEM indit routert, ha visszajott a WiFi");
   CHECK(serialHas("WIFI RECONNECTED!"), "ujracsatlakozott");
@@ -2718,8 +2641,8 @@ static void scSE10() {
   try { while (++guard < 400000 && logIndex(RELAY_HIGH) < 0) loop(); }
   catch (...) {}
   CHECK(logIndex(RELAY_HIGH) >= 0, "router reset elindult");
-  wifiSim.lastPass.clear();
-  try { while (++guard < 900000 && !serialHas("WIFI OK in FAILURE_STATE.")) loop(); }
+  wifiSim.lastPass.clear(); g_serialLog.clear();
+  try { while (++guard < 900000 && !serialHas("WIFI RECONNECTED!")) loop(); }
   catch (...) {}
   CHECK(wifiSim.lastPass == PW, "a router reset utani csatlakozas is a nyilt jelszoval megy");
 }
@@ -2749,7 +2672,8 @@ static int gwFutas(bool gwElerheto, bool statikus, uint32_t maxKor) {
 static void scGW1() {
   const int resetek = gwFutas(true, true, 400000);
   CHECK(deviceMode != (DeviceMode)1, "NEM megy AP modba");
-  CHECK(resetek == 1, "a gateway el, az internet nem: szolgaltatoi hiba, egy reset");
+  CHECK(resetek >= 1, "a gateway el, az internet nem: reset (15 perc utan)");
+  CHECK(evCount(EVC_NET_DIAG, 2) >= 1 && evCount(EVC_NET_DIAG, 1) == 0, "NET DIAG 2");
 }
 
 static void scGW2() {
@@ -2772,8 +2696,8 @@ static void scGW2() {
 static void scGW3() {
   const int resetek = gwFutas(false, false, 400000);
   CHECK(deviceMode != (DeviceMode)1, "DHCP-nel nem megy AP modba");
-  CHECK(resetek == 1, "a router pingre sosem valaszolt: szolgaltatoi hibanak veszi, egy reset");
-  CHECK(!serialHas("sajat gateway"), "meg csak nem is pingeli a gateway-t");
+  CHECK(resetek >= 1, "a router pingre nem valaszol: router hibakent reset");
+  CHECK(!serialHas("sajat gateway"), "a statikus gateway-ellenorzes nem fut");
 }
 
 static void scP16() {
@@ -2946,7 +2870,7 @@ static void scWD7() {
 static void scWD13() {
   coldBoot(true, "TestNet", "pw", "", "");
   setup();
-  g_httpCode = -1;
+  g_httpCode = -1; pingSim.ok = false;
   g_httpFailMs = 33000;
   loop();
   const uint32_t gap = wdMeres(60u * 60 * 1000);
@@ -3036,13 +2960,7 @@ static void scS6() {
   coldBoot(true, "TestNet", "pw", "", "");
   setup();
   g_gpioHoldFails = true;
-  bool slept = false;
-  try {
-    for (int c = 0; c < 10; c++) {
-      int guard = 0;
-      while (!reset_device() && ++guard < 200000) { yield(); }
-    }
-  } catch (DeepSleepSignal&) { slept = true; }
+  const bool slept = egyResetUtanAlvas() != UINT64_MAX;
   CHECK(slept, "az alvás a hold hibája ellenére megtörténik");
   CHECK(!g_deepSleepHoldEnabled, "hibás hold_en után nincs deep sleep hold");
   CHECK(serialHas("FIGYELEM: a rele lab rogzitese"), "a hiba nem néma");
@@ -3205,77 +3123,14 @@ static void figyelWifiLed() {
   if (s_wifiLedOffAt == 0 && g_pinState[PIN_WIFILED] != HIGH) s_wifiLedOffAt = g_millis;
 }
 
-static void merjResetUtem(uint32_t& elsoTav, int& resetek) {
-  elsoTav = 0; resetek = 0;
-  uint32_t utolso = 0;
-  int guard = 0;
-  size_t nezettIg = 0;
-  try {
-    while (++guard < 900000) {
-      loop();
-      for (size_t i = nezettIg; i < g_log.size(); i++) {
-        if (g_log[i] == RELAY_HIGH) {
-          resetek++;
-          if (utolso != 0 && elsoTav == 0) elsoTav = g_millis - utolso;
-          utolso = g_millis;
-        }
-      }
-      nezettIg = g_log.size();
-    }
-  } catch (DeepSleepSignal&) {}
-}
-
-static void scRR1() {
-  // Ugyanez harom oran at: egyetlen reset sem, de 10 percenkent ujra teszt.
-  coldBoot(true, "TestNet", "pw", "", "");
-  g_httpCode = -1; g_httpFailMs = 15000;
-  pingSim.ok = true;
-  setup();
-  g_log.clear();
-  int resetek = 0;
-  bool aludt = false;
-  int guard = 0; size_t nezettIg = 0;
-  try {
-    while (++guard < 900000) {
-      loop();
-      for (size_t i = nezettIg; i < g_log.size(); i++)
-        if (g_log[i] == RELAY_HIGH) resetek++;
-      nezettIg = g_log.size();
-    }
-  } catch (DeepSleepSignal&) { aludt = true; }
-  printf("     [info] router es internet el, HTTP bukik: %d reset %.1f ora alatt\n",
-         resetek, g_millis / 3600000.0);
-  CHECK(resetek == 0, "egyetlen router reset sem");
-  CHECK(!aludt, "nem alszik el - folyamatosan figyel tovabb");
-  CHECK(serialHas("A router reset ELMARAD"), "a soros porton kimondja, hogy elmarad");
-  CHECK(serialHas("A varakozas letelt"), "10 percenkent ujra tesztel");
-}
-
-static void scRR2() {
-  coldBoot(true, "TestNet", "pw", "", "");
-  g_httpCode = -1; g_httpFailMs = 15000;
-  pingSim.ok = false;
-  setup();
-  gwAnswersPing = true;
-  g_log.clear();
-  uint32_t tav; int resetek;
-  merjResetUtem(tav, resetek);
-  printf("     [info] teljes kieses: %d router reset, ket reset kozt %u perc %u mp\n",
-         resetek, tav / 60000, (tav / 1000) % 60);
-  CHECK(resetek == 4, "itt is pontosan 4 ujrainditas");
-  CHECK(tav >= 12u * 60 * 1000,
-        "ket ujrainditas kozt legalabb 12 perc - a 10 perces bootvarakozas ep");
-}
-
 static void scRR3() {
   coldBoot(true, "TestNet", "pw", "", "");
   g_httpCode = -1; g_httpFailMs = 15000; pingSim.ok = false;
   setup();
-  gwAnswersPing = true;
   int guard = 0, resetek = 0;
   size_t nezettIg = 0;
   try {
-    while (++guard < 900000 && resetek < 2) {
+    while (++guard < 2000000 && resetek < 2) {
       loop();
       for (size_t i = nezettIg; i < g_log.size(); i++)
         if (g_log[i] == RELAY_HIGH) resetek++;
@@ -3289,10 +3144,8 @@ static void scRR3() {
   guard = 0;
   try { while (++guard < 400000 && !serialHas("Successful Test")) loop(); }
   catch (DeepSleepSignal&) {}
-  CHECK(serialHas("Successful Test"), "sikeres teszt");
-  CHECK(testState.resetEvents == 0, "a reset-szamlalo NULLAZODOTT");
-  CHECK(testState.cycleIndex == 0 && testState.failedCount == 0,
-        "es a ciklus is tiszta lappal indul");
+  CHECK(serialHas("Successful Test"), "sikeres ellenorzes");
+  CHECK(testState.resetEvents == 0 && !testState.outage, "a szamlalo es a kieses NULLAZODOTT");
 }
 
 static void gombNyomas(int pin, uint32_t tartasMs) {
@@ -3400,7 +3253,8 @@ static void merjPislakolas(uint32_t utem, uint32_t& bejegyzes, int& maxEgymasUta
 }
 
 static void scLOG4() {
-  const uint32_t utemek[] = { 500, 1000, 2000, 5000 };
+  // Nem osztoi a 60 mp-es utemnek, kulonben az ellenorzes mindig ugyanabba a fazisba esne.
+  const uint32_t utemek[] = { 700, 1300, 2300, 4700 };
   for (uint32_t u : utemek) {
     uint32_t bej, spm; int maxEgymas;
     merjPislakolas(u, bej, maxEgymas, spm);
@@ -3419,7 +3273,7 @@ static void scLOG5() {
   setup();
   const size_t fsElotte = g_fs.size();
   int guard = 0;
-  try { while (++guard < 200000 && !serialHas("Beginning Reset in FAILURE_STATE")) loop(); }
+  try { while (++guard < 200000 && !serialHas("Router reset indul.")) loop(); }
   catch (DeepSleepSignal&) {}
   CHECK(rtcEvNext > 3, "tenylegesen naplóztunk esemenyeket");
   CHECK(g_criticalMaxDepth == 1,
@@ -3530,7 +3384,6 @@ static void scNV1() {
     coldBoot(true, "TestNet", "pw", "", "");
     g_httpBody = "Rossz"; pingSim.ok = false;
     setup();
-    gwAnswersPing = true;
     g_fs.erase("/evlog.bin");
     int guard = 0;
     try {
@@ -3542,10 +3395,8 @@ static void scNV1() {
   }
 
   {
-    coldBoot(true, "TestNet", "pw", "", "");
-    g_httpBody = "Rossz"; pingSim.ok = false;
+    coldBoot(false, "TestNet", "pw", "", "");
     setup();
-    gwAnswersPing = true;
     int guard = 0;
     bool slept = false;
     try { while (!slept && ++guard < 900000) loop(); }
@@ -3650,11 +3501,9 @@ static void scNV10() {
 }
 
 static void scNV11() {
-  coldBoot(true, "TestNet", "pw", "", "");
+  coldBoot(false, "TestNet", "pw", "", "");
   g_epochNow = 0;
-  g_httpBody = "Rossz"; pingSim.ok = false;
   setup();
-  gwAnswersPing = true;
 
   bool slept = false;
   int guard = 0;
@@ -3881,9 +3730,9 @@ static void scWF11() {
 
   int guard = 0;
   try {
-    while (!(currentState == (State)1 && uiFlags.resetPrinted) && ++guard < 900000) loop();
+    while (currentState != (State)2 && ++guard < 900000) loop();
   } catch (DeepSleepSignal&) {}
-  CHECK(uiFlags.resetPrinted, "megtortent a router reset");
+  CHECK(currentState == (State)2, "megtortent a router reset");
   wifiSim.willConnect = false;
 
   bool slept = false;
@@ -4449,10 +4298,9 @@ static void scGWH1() {
 
   int guard = 0;
   try {
-    while (!(currentState == (State)1 && uiFlags.resetPrinted) && ++guard < 900000) loop();
+    while (currentState != (State)2 && ++guard < 900000) loop();
   } catch (DeepSleepSignal&) {} catch (RestartSignal&) {}
-  CHECK(currentState == (State)1 && uiFlags.resetPrinted,
-        "az elso fazis lefutott: a router megkapta az eselyet");
+  CHECK(currentState == (State)2, "az elso fazis lefutott: a router megkapta az eselyet");
   CHECK(serialHas("A sajat gateway sem elerheto"), "es a gateway-hiba miatt");
   const uint8_t resetekAddig = testState.resetEvents;
 
@@ -4476,11 +4324,10 @@ static void scGWH2() {
   int guard = 0;
   bool restarted = false, slept = false;
   try {
-    while (!(currentState == (State)1 && uiFlags.resetPrinted) && ++guard < 900000) loop();
+    while (currentState != (State)2 && ++guard < 900000) loop();
   } catch (RestartSignal&) { restarted = true; }
   catch (DeepSleepSignal&) { slept = true; }
-  CHECK(currentState == (State)1 && uiFlags.resetPrinted,
-        "az elso fazis lefutott");
+  CHECK(currentState == (State)2, "az elso fazis lefutott");
   g_freeHeap = 5000; g_maxAllocHeap = 4000;
 
   guard = 0;
@@ -4507,10 +4354,8 @@ static void scGWH3() {
   rtcHeapMagic = 0;
   setup();
   monitorUzembe();
-  CHECK(currentState != (State)1, "monitor uzemben, nem hibaagon");
+  CHECK(currentState != (State)2, "monitor uzemben, nem a reset utani varakozasban");
 
-  testState.cycleIndex = 2;
-  testState.failedCount = 2;
   testState.resetEvents = 1;
 
   g_freeHeap = 5000; g_maxAllocHeap = 4000;
@@ -4528,8 +4373,7 @@ static void scGWH3() {
   rtcHeapMagic = hm; rtcHeapRestarts = hr; rtcCarryResetEvents = carry;
   setup();
   CHECK(testState.resetEvents == 1, "a router reset szamlalo folytatodik");
-  CHECK(testState.cycleIndex == 0 && testState.failedCount == 0,
-        "a tesztsor viszont elolrol kezdodik - ez olcso, es igy is helyes");
+  CHECK(testState.outage, "a kieses folytatodik, a lepcso az indulastol szamit");
   CHECK(testState.resetStep == 0, "es nincs felben maradt rele impulzus");
   CHECK(uiFlags.firstStart, "a firstStart varakozas ujra lefut (a proba koran zarja)");
 }
@@ -4789,14 +4633,7 @@ static void scSER6() {
   CHECK(g_serialFirstWriteMs >= 500,
         "az elso kiirt sor csak a CDC beallasa utan megy ki");
 
-  int guard = 0;
-  try {
-    for (int c = 0; c < 10; c++) {
-      int g2 = 0;
-      while (!reset_device() && ++g2 < 200000) { yield(); }
-      if (++guard > 20) break;
-    }
-  } catch (DeepSleepSignal&) {}
+  egyResetUtanAlvas();
   CHECK(!g_serialOn, "alvas elott a Serial.end() lefutott");
   CHECK(logIndex("Serial.flush") < logIndex("Serial.end"),
         "es a flush MEGELOZTE az end-et");
@@ -4996,14 +4833,8 @@ static void scSH2() {
   {
     coldBoot(true, "TestNet", "pw", "", "");
     setup();
-    bool slept = false; uint64_t us = 0;
-    try {
-      for (int c = 0; c < 10; c++) {
-        int guard = 0;
-        while (!reset_device() && ++guard < 200000) { yield(); }
-      }
-    } catch (DeepSleepSignal& d) { slept = true; us = d.us; }
-    CHECK(slept && us == 3600ULL*1000000ULL, "tartos internetkieses: 1 ora");
+    const uint64_t us = egyResetUtanAlvas();
+    CHECK(us == 3600ULL*1000000ULL, "router reset utan sincs halozat: 1 ora");
     CHECK(g_gpioWakeMask == (1ULL << PIN_RESETBTN), "es a reset gomb is felebreszti");
   }
 }
@@ -5401,9 +5232,9 @@ static void scLED4() {
   setup();
   int guard = 0;
 
-  try { while (++guard < 100000 && currentState != (State)2) loop(); }
+  try { while (++guard < 100000 && currentState != (State)1) loop(); }
   catch (DeepSleepSignal&) {}
-  CHECK(currentState == (State)2, "SUCCESS_STATE-ben vagyunk");
+  CHECK(currentState == (State)1, "a ket ellenorzes kozotti varakozasban vagyunk");
   CHECK(g_pinState[PIN_WIFILED] == HIGH, "es a Wi-Fi LED vilagit");
 
   wifiSim.willConnect = false; wifiSim.begun = false;
@@ -5418,9 +5249,9 @@ static void scLED4() {
   printf("     [info] a Wi-Fi LED %u mp-ig mutatott meg kapcsolatot\n", hazugsag / 1000);
   CHECK(s_wifiLedOffAt != 0, "vegul elalszik");
   CHECK(hazugsag <= 62u * 1000,
-        "legkesobb a SUCCESS_DELAY vegen (a TESTING_STATE veszi eszre)");
+        "legkesobb a kovetkezo ellenorzeskor (percenkent)");
   CHECK(hazugsag >= 55u * 1000,
-        "de a SUCCESS_DELAY alatt tenyleg nem ellenorizzuk - ez a mert ablak");
+        "de a varakozas alatt tenyleg nem ellenorizzuk - ez a mert ablak");
 }
 
 static void scLED5() {
@@ -5473,20 +5304,20 @@ static void scBTN2() {
   coldBoot(true, "TestNet", "pw", "", "");
   g_httpCode = -1;
   g_httpFailMs = 33000;
-  pingSim.ok = true;
+  pingSim.ok = false;
   setup();
   const uint32_t gap = merjGombHezag([]() {
     int guard = 0;
     try {
-      while (++guard < 200000 && !serialHas("Test failed.")) loop();
+      while (++guard < 200000 && !serialHas("Nincs internet")) loop();
 
       loop();
     } catch (DeepSleepSignal&) {}
   });
   printf("     [info] a blokkolo HTTP keres alatti vak ablak: %u ms\n", gap);
   CHECK(gap >= 30000, "a http.GET() alatt tenyleg nem nezzuk a gombokat");
-  CHECK(gap <= 34000,
-        "de csak EGY keres erejeig - a keresek KOZOTT ujra pollozunk");
+  CHECK(gap <= 33000 + 2 * 1000 + 100,
+        "de csak egy keres es a ket szomszedos ping-proba erejeig");
 }
 
 static void scBTN3() {
@@ -5556,7 +5387,7 @@ static void scOP5() {
   catch (DeepSleepSignal&) {}
   CHECK(serialHas("RESET_DELAY korai vege"), "a RESET_DELAY korabban veget ert");
   CHECK(g_millis - t0 < 8u * 60 * 1000, "nem a teljes 10 percet varta ki");
-  CHECK(!serialHas("Reconnect WIFI in FAILURE_STATE"),
+  CHECK(!serialHas("RESET_DELAY vege - ujracsatlakozas."),
         "a korai agon NINCS disconnect+reconnect - a kapcsolat mar igazolt");
 }
 
@@ -5620,14 +5451,13 @@ static void scSERidx() {
   g_httpCode = -1; pingSim.ok = false;
   setup();
   int guard = 0;
-  try { while (++guard < 400000 && !serialHas("Teszt ciklus index = 2")) loop(); }
+  try { while (++guard < 400000 && !serialHas("Nincs internet 1 perce")) loop(); }
   catch (DeepSleepSignal&) {}
-  CHECK(serialHas("Teszt ciklus index = 1"), "az elso teszt sorszama 1, nem 0");
-  CHECK(!serialHas("Teszt ciklus index = 0"), "0-dik teszt SEHOL nem jelenik meg");
-  CHECK(serialHas("Test failed. | Hibak szama = 1 / 5"),
-        "a hibaszamlalo a teszt UTAN, mar novelve jelenik meg");
-  CHECK(serialIndex("Teszt ciklus index = 1") < serialIndex("Test failed."),
-        "a sorszam a teszt ELOTT, a hibaszam a teszt UTAN all");
+  CHECK(serialHas("Nincs internet 0 perce, a router sem valaszol."), "az elso korben 0 perc");
+  CHECK(serialHas("Router reset legkorabban 2 perc mulva."), "es a hatralevo ido 2 perc");
+  CHECK(serialHas("Nincs internet 1 perce"), "a kovetkezo korben 1 perc");
+  CHECK(serialIndex("Internet ellenorzes.") < serialIndex("Nincs internet 0 perce"),
+        "az ellenorzes kezdete a kiertekeles elott all");
 }
 
 static void scSERquiet() {
@@ -5643,7 +5473,7 @@ static void scSERquiet() {
         "es a kapott torzset sem irjuk ki sikernel");
 
   coldBoot(true, "TestNet", "pw", "", "");
-  g_httpCode = 200; g_httpBody = "captive portal login"; pingSim.ok = true;
+  g_httpCode = 200; g_httpBody = "captive portal login"; pingSim.ok = false;
   setup();
   guard = 0;
   try { while (++guard < 100000 && !serialHas("Hamis ertek!")) loop(); }
@@ -5658,7 +5488,7 @@ static void scEVT1() {
   g_httpCode = -1; pingSim.ok = false;
   setup();
   int guard = 0;
-  try { while (++guard < 400000 && !serialHas("Test failed.")) loop(); }
+  try { while (++guard < 400000 && !serialHas("Nincs internet")) loop(); }
   catch (DeepSleepSignal&) {}
   bool megvan = false;
   for (uint32_t i = 0; i < rtcEvNext && i < 32; i++) {
@@ -6060,8 +5890,7 @@ static void scILV5() {
         "minden kilepesi ut a zarat megszerezve, vagy kivarva es jelezve tortent");
 }
 
-static const uint8_t  PROP_MAX_CYCLE_INDEX   = 4;
-static const uint8_t  PROP_MAX_FAILURE_EV    = 5;
+static const uint8_t  PROP_ENDPOINTS         = 5;
 static const uint32_t PROP_MAX_RETRY_ROUNDS  = 33;
 static const uint32_t PROP_EVLOG_SIZE        = 32;
 static const uint32_t PROP_RESET_PULSE_MS    = 90000;
@@ -6083,14 +5912,10 @@ struct PropState {
   bool     terminalSeen = false;
   uint32_t reboots = 0, sleeps = 0, restarts = 0;
 
-  uint8_t  maxCycleIndex = 0, maxResetEvents = 0;
-  bool     sawFailureState = false, sawConfigMode = false, sawFatalMode = false;
+  uint8_t  maxResetEvents = 0;
+  bool     sawResetState = false, sawConfigMode = false, sawFatalMode = false;
   bool     sawRelayPulse = false;
 };
-
-struct PropReach { uint8_t cycle = 0, resets = 0;
-                   bool failure = false, config = false, fatal = false, relay = false; };
-static PropReach g_propReach;
 
 static void propViolate(PropState& ps, uint32_t step, const char* what) {
   if (ps.violation == nullptr) {
@@ -6105,18 +5930,13 @@ static void propCheck(PropState& ps, uint32_t step) {
   if (g_relayMaxHighMs > ps.relayMaxHoldMs) ps.relayMaxHoldMs = g_relayMaxHighMs;
   if (g_relayIsHigh || g_relayMaxHighMs > 0) ps.sawRelayPulse = true;
 
-  if (testState.cycleIndex > ps.maxCycleIndex) ps.maxCycleIndex = testState.cycleIndex;
   if (testState.resetEvents > ps.maxResetEvents) ps.maxResetEvents = testState.resetEvents;
-  if (currentState == (State)1) ps.sawFailureState = true;
+  if (currentState == (State)2) ps.sawResetState = true;
   if (deviceMode == (DeviceMode)1) ps.sawConfigMode = true;
   if (deviceMode == (DeviceMode)2) ps.sawFatalMode = true;
 
-  if (testState.cycleIndex > PROP_MAX_CYCLE_INDEX) {
-    propViolate(ps, step, "cycleIndex tullepte a vegpont-tabla meretet");
-  }
-
-  if (testState.resetEvents > PROP_MAX_FAILURE_EV) {
-    propViolate(ps, step, "resetEvents tullepte a maxfailureEvents korlatot");
+  if (testState.endpointIndex >= PROP_ENDPOINTS) {
+    propViolate(ps, step, "endpointIndex tullepte a vegpont-tabla meretet");
   }
   if (rtcRetryRounds > PROP_MAX_RETRY_ROUNDS) {
     propViolate(ps, step, "rtcRetryRounds tullepte a MAX_RETRY_ROUNDS korlatot");
@@ -6285,19 +6105,13 @@ static void propRun(uint32_t seed, uint32_t steps) {
          "szimulalt ido %.1f perc\n",
          (unsigned)seed, (unsigned)step, (unsigned)ps.reboots,
          (unsigned)ps.sleeps, (unsigned)ps.restarts, g_millis / 60000.0);
-  printf("     [eleres] cycleIndex<=%u resetEvents<=%u FAILURE=%s CONFIG=%s "
+  printf("     [eleres] resetEvents<=%u RESET=%s CONFIG=%s "
          "FATAL=%s rele=%s (leghosszabb pulzus %.1f mp)\n",
-         ps.maxCycleIndex, ps.maxResetEvents,
-         ps.sawFailureState ? "igen" : "NEM", ps.sawConfigMode ? "igen" : "NEM",
+         ps.maxResetEvents,
+         ps.sawResetState ? "igen" : "NEM", ps.sawConfigMode ? "igen" : "NEM",
          ps.sawFatalMode ? "igen" : "NEM", ps.sawRelayPulse ? "igen" : "NEM",
          ps.relayMaxHoldMs / 1000.0);
 
-  g_propReach.cycle   = ps.maxCycleIndex > g_propReach.cycle ? ps.maxCycleIndex : g_propReach.cycle;
-  g_propReach.resets  = ps.maxResetEvents > g_propReach.resets ? ps.maxResetEvents : g_propReach.resets;
-  g_propReach.failure |= ps.sawFailureState;
-  g_propReach.config  |= ps.sawConfigMode;
-  g_propReach.fatal   |= ps.sawFatalMode;
-  g_propReach.relay   |= ps.sawRelayPulse;
   if (ps.violation != nullptr) {
     printf("     [info] a sertes a %u. lepesben, %u ms-nal\n",
            (unsigned)ps.violStep, (unsigned)ps.violMs);
@@ -6826,67 +6640,6 @@ static void scSERlog() {
 
 
 
-static void scSLP1() {
-  // Halott router: 4 reset, alvas; ebredes utan korönkent mar csak 1.
-  coldBoot(true, "TestNet", "pw", "", "");
-  g_httpCode = -1; g_httpFailMs = 15000; pingSim.ok = false;
-  setup();
-  gwAnswersPing = true;
-  g_log.clear();
-  int r = futtat(6u * 3600 * 1000, [] { return false; });
-  CHECK(r == 1, "az elso kor alvassal zarul");
-  CHECK(relayPulses() == 4, "az elso korben 4 reset");
-  CHECK(rtcRouterFailRounds == 1, "a sikertelen reset-kor szamlalo 1");
-
-  coldBoot(true, "TestNet", "pw", "", "", 500, true);
-  g_httpCode = -1; g_httpFailMs = 15000; pingSim.ok = false;
-  CHECK(rtcRouterFailRounds == 1, "a szamlalo tulelte a deep sleepet");
-  CHECK(gwAnswersPing, "a router pingelhetosege is tulelte a deep sleepet");
-  setup();
-  g_log.clear();
-  r = futtat(6u * 3600 * 1000, [] { return false; });
-  CHECK(r == 1, "a masodik kor is alvassal zarul");
-  CHECK(relayPulses() == 1, "de mar csak EGY resettel");
-  CHECK(rtcRouterFailRounds == 2, "a szamlalo 2");
-  CHECK(serialHas("Sikertelen reset-kor: 2"), "a soros porton is latszik");
-
-  coldBoot(true, "TestNet", "pw", "", "", 500, true);
-  setup();
-  monitorUzembe();
-  futtat(30u * 60 * 1000, [] { return serialHas("Successful Test"); });
-  CHECK(serialHas("Successful Test"), "sikeres teszt");
-  CHECK(rtcRouterFailRounds == 0, "a sikeres teszt nullazta a szamlalot");
-}
-
-static void scSLP2() {
-  coldBoot(true, "TestNet", "pw", "", "");
-  rtcRouterFailRounds = 5;
-  coldBoot(true, "TestNet", "pw", "", "");
-  CHECK(rtcRouterFailRounds == 0, "bekapcsolaskor nullazodik");
-}
-
-static void scSLP3() {
-  coldBoot(true, "TestNet", "pw", "", "");
-  rtcHeapMagic = 0;
-  setup();
-  rtcRouterFailRounds = 3;
-  g_freeHeap = 5000; g_maxAllocHeap = 4000;
-  bool restarted = false;
-  int guard = 0;
-  try { while (!restarted && ++guard < 200000) { checkHeap(g_millis); g_millis += 1000; } }
-  catch (RestartSignal&) { restarted = true; }
-  CHECK(restarted, "a heap miatt ujraindult");
-  CHECK(rtcCarryRouterFailRounds == 3, "az atvitel rogzitette a szamlalot");
-  const uint32_t hm = rtcHeapMagic, hr = rtcHeapRestarts, ci = rtcCarryRouterFailRounds;
-  const uint8_t ce = rtcCarryResetEvents; const uint32_t cr = rtcCarryRetryRounds;
-  coldBoot(true, "TestNet", "pw", "", "");
-  CHECK(rtcRouterFailRounds == 0, "a szoftveres reset nullazta volna");
-  rtcHeapMagic = hm; rtcHeapRestarts = hr; rtcCarryResetEvents = ce;
-  rtcCarryRetryRounds = cr; rtcCarryRouterFailRounds = ci;
-  setup();
-  CHECK(rtcRouterFailRounds == 3, "az atvitel utan a szamlalo folytatodik");
-}
-
 static void scHC1() {
   CHECK(httpCodeLogParam(200) == 200, "200 valtozatlan");
   CHECK(httpCodeLogParam(204) == 204, "204 valtozatlan");
@@ -6911,8 +6664,8 @@ static void scHC2() {
   setup();
   monitorUzembe();
   ujNaplo();
-  g_httpCode = -11;
-  futtat(60u * 1000, [] { return testState.failedCount >= 1; });
+  g_httpCode = -11; pingSim.ok = false;
+  futtat(3u * 60 * 1000, [] { return testState.outage; });
   CHECK(evCount(EVC_TEST_FAIL, 1) == 1, "TEST FAIL 1");
   CHECK(evCount(EVC_HTTP_ERROR, 1011) == 1, "HTTP ERROR 1011 (idotullepes)");
   CHECK(rtcEvents[(rtcEvNext - 1) % 32].code == EVC_HTTP_ERROR,
@@ -6929,8 +6682,9 @@ static void scFB1() {
 
   monitorUzembe();
   const int elotte = wifiSim.dnsSetCount;
-  futtat(60u * 1000, [] { return serialHas("Beginning Test."); });
-  CHECK(wifiSim.dnsSetCount > elotte, "a teszt elott is beallitja");
+  pingSim.ok = false;
+  futtat(2u * 60 * 1000, [] { return serialHas("HTTP teszt:"); });
+  CHECK(wifiSim.dnsSetCount > elotte, "a HTTP teszt elott is beallitja");
 
   coldBoot(true, "TestNet", "pw", "192.168.1.200", "192.168.1.1");
   setup();
@@ -7129,10 +6883,10 @@ static std::vector<double> ftJatszik(uint32_t percek, M menetrend) {
   size_t nezett = g_log.size();
   int guard = 0;
   try {
-    while (g_millis - t0 < percek * 60000u && ++guard < 6000000) {
+    while (g_millis - t0 < percek * 60000u && ++guard < 20000000) {
       const FtPerc a = menetrend((g_millis - t0) / 60000u);
-      g_httpCode = a.httpOk ? 200 : -11;
-      g_httpBody = "Microsoft Connect Test";
+      g_httpAutoOk = a.httpOk;
+      if (!a.httpOk) g_httpCode = -11;
       pingSim.perTarget["192.168.1.1"] = a.gwOk;
       pingSim.perTarget["1.1.1.1"] = a.inetOk;
       pingSim.perTarget["8.8.8.8"] = a.inetOk;
@@ -7145,53 +6899,59 @@ static std::vector<double> ftJatszik(uint32_t percek, M menetrend) {
   return resetek;
 }
 
-// Mukodo halozattal indul, egy sikeres teszttel (ekkor tanulja meg a router pingjet).
+static void ftKiir(const char* mi, const std::vector<double>& r) {
+  printf("     [info] %s: %zu reset (perc:", mi, r.size());
+  for (double x : r) printf(" %.1f", x);
+  printf(")\n");
+}
+
+// Mukodo halozattal indul, egy sikeres ellenorzessel.
 static void ftIndit() {
   coldBoot(true, "TestNet", "pw", "", "");
   setup();
   monitorUzembe();
   ftJatszik(2, [](uint32_t) { return FtPerc{ true, true, true }; });
   g_log.clear(); g_serialLog.clear(); ujNaplo();
-  g_httpFailMs = 10000;
+  g_httpFailMs = 10000; g_httpAutoOk = false;
 }
 
 static void scRD1() {
+  // Router hiba: sem a router, sem az internet nem valaszol -> reset kb. 2 perc utan.
   ftIndit();
-  CHECK(gwAnswersPing, "az elso sikeres teszt utan megtanulta, hogy a router pingelheto");
   auto r = ftJatszik(20, [](uint32_t) { return FtPerc{ false, false, false }; });
-  CHECK(!r.empty(), "router hiba: reset");
-  CHECK(!serialHas("megerosito kor"), "megerosito kor nelkul");
-  const int fail = serialIndex("Test failed. | Hibak szama = 1 / 5");
-  const int reset = serialIndex("Beginning Reset in FAILURE_STATE.");
-  const int dt = uptimeSecAt((size_t)reset) - uptimeSecAt((size_t)fail);
-  printf("     [info] router hiba: elso bukas -> reset %d mp\n", dt);
-  CHECK(dt > 0 && dt <= 4 * 12 + 4 * 11 + 15, "azonnal: csak az ot teszt es a diagnozis ideje");
-  CHECK(evCount(EVC_NET_DIAG, 1) >= 1 && evCount(EVC_NET_DIAG) == evCount(EVC_NET_DIAG, 1),
-        "NET DIAG = 1 (router hiba)");
+  ftKiir("router hiba 20 percen at", r);
+  CHECK(r.size() == 1, "egy reset");
+  CHECK(r.size() == 1 && r[0] >= 2.0 && r[0] < 4.5, "kb. 2,5 perccel az elso hibas ellenorzes utan");
+  CHECK(evCount(EVC_NET_DIAG, 1) == 1 && evCount(EVC_NET_DIAG) == 1, "NET DIAG 1 (a router sem valaszol)");
+  CHECK(evCount(EVC_TEST_FAIL) == 1, "a kieses kezdete egyszer naplozva");
 }
 
 static void scRD2() {
-  ftIndit();
-  auto r = ftJatszik(180, [](uint32_t p) { return FtPerc{ false, true, false }; });
-  printf("     [info] szolgaltatoi kieses 3 oran at: %zu reset (perc:", r.size());
-  for (double x : r) printf(" %.1f", x);
-  printf(")\n");
-  CHECK(r.size() == 1, "szolgaltatoi kieses: egyetlen reset");
-  CHECK(r.size() == 1 && r[0] >= 3.0, "a megerosito kor (3 perc) utan");
-  CHECK(serialHas("megerosito kor"), "a megerosito kor lefutott");
-  CHECK(serialHas("A router reset ELMARAD"), "utana elmarad");
-  CHECK(evCount(EVC_RESET_SKIPPED, 2) == 1, "RESET SKIPPED 2 egyszer, nem minden korben");
-}
-
-static void scRD3() {
-  for (uint32_t hossz : { 1u, 2u, 4u }) {
+  // Rovid szolgaltatoi kiesesek (a router valaszol): 5 es 10 perc -> nincs reset.
+  for (uint32_t hossz : { 5u, 10u, 14u }) {
     ftIndit();
     auto r = ftJatszik(40, [hossz](uint32_t p) {
       const bool rossz = p >= 5 && p < 5 + hossz;
       return FtPerc{ !rossz, true, !rossz }; });
-    printf("     [info] %u perces szolgaltatoi zavar: %zu reset\n", hossz, r.size());
-    CHECK(r.empty(), hossz == 1 ? "1 perc: nincs reset" : hossz == 2 ? "2 perc: nincs reset" : "4 perc: nincs reset");
+    printf("     [info] %u perces szolgaltatoi kieses: %zu reset\n", hossz, r.size());
+    CHECK(r.empty(), hossz == 5 ? "5 perc: nincs reset" : hossz == 10 ? "10 perc: nincs reset"
+                                                        : "14 perc: nincs reset");
   }
+}
+
+static void scRD3() {
+  // 6 oras szolgaltatoi kieses: 15 perc utan reset, majd 30 perc, 1 ora, 2 ora szunettel.
+  ftIndit();
+  auto r = ftJatszik(360, [](uint32_t) { return FtPerc{ false, true, false }; });
+  ftKiir("6 oras szolgaltatoi kieses", r);
+  CHECK(r.size() == 4, "negy reset");
+  if (r.size() == 4) {
+    CHECK(r[0] >= 15.0 && r[0] < 17.5, "az elso 15 perc utan");
+    CHECK(r[1] - r[0] >= 30.0 && r[1] - r[0] < 31.5, "a masodik 30 perccel kesobb");
+    CHECK(r[2] - r[1] >= 60.0 && r[2] - r[1] < 61.5, "a harmadik 1 oraval kesobb");
+    CHECK(r[3] - r[2] >= 120.0 && r[3] - r[2] < 121.5, "a negyedik 2 oraval kesobb");
+  }
+  CHECK(evCount(EVC_NET_DIAG, 2) == 4, "mind NET DIAG 2 (a router valaszol)");
 }
 
 static void scRD4() {
@@ -7204,80 +6964,100 @@ static void scRD4() {
     return FtPerc{ !rossz, true, true }; });
   printf("     [info] a terepi nap: %zu reset (a regi firmware: 4)\n", r.size());
   CHECK(r.empty(), "nulla router reset");
-  CHECK(evCount(EVC_RESET_SKIPPED, 3) >= 1, "a naplo megmondja, miert maradt el (3)");
+  CHECK(evCount(EVC_TEST_FAIL) == 0, "kiesest sem naplozott: a ping valaszolt");
+  CHECK(g_httpUrls.empty(), "HTTP kerest sem kuldott (a ping eleg volt)");
 }
 
 static void scRD5() {
-  // A router pingre sosem valaszol: a router-jel kimarad, a dontes az internet pingjen mulik.
-  coldBoot(true, "TestNet", "pw", "", "");
-  setup();
-  monitorUzembe();
-  auto r0 = ftJatszik(2, [](uint32_t) { return FtPerc{ true, false, true }; });
-  CHECK(!gwAnswersPing, "nem tanulta meg (nem valaszol)");
-  g_log.clear(); g_serialLog.clear();
-  g_httpFailMs = 10000;
-  auto r = ftJatszik(60, [](uint32_t) { return FtPerc{ false, false, true }; });
-  CHECK(r.empty(), "router-jel nelkul, el internet mellett: nincs reset");
-  r = ftJatszik(60, [](uint32_t) { return FtPerc{ false, false, false }; });
-  CHECK(r.size() == 1, "es ha az internet sem megy: szolgaltatoi agon egy reset");
-  CHECK(serialHas("ezt a jelet nem hasznaljuk"), "kimondja, hogy a router-jelet nem hasznalja");
-  (void)r0;
+  // Pingre nem valaszolo router, szolgaltatoi kieses: router hibanak latszik (ismert ar).
+  ftIndit();
+  auto r = ftJatszik(30, [](uint32_t) { return FtPerc{ false, false, false }; });
+  CHECK(r.size() == 1 && r[0] < 4.5, "a 15 helyett kb. 2 perc utan resetel");
+  CHECK(evCount(EVC_NET_DIAG, 1) == 1, "NET DIAG 1");
 }
 
 static void scRD6() {
-  // A tanulas legfeljebb oranként ismetlodik, ha a router nem valaszol.
-  coldBoot(true, "TestNet", "pw", "", "");
-  setup();
-  monitorUzembe();
-  pingSim.targets.clear();
-  ftJatszik(180, [](uint32_t) { return FtPerc{ true, false, true }; });
-  int gwPing = 0;
-  for (auto& t : pingSim.targets) if (t == "192.168.1.1") gwPing++;
-  printf("     [info] 3 ora sikeres tesztek kozben %d gateway-ping\n", gwPing);
-  CHECK(gwPing > 0 && gwPing <= 4 * 4, "oranként legfeljebb egy tanulasi kor (max 4 ping)");
-  CHECK(!gwAnswersPing, "es tovabbra sem allitja, hogy valaszol");
+  // A halozat szuri a pinget, a HTTP megy: van internet, nincs reset.
+  ftIndit();
+  g_httpUrls.clear();
+  auto r = ftJatszik(120, [](uint32_t) { return FtPerc{ true, false, false }; });
+  CHECK(r.empty(), "nincs reset");
+  CHECK(evCount(EVC_TEST_FAIL) == 0, "kiesest sem naplozott");
+  std::set<std::string> kulonbozo(g_httpUrls.begin(), g_httpUrls.end());
+  CHECK(kulonbozo.size() == 5, "a tartalek HTTP teszt mind az ot vegpontot sorra veszi");
 }
 
 static void scRD7() {
-  // Szolgaltatoi kieses, siker, majd ujabb kieses: az uj kieses ujra kap egy resetet.
+  // Kieses, reset, gyogyulas, ujabb kieses: a lepcso elolrol indul.
   ftIndit();
-  auto r = ftJatszik(150, [](uint32_t p) {
-    const bool rossz = (p < 30) || (p >= 90 && p < 120);
+  auto r = ftJatszik(120, [](uint32_t p) {
+    const bool rossz = (p < 20) || (p >= 60 && p < 80);
     return FtPerc{ !rossz, true, !rossz }; });
-  CHECK(r.size() == 2, "ket kulon kieses: ket reset");
-  CHECK(!wanResetDone, "a sikeres teszt torolte a jelzot");
+  ftKiir("ket kulon kieses", r);
+  CHECK(r.size() == 2, "ket kieses: ket reset");
+  CHECK(r.size() == 2 && r[1] >= 75.0 && r[1] < 78.0, "a masodik is 15 perc utan (nem 30 perces lepcso)");
 }
 
 static void scRD8() {
-  // A megerosito kor alatt a router is elhal: router hiba lesz belole, azonnali reset.
+  // Halott router egy napig: nincs alvas, a resetek egyre ritkabbak.
   ftIndit();
-  auto r = ftJatszik(30, [](uint32_t p) { return FtPerc{ false, p < 3, false }; });
-  CHECK(!r.empty(), "reset volt");
-  CHECK(evCount(EVC_NET_DIAG, 1) >= 1, "router hibakent (NET DIAG 1)");
+  auto r = ftJatszik(24 * 60, [](uint32_t) { return FtPerc{ false, false, false }; });
+  ftKiir("halott router 24 oran at", r);
+  CHECK(r.size() == 9, "kilenc reset egy nap alatt");
+  bool ritkul = true;
+  for (size_t i = 1; i < r.size(); i++) if (r[i] - r[i - 1] < 30.0) ritkul = false;
+  CHECK(ritkul, "ket reset kozott legalabb 30 perc");
+  CHECK(r.size() >= 6 && r[5] - r[4] >= 240.0 && r[5] - r[4] < 241.5, "a lepcso 4 oranal megall");
+  CHECK(deviceMode == (DeviceMode)0, "vegig figyel, nem alszik el");
+}
+
+static void scRD9() {
+  // Heap-ujraindulas: a reset-szamlalo atjon, a kovetkezo reset a lepcso szerint jon.
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcHeapMagic = 0;
+  setup();
+  testState.resetEvents = 2;
+  g_freeHeap = 5000; g_maxAllocHeap = 4000;
+  bool restarted = false; int guard = 0;
+  try { while (!restarted && ++guard < 200000) { checkHeap(g_millis); g_millis += 1000; } }
+  catch (RestartSignal&) { restarted = true; }
+  CHECK(restarted, "a heap miatt ujraindult");
+  const uint32_t hm = rtcHeapMagic, hr = rtcHeapRestarts, cr = rtcCarryRetryRounds;
+  const uint8_t ce = rtcCarryResetEvents;
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcHeapMagic = hm; rtcHeapRestarts = hr; rtcCarryResetEvents = ce; rtcCarryRetryRounds = cr;
+  setup();
+  CHECK(testState.resetEvents == 2 && testState.outage, "a szamlalo es a kieses atjott");
+  monitorUzembe();
+  g_log.clear(); g_httpFailMs = 10000;
+  auto r = ftJatszik(90, [](uint32_t) { return FtPerc{ false, false, false }; });
+  ftKiir("heap-ujraindulas utan", r);
+  CHECK(r.size() == 1 && r[0] >= 50.0, "a kovetkezo reset az 1 oras lepcso szerint jon");
 }
 
 static void scRD10() {
-  // Wi-Fi van, de a DHCP nem adott gateway-t (0.0.0.0): router hiba, nem pingel vakon.
+  // Wi-Fi van, de a DHCP nem adott gateway-t (0.0.0.0): nem pingel vakon, router hiba.
   ftIndit();
   wifiSim.dhcpGw = IPAddress();
   pingSim.targets.clear();
-  CHECK(diagnoseNetwork() == 1, "gateway nelkul: router hiba");
-  CHECK(serialHas("nincs gateway cim"), "kimondja, miert");
+  CHECK(!gatewayPingOk(), "gateway nelkul: a router nem valaszol");
   CHECK(pingSim.targets.empty(), "0.0.0.0-t nem pingel");
 }
 
 static void scRD11() {
-  // A router korabban valaszolt pingre, mostanra nem (pl. beallitas valtozott),
-  // de az internet el: a router tovabbit, tehat nincs reset, es a jelzo torlodik.
+  // Wi-Fi vesztes egy kiesesen belul: a lepcso a Wi-Fi agra is vonatkozik.
   ftIndit();
-  CHECK(gwAnswersPing, "kiindulas: a router pingelheto volt");
-  auto r = ftJatszik(40, [](uint32_t) { return FtPerc{ false, false, true }; });
-  CHECK(r.empty(), "nincs router reset");
-  CHECK(!gwAnswersPing, "a 'pingelheto' jelzo torlodott");
-  CHECK(serialHas("a router mar nem valaszol pingre"), "kimondja");
-  // Ezutan egy valodi kieses (internet sem) mar szolgaltatoi agon megy: egy reset.
-  r = ftJatszik(60, [](uint32_t) { return FtPerc{ false, false, false }; });
-  CHECK(r.size() == 1, "valodi kiesesnel egyetlen reset, nem negy");
+  auto r = ftJatszik(5, [](uint32_t) { return FtPerc{ false, false, false }; });
+  CHECK(r.size() == 1, "router hiba: egy reset");
+  futtat(15u * 60 * 1000, [] { return currentState == (State)0 && serialHas("RESET_DELAY"); });
+  const uint32_t elsoReset = testState.lastResetAt;
+  wifiSim.willConnect = false; wifiSim.begun = false;
+  g_log.clear();
+  futtat(40u * 60 * 1000, [] { return relayPulses() > 0; });
+  const uint32_t kozte = testState.lastResetAt - elsoReset;
+  printf("     [info] a ket reset kozott %.1f perc\n", kozte / 60000.0);
+  CHECK(serialHas("a kovetkezo router reset meg nem esedekes"), "a Wi-Fi vesztesre sem resetel azonnal");
+  CHECK(relayPulses() == 1 && kozte >= 30u * 60 * 1000, "a masodik reset a 30 perces lepcso utan jon");
 }
 
 static void scRD12() {
@@ -7285,7 +7065,7 @@ static void scRD12() {
   ftIndit();
   pingSim.perTarget["192.168.1.1"] = false; pingSim.perTarget["1.1.1.1"] = false; pingSim.perTarget["8.8.8.8"] = false;
   g_httpCode = -11;
-  futtat(30u * 60 * 1000, [] { return relayPulses() >= 1 && serialHas("Reset is done in FAILURE_STATE."); });
+  futtat(30u * 60 * 1000, [] { return relayPulses() >= 1 && serialHas("Router reset kesz"); });
   CHECK(relayPulses() == 1, "router hiba: reset");
   wifiSim.authFail = true; wifiSim.willConnect = false; wifiSim.begun = false;
   futtat(30u * 60 * 1000, [] { return deviceMode != (DeviceMode)0; });
@@ -7294,8 +7074,9 @@ static void scRD12() {
 }
 
 static void scRD13() {
-  // Az 1.1.1.1 nem valaszol (pl. a szolgaltato szuri), a 8.8.8.8 igen: az internet el.
+  // Az 1.1.1.1 nem valaszol, a 8.8.8.8 igen: van internet, HTTP sem kell.
   ftIndit();
+  g_httpUrls.clear();
   std::vector<double> r;
   {
     const uint32_t t0 = g_millis; int guard = 0; size_t nezett = g_log.size();
@@ -7312,39 +7093,22 @@ static void scRD13() {
     } catch (DeepSleepSignal&) {}
   }
   CHECK(r.empty(), "a tartalek celpont valaszol: nincs reset");
-  CHECK(evCount(EVC_NET_DIAG, 3) >= 1, "NET DIAG 3: csak a HTTP bukik");
+  CHECK(evCount(EVC_TEST_FAIL) == 0, "kiesest sem naplozott");
+  CHECK(g_httpUrls.empty(), "HTTP kerest sem kuldott");
   CHECK(std::count(pingSim.targets.begin(), pingSim.targets.end(), std::string("8.8.8.8")) > 0,
         "a 8.8.8.8-at tenyleg pingelte");
 }
 
-static void scRD9() {
-  // Heap-ujraindulas: a szolgaltatoi reset jelzo, a router-pingelhetoseg es a hold sorozat atjon.
-  coldBoot(true, "TestNet", "pw", "", "");
-  rtcHeapMagic = 0;
-  setup();
-  wanResetDone = true; gwAnswersPing = true; lastHoldDiag = 3;
-  g_freeHeap = 5000; g_maxAllocHeap = 4000;
-  bool restarted = false; int guard = 0;
-  try { while (!restarted && ++guard < 200000) { checkHeap(g_millis); g_millis += 1000; } }
-  catch (RestartSignal&) { restarted = true; }
-  CHECK(restarted, "a heap miatt ujraindult");
-  const uint32_t hm = rtcHeapMagic, hr = rtcHeapRestarts, cd = rtcCarryDiagState;
-  const uint8_t ce = rtcCarryResetEvents;
-  coldBoot(true, "TestNet", "pw", "", "");
-  CHECK(!gwAnswersPing, "a szoftveres reset nullazta volna");
-  rtcHeapMagic = hm; rtcHeapRestarts = hr; rtcCarryResetEvents = ce; rtcCarryDiagState = cd;
-  setup();
-  CHECK(wanResetDone && gwAnswersPing && lastHoldDiag == 3, "mindharom atjott");
+static void scRD14() {
+  // Normal uzemben percenkent egy ellenorzes, a kor kezdetetol merve.
+  ftIndit();
+  g_serialLog.clear();
+  ftJatszik(60, [](uint32_t) { return FtPerc{ true, true, true }; });
+  int n = 0;
+  for (auto& l : g_serialLog) if (l.find("Internet ellenorzes.") != std::string::npos) n++;
+  printf("     [info] 60 perc alatt %d ellenorzes\n", n);
+  CHECK(n >= 59 && n <= 61, "percenkent egy");
 }
-
-
-
-
-
-
-
-
-
 
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
@@ -7364,7 +7128,6 @@ static const Scenario kScenarios[] = {
   { "S5: ébredés után a relé holdja rendezetten oldódik fel", scS5 },
   { "S6: hibás hold rögzítés nem akadályozza az alvást és nem néma", scS6 },
   { "RL1: a reset pulzus tényleg 90 másodperc (regresszió a fő hibára)", sc13 },
-  { "RL2: az 5. reset esemény deep sleepet vált ki", sc14 },
   { "H1: a záró CR/LF nem buktatja el az egyezést", sc15 },
   { "H2: eltérő tartalom és hibás státusz elbukik", sc16 },
   { "H3: captive portal nagy válaszát el sem olvassa", sc17 },
@@ -7407,7 +7170,7 @@ static const Scenario kScenarios[] = {
   { "WD4: áramtalanítás nullázza a watchdog számlálót", scWD4 },
   { "WD5: szoftveres reset nem növel és nem nulláz", scWD5 },
   { "WD6: 1 óra hibátlan működés nullázza a számlálót", scWD6 },
-  { "E1: teljes egészséges ciklus (teszt -> SUCCESS -> teszt)", scE1 },
+  { "E1: teljes egészséges ciklus (ellenőrzés -> várakozás -> ellenőrzés)", scE1 },
   { "E2: internet kiesik -> router reset -> visszatérés", scE2 },
   { "E3: reset után a WiFi sem jön vissza -> alvás, újrapróbálkozás", scE3 },
   { "E4: startConfigPortal() ismételt hívása nem duplikál", scE4 },
@@ -7459,8 +7222,7 @@ static const Scenario kScenarios[] = {
   { "H5: beragadt szervernél a saját olvasási határidő tart", scH5 },
   { "H6: üres elvárásnál 204-et követel, a captive portált elutasítja", scH6 },
   { "H7: 204-nél a törzs olvasásába bele sem kezd", scH7 },
-  { "H8: az eszkaláció 5 különböző célpontot próbál végig", scH8 },
-  { "H9: router és internet-ping jó, csak a HTTP néma -> nincs router reset", scH9 },
+  { "H8: a tartalék HTTP teszt sorban váltja az öt végpontot", scH8 },
   { "IP1: a stub ugyanúgy viselkedik, mint a core IPAddress-e", scIP1 },
   { "IP2: IPv6 és 0.0.0.0 cím nem fogadható el a portálon", scIP2 },
   { "IP3: mentett IPv6 gateway esetén DHCP, nem csonka statikus konfig", scIP3 },
@@ -7527,7 +7289,7 @@ static const Scenario kScenarios[] = {
   { "FS10: a fileMatches() minden elbukási módja", scFS10 },
   { "R5: a rossz jelszó csak a 2. próbálkozástól látszik (STA.cpp)", scR5 },
   { "R6: egy újrapróbálkozási kör ébren töltött ideje 25,5 perc", scR6 },
-  { "R7: a felismerési idő router hibánál 138 mp élő és 228 mp halott DNS mellett", scR7 },
+  { "R7: a felismerési idő router hibánál 150 mp élő és 168 mp halott DNS mellett", scR7 },
   { "R8: 33 kör, 32 alvás - a tényleges türelem ~46 óra", scR8 },
   { "CH1: a chunked válasz keretbájtjai nem buktatják el a tesztet", scCH1 },
   { "CH2: több darabra vágott választ is összefűz", scCH2 },
@@ -7545,9 +7307,7 @@ static const Scenario kScenarios[] = {
 
   { "WDT8b: a LittleFS formázása is belefér a watchdog ablakába", scWDT8b },
   { "WDT9: 1 óra hibátlan működés AP módban is nullázza a WDT számlálót", scWDT9 },
-  { "RR1: router és internet él, a HTTP bukik – 3 óra alatt nulla reset", scRR1 },
-  { "RR2: router hibánál 4 reset, köztük a 10 perces bootvárakozás érintetlen", scRR2 },
-  { "RR3: egyetlen sikeres teszt nullázza a reset-számlálót", scRR3 },
+  { "RR3: egyetlen sikeres ellenőrzés nullázza a reset-számlálót", scRR3 },
   { "LOG4: pislákoló kapcsolat nem árasztja el az eseménynaplót", scLOG4 },
   { "LOG5: a naplózás nem blokkol és nem függ a fájlrendszertől", scLOG5 },
   { "LOG1: a /log emberi olvasásra készül (reset ok, uptime, jelmagyarázat)", scLOG1 },
@@ -7624,7 +7384,7 @@ static const Scenario kScenarios[] = {
   { "SE11: az onlineProbe() WiFi.begin()-je is a NYÍLT jelszót adja", scSE11 },
   { "WF10: a RESET_DELAY korai kilépése után a statikus IP érintetlen", scWF10 },
   { "CFG2: sérült kódolt jelszó -> nem végzetes hiba, AP módban javítható", scCFG2 },
-  { "LED4: a Wi-Fi LED nem hazudik tovább egy SUCCESS_DELAY-nél", scLED4 },
+  { "LED4: a Wi-Fi LED legfeljebb egy percig hazudik", scLED4 },
   { "LED5: a státusz LED normál üzemben végig világít", scLED5 },
   { "LED6: AP módban a mentés utáni türelmi idő alatt is villog", scLED6 },
   { "BTN1: a hosszú várakozások alatt 10 ms-onként nézzük mindkét gombot", scBTN1 },
@@ -7635,7 +7395,7 @@ static const Scenario kScenarios[] = {
   { "LED3: a reset pulzus villogása 2 Hz, és pontosan a pulzus alatt tart", scLEDpulse },
 
   { "WDT7: a watchdog már a LittleFS csatolása ELŐTT élesedik", scWDT_EARLY },
-  { "SER4: a teszt sorszáma 1-alapú, a hibaszám a teszt után áll", scSERidx },
+  { "SER4: kiesésnél az eltelt és a hátralévő idő percben", scSERidx },
   { "SER5: sikernél csak 'Successful Test', eltérésnél a kapott törzs is", scSERquiet },
   { "SER6: a soros port helyesen indul es rendezetten zar le alvas elott", scSER6 },
   { "SER7: a beragadt gomb agan sem veszik el az utolso sor", scSER7 },
@@ -7685,9 +7445,6 @@ static const Scenario kScenarios[] = {
   { "COV6: a statikus gateway-ellenorzes (WiFi.gatewayIP alapjan)", scCOV6 },
 
   { "SERL: a soros /log parancs is mukodik", scSERlog },
-  { "SLP1: halott router - 4 reset, alvas, utana korönkent 1", scSLP1 },
-  { "SLP2: bekapcsolaskor a tartos-kieses szamlalo nullazodik", scSLP2 },
-  { "SLP3: a heap-ujraindulas atviszi a tartos-kieses szamlalot", scSLP3 },
   { "HC1: a HTTP kod naplozhato alakja es rogzitese", scHC1 },
   { "HC2: az elso bukas a HTTP kodot is naplozza", scHC2 },
   { "FB1: tartalek DNS DHCP mellett is", scFB1 },
@@ -7699,19 +7456,20 @@ static const Scenario kScenarios[] = {
   { "SP3: a portal nem ment osszeillo par nelkuli statikus IP-t", scSP3 },
   { "PW1: a jelszo szokozei megmaradnak, a sorveg nem", scPW1 },
   { "PG3: az ESPping fantom-sikere bukasnak szamit", scPG2 },
-  { "RD1: router hiba (a router nem valaszol): azonnali reset", scRD1 },
-  { "RD2: szolgaltatoi kieses: megerosito kor, egy reset, utana nincs", scRD2 },
-  { "RD3: 1-4 perces szolgaltatoi zavar: nincs reset", scRD3 },
+  { "RD1: router hiba (a router sem valaszol): reset kb. 2 perc utan", scRD1 },
+  { "RD2: 5-14 perces szolgaltatoi kieses: nincs reset", scRD2 },
+  { "RD3: 6 oras szolgaltatoi kieses: 15 perc, majd 30 perc / 1 ora / 2 ora lepcso", scRD3 },
   { "RD4: a 2026-11-22-i terepi nap: nulla reset", scRD4 },
-  { "RD5: pingre nem valaszolo router: a router-jel kimarad", scRD5 },
-  { "RD6: a router-ping tanulasa legfeljebb oranként", scRD6 },
-  { "RD7: kulon szolgaltatoi kiesesek kulon resetet kapnak", scRD7 },
-  { "RD8: a megerosito kor alatt elhalo router: azonnali reset", scRD8 },
-  { "RD9: heap-ujraindulas: a diagnozis allapota atjon", scRD9 },
-  { "RD10: Wi-Fi van, gateway nincs: router hiba", scRD10 },
-  { "RD11: a router mar nem valaszol pingre, az internet el: nincs reset", scRD11 },
+  { "RD5: pingre nem valaszolo router: router hibanak latszik", scRD5 },
+  { "RD6: szurt ping, mukodo HTTP: nincs reset, az ot vegpont sorra kerul", scRD6 },
+  { "RD7: gyogyulas utan a lepcso elolrol indul", scRD7 },
+  { "RD8: halott router egy napig: nincs alvas, legfeljebb 4 orankent reset", scRD8 },
+  { "RD9: heap-ujraindulas: a reset-szamlalo es a lepcso atjon", scRD9 },
+  { "RD10: Wi-Fi van, gateway nincs: router hiba, vak ping nelkul", scRD10 },
+  { "RD11: Wi-Fi vesztes a kiesesen belul: a lepcso itt is ervenyes", scRD11 },
   { "RD12: reset utan rossz jelszo: AP mod", scRD12 },
   { "RD13: az 1.1.1.1 hallgat, a 8.8.8.8 valaszol: nincs reset", scRD13 },
+  { "RD14: normal uzemben percenkent egy ellenorzes", scRD14 },
 
   { "APP1: az elso portal-inditas egyedi, eros AP jelszot general", scAPP1 },
   { "APP2: az AP jelszo allando, indulaskor kiirva, normal uzemben nincs iras", scAPP2 },

@@ -6,12 +6,12 @@ ESP32-C3 alapú automatikus router újraindító rendszer. Az eszköz folyamatos
 
 ## 📋 Jellemzők
 
-- **Automatikus internetkapcsolat-figyelés** – öt HTTP teszt, öt különböző üzemeltető felé
-- **Automatikus router újraindítás** – relé segítségével áramtalanítja, majd visszakapcsolja a routert; előtte a router és az internet pingjével eldönti, hogy a router-e a hibás
+- **Internetfigyelés percenként** – ping az `1.1.1.1`-re és a `8.8.8.8`-ra, tartalékként HTTP teszt öt üzemeltető felé
+- **Automatikus router újraindítás** – relével áramtalanítja a routert, ha 2 percig (a router sem válaszol) vagy 15 percig (szolgáltatói hiba) nincs internet; sikertelen reset után egyre ritkábban
 - **Wi-Fi Manager** – böngészőből konfigurálható SSID, jelszó, IP-cím és gateway
 - **Beépített beállító weboldal** – a programba fordítva, nincs feltöltendő fájlrendszer-tartalom
 - **LittleFS** – a beállítások áramszünet után is megmaradnak
-- **Deep Sleep védelem** – túl sok sikertelen próbálkozás után az ESP alvó módba lép (1 óra), majd újrapróbálkozik
+- **Deep sleep Wi-Fi nélkül** – ha a router reset után sincs Wi-Fi, az ESP 1 órára elalszik, majd újrapróbálkozik
 - **Fizikai gombok** – reset és Wi-Fi reset gombok debounce-szal
 - **Uptime kijelzés** – Soros porton folyamatosan látható az eszköz futási ideje
 
@@ -60,11 +60,8 @@ eltér; a két hibajelzés mindkettőt villogtatja, gyorsabban – az egyik egy�
 a másik ellenfázisban. A reset pulzus alatt azért villog a státusz LED, mert
 90 másodpercnyi sötét LED ránézésre a halott eszköztől sem különböztethető meg.
 
-> **A Wi-Fi LED késhet, legfeljebb egy percet.** A kapcsolat állapotát a
-> tesztciklus ellenőrzi, a sikeres teszt utáni 60 mp-es várakozás alatt viszont
-> nem. Ha a kapcsolat épp ekkor szakad meg, a LED legfeljebb **60 másodpercig**
-> még világít, aztán a következő teszt elején elalszik (mérve: `LED4`). A
-> működésre ez nem hat – csak a kijelzés késik.
+> **A Wi-Fi LED legfeljebb egy percet késhet:** a kapcsolatot a percenkénti
+> ellenőrzés nézi, két ellenőrzés között nem (mérve: `LED4`).
 
 ## ⚙️ Működés
 
@@ -141,199 +138,88 @@ Ha nincs mentett Wi-Fi adat (vagy a Wi-Fi reset gombot megnyomtad):
 > (Az ESP32 `WiFi.config()` STA ágában a DNS-t szó szerint a kapott paraméterből
 > veszi, gateway-fallback **nincs**, és a DHCP-t leállítja.)
 
-### 2. Normál működés – Állapotgép
+### 2. Normál működés
 
-Az eszköz három állapotban működik:
-
-```
-┌─────────────┐
-│  TESTING     │ ◄── Internetkapcsolat tesztelése
-│  STATE       │
-└──────┬───┬──┘
-       │   │
-  sikeres  sikertelen
-       │   │
-       ▼   ▼
-┌──────────┐  ┌──────────────┐
-│ SUCCESS  │  │  FAILURE     │
-│ STATE    │  │  STATE       │
-│ (1 perc  │  │ (12s várakoz │
-│  várakoz)│  │  → újrateszt)│
-└──────────┘  └──────────────┘
-                     │
-             mind az 5 teszt bukott
-               (cycleIndex > 3)
-                     │
-                     ▼
-              ┌──────────────────┐
-              │ DIAGNÓZIS        │
-              │ router ping?     │
-              │ internet ping?   │
-              └──┬──────┬─────┬──┘
-        router   │      │     │  csak a HTTP
-        hiba     │      │     │  bukik
-                 │  szolgáltatói │
-                 │  hiba         │
-                 ▼      ▼        ▼
-          ROUTER RESET  3 perc   nincs reset,
-          (azonnal)     megerősítő 10 perc múlva
-                        kör, majd  újra teszt
-                        1 reset
-```
-
-A **ROUTER RESET**: relé be (90 mp áramtalanítás), relé ki, legfeljebb 10 perc
-várakozás a router bootolására, majd Wi-Fi újracsatlakozás.
-
-#### Tesztelési módszerek (ciklikusan váltakoznak)
-
-| Kiírt sorszám | `cycleIndex` | Végpont | Üzemeltető | Elvárt válasz |
-|:---:|:---:|---|---|---|
-| 1 | 0 | `msftconnecttest.com/connecttest.txt` | Microsoft | `Microsoft Connect Test` |
-| 2 | 1 | `cp.cloudflare.com/generate_204` | Cloudflare | **204 No Content** |
-| 3 | 2 | `detectportal.firefox.com/success.txt` | Mozilla | `success` |
-| 4 | 3 | `nmcheck.gnome.org/check_network_status.txt` | GNOME / NetworkManager | `NetworkManager is online` |
-| 5 | 4 | `connectivitycheck.gstatic.com/generate_204` | Google | **204 No Content** |
-
-> **Két számozás, szándékosan.** A soros port és a `/log` oldal **1-től**
-> számol (`Teszt ciklus index = 1`…`5`), mert emberi olvasónak nincs „0-dik
-> teszt". A `cycleIndex` változó viszont marad **0-alapú**: a `0`–`4`
-> tartományhoz kötődik a végpontválasztó `if`-lánc és a `RESET_TRIGGER_CYCLE`
-> küszöb is. A kódban tehát `0`–`4`, a kimeneten `1`–`5`.
->
-> Öt végpont van (`TEST_ENDPOINTS[]`, `MAX_CYCLE_INDEX + 1`); egy
-> `static_assert` köti össze a táblázat méretét a ciklus-index plafonjával.
-
-**Nincs internet = mind az öt teszt elbukik.** Öt különböző végpont, öt
-független üzemeltető, két ellenőrzési mód. Bármelyik siker nullázza a
-számlálókat, tehát egyetlen szolgáltató kiesése soha nem látszik
-internetkimaradásnak. A küszöb szándékosan szigorúbb az iparági szokásnál
-(a Nagios `max_check_attempts` alapértelmezése 3 egymást követő bukás), mert
-egy téves reset ára ~11,5 perc kiesés, a plusz szigorúságé viszont csak
-~1 perc késleltetés.
-
-> **Ha DNS-szűrőt futtatsz a hálózaton** (Pi-hole, AdGuard Home), ellenőrizd a
-> blokklistáidat. A kapcsolat-ellenőrző domainek – `connectivitycheck.gstatic.com`,
-> `detectportal.firefox.com` – tipikus célpontjai a telemetria-ellenes listáknak,
-> épp azért, hogy az OS/böngésző ne „telefonáljon haza". A legelterjedtebb lista,
-> a Pi-hole alapértelmezett StevenBlack *unified* (79 746 domain), ellenőrizve
-> **egyiket sem** tiltja (csak a `csi.gstatic.com`-ot), és a
-> *fakenews-gambling-porn-social* változata sem – de a szűkebb, vendor-specifikus
-> listák eltérnek, ezért a sajátodat nézd meg. Egy blokkolt név `0.0.0.0`-ra
-> oldódik vagy NXDOMAIN-t ad, tehát az adott teszt **mindig elbukik**. Ez
-> önmagában nem okoz téves resetet – a **3.** tesztre (Mozilla) csak akkor
-> kerül sor, ha az 1. és a 2. is elbukott –, de elveszíted a redundancia egy
-> részét. A soros naplóban a `Teszt ciklus index = N` sor és a `/log` oldal
-> `TEST FAIL` bejegyzésének paramétere is megmondja, melyik végpont bukott el
-> (mindkettő 1-alapú, a fenti táblázat szerint).
-
-> **A soros kimenet két száma, és hogy miért ott áll, ahol.**
-> A `Teszt ciklus index = N` a teszt **előtt** áll, mert azt mondja meg, melyik
-> végpont következik (`1`…`5`). A `Test failed. | Hibak szama = N / 5` viszont a
-> teszt **után**, mert az már az eredmény – hány egymás utáni bukás van, és hány
-> után jön a diagnózis.
->
-> **Sikeres teszt csak a `Successful Test` sort adja.** A `testInternetHTTP()`
-> siker esetén hallgat: sem a kapott törzset, sem külön nyugtázó sort nem ír ki.
-> Eltéréskor viszont kiírja a **kapott törzset** és a `Hamis ertek!` sort – ott
-> ugyanis épp az a kérdés, mi jött vissza a várt válasz helyett (captive portál,
-> megváltozott végpont).
-
-#### Miért HTTP a teszt, és mire való mégis a ping
-
-Az internetteszt **kizárólag HTTP** (ezt a `H8` teszt őrzi): az ICMP nem
-bizonyít sem névfeloldást, sem TCP-t. Nem véletlen, hogy egyetlen nagy
-implementáció sem ICMP-vel validál: a NetworkManager (libcurl HTTP), a Firefox
-(`detectportal`), a Windows NCSI (DNS + HTTP) mind HTTP-t használ.
-
-A ping arra kell, hogy az öt bukott teszt után kiderüljön, **hol** a hiba – a
-router újraindítása ugyanis csak az egyik esetben segít:
-
-| Az internet pingje (1.1.1.1, ha nem válaszol: 8.8.8.8) | A router (gateway) pingje | Diagnózis | Router reset |
-|---|---|---|---|
-| válaszol | – (a router továbbít) | csak a HTTP bukik (szűrő, Wi-Fi-zavar) | **nincs** |
-| nem válaszol | válaszol | szolgáltatói hiba | 3 perces megerősítő kör után, kiesésenként **egyszer** |
-| nem válaszol | nem válaszol (vagy nincs Wi-Fi / gateway) | router hiba | **azonnal** |
-
-A ping még egy helyen él: a hosszú várakozások (`firstStartDelay`,
-`RESET_DELAY`) korai lezárásánál (`onlineProbe()`). Itt legrosszabb esetben
-annyit ér el, hogy a várakozás korábban véget ér, és azonnal a rendes HTTP
-tesztsorozat következik.
-
-> **Ha a routered nem válaszol pingre**, az eszköz ezt megtanulja: a router
-> pingjét csak akkor használja, ha egy sikeres teszt után legalább egyszer
-> válaszolt (`gwAnswersPing`; legfeljebb óránként újrapróbálja). Addig a
-> hallgató routert nem tekinti hibásnak, és az internet pingje dönt.
-
-#### A két ellenőrzési mód
-
-A **204-es ellenőrzés** szigorúbb, mint a szöveg-egyeztetés: egy captive
-portál nem tud `204 No Content`-et adni, mert neki éppenséggel tartalmat kell
-küldenie (bejelentkező oldal vagy átirányítás). A `testInternetHTTP()` akkor
-vált erre az ágra, ha az elvárt válasz üres sztring. Ugyanezt a döntést hozza
-a NetworkManager is (`src/core/nm-connectivity.c`: 204 → „no content, as
-expected", bármi más → portál).
-
-> A szöveges ellenőrzés a válaszból legfeljebb 96 bájtot olvas be, és levágja
-> a záró sortörést az összehasonlítás előtt.
-
-#### Miért bontja a firmware maga a chunked keretezést
-
-A `HTTPClient` a `Transfer-Encoding: chunked` darabhatárait **csak** a
-`getString()` és a `writeToStream()` útján bontja le (`HTTPClient.cpp`:
-`_transferEncoding == HTTPC_TE_CHUNKED`). Egyiket sem használjuk: mindkettő
-korlátlanul foglal vagy ír, egy captive portál többszáz kilobájtos válaszán
-pedig épp ezt akarjuk elkerülni – ezért olvassuk a `begin()`-nek átadott
-`WiFiClient`-et közvetlenül, fix méretű pufferbe.
-
-Csakhogy a nyers streamben a keretbájtok is ott vannak. Egy chunked `success`
-válasz így néz ki a dróton:
+Percenként egy **ellenőrzés**: van-e internet. Ha egy ideje nincs, jön a router
+reset. A szabály az OpenWrt `watchcat` csomagjáéval rokon (ha egy ideje egyik
+cím sem válaszol, újraindít), két kiegészítéssel: a router pingje dönt a
+türelmi időről, és sikertelen reset után egyre ritkábban próbálkozik.
 
 ```
-7\r\nsuccess\r\n0\r\n\r\n
+ ┌──────────────┐  van internet   ┌──────────────┐
+ │ ELLENŐRZÉS   │ ──────────────► │ VÁRAKOZÁS    │
+ │ (percenként) │ ◄────────────── │ (a kör       │
+ └──────┬───────┘   1 perc után   │  kezdetétől) │
+        │ nincs internet          └──────────────┘
+        ▼                                ▲
+  letelt a türelmi idő? ── nem ──────────┘
+        │ igen
+        ▼
+ ┌──────────────┐  korán, ha visszajött a net
+ │ ROUTER RESET │ ─────────────────────────────► ELLENŐRZÉS
+ │ 90 mp + ≤10p │
+ └──────────────┘
 ```
 
-A `strcmp()` ezt nem látná `success`-nek, tehát a **tökéletesen működő végpont
-is bukott tesztnek számítana**. Öt ilyen egymás után = fölösleges router
-újraindítás. A `readChunked()` ezért lebontja a keretezést:
+#### Van-e internet?
 
-- hexa méret sor, opcionális `;kiterjesztés`-sel, kis- és nagybetűvel egyaránt;
-- a 96 bájtos puffer határán megáll – nem olvas végig egy darabokban érkező
-  captive portált sem;
-- túlcsorduló méretnél és nem hexa méret sornál feladja, és a teszt elbukik.
-  Nem találgatunk: egy szabálytalanul keretező köztes doboz **soha** ne
-  számítson sikeres internettesztnek.
+Bármelyik siker elég, és a sor ott megáll:
 
-A ma használt öt végpont mind `Content-Length`-et küld, tehát ez a kód
-gyakorlatban nem fut le – de egy közbeiktatott proxy bármikor átkeretezheti a
-választ, és ez a hiba némán, a redundancia elvesztésével jelentkezne. A
-`CH1`–`CH5` forgatókönyvek fedik.
+1. ping `1.1.1.1` (Cloudflare),
+2. ping `8.8.8.8` (Google),
+3. egy **HTTP teszt** – arra az esetre, ha a hálózat a pinget szűri. Az öt
+   végpont közül mindig a soron következő jön:
 
-#### Router reset folyamat
+| # | Végpont | Üzemeltető | Elvárt válasz |
+|:-:|---|---|---|
+| 1 | `msftconnecttest.com/connecttest.txt` | Microsoft | `Microsoft Connect Test` |
+| 2 | `cp.cloudflare.com/generate_204` | Cloudflare | **204 No Content** |
+| 3 | `detectportal.firefox.com/success.txt` | Mozilla | `success` |
+| 4 | `nmcheck.gnome.org/check_network_status.txt` | GNOME | `NetworkManager is online` |
+| 5 | `connectivitycheck.gstatic.com/generate_204` | Google | **204 No Content** |
 
-1. **Mind az öt teszt bukott** (`cycleIndex > 3`). Egyetlen feltétel dönt, nincs
-   külön „N hiba" küszöb: mind az öt üzemeltetőt végig kell próbálni, és
-   **bármelyik sikeres teszt nullázza** a folyamatot. Kivétel: ha a **Wi-Fi
-   maga nem jön vissza** (3 próba), a firmware azonnal a diagnózisra ugrik –
-   rossz jelszónál (`WL_CONNECT_FAILED`) pedig reset helyett AP mód jön.
+Egy ping 4 próbából 2 választ követel (egy elveszett csomag nem kiesés). A
+204-es ellenőrzés szigorúbb a szövegesnél: captive portál nem tud
+`204 No Content`-et adni. A szöveges ellenőrzés legfeljebb 96 bájtot olvas, és
+a `Transfer-Encoding: chunked` keretezést maga bontja le (a `HTTPClient` ezt
+csak a `getString()` útján tenné, az viszont korlátlanul foglalna).
 
-2. **Diagnózis** (lásd a fenti táblázatot). Ha a reset elmarad, a naplóba egyszer
-   `NET DIAG` és `RESET SKIPPED` kerül, és 10 perc múlva (`HOLD_OFF_MS`) újra
-   lefut a tesztsorozat. A 2026-11-22-i terepi napló napja (négy rövid HTTP-zavar,
-   közben működő internet) az új szabályokkal **nulla** resetet ad (`RD4`; a
-   régi firmware négyet adott).
+> **DNS-szűrő (Pi-hole, AdGuard):** ha egy végpontot tilt, csak az a HTTP teszt
+> bukik; a döntést a két ping hozza, így ez téves resetet nem okoz.
 
-3. **A reset maga:** relé be → **90 mp** áramtalanítás (`RESET_PULSE`) → relé ki →
-   **legfeljebb 10 perc** várakozás (`RESET_DELAY`), ami korán véget ér, ha a
-   hálózat és az internet visszajött → Wi-Fi újracsatlakozás.
+#### Mikor jön a reset?
 
-4. **Ha a router reset nem segít** (router hiba esetén): 4 reset után deep sleep
-   1 órára, majd magától ébred. Ha az ébredés után is tart, ébredésenként már
-   csak **1** reset jár, aztán újra alvás. Egy sikeres teszt mindent nulláz.
-   (A `maxfailureEvents = 5` számláló a reset előtt nő, ezért 4 tényleges reset.)
+| Helyzet | Router reset |
+|---|---|
+| a router **sem** válaszol pingre (vagy nincs Wi-Fi / gateway) | **2 perc** internet nélkül |
+| a router válaszol, az internet nem (szolgáltatói hiba) | **15 perc** internet nélkül |
+| a reset nem segített | a következő **30 perc → 1 óra → 2 óra → 4 óra** múlva, onnan 4 óránként |
+| egyetlen sikeres ellenőrzés | minden nullázódik |
 
-5. **A Wi-Fi beállítások a stabil méréshez:** a modem-alvás ki van kapcsolva
-   (egyes routereknél elhúzódó TCP-válaszokat okoz), és DHCP mellett is van
-   tartalék DNS (1.1.1.1, a router DNS-e után).
+Mérve (`R7`): router hibánál az első hibás ellenőrzéstől a resetig **150 mp**
+(halott DNS mellett 168 mp). Egy 6 órás szolgáltatói kiesés 4 resetet kap, egy
+napig halott router 9-et (`RD3`, `RD8`); a 15 percnél rövidebb kiesés egyet sem
+(`RD2`). A 2026-11-22-i terepi nap (működő internet, lassú HTTP) **nulla**
+resetet ad, mert a ping válaszolt (`RD4`; a régi firmware négyet adott).
+
+> **Ha a routered nem válaszol pingre**, az eszköz router hibának látja a
+> szolgáltatói kiesést is, és 15 helyett 2 perc után resetel. Reset-hurok ebből
+> sem lesz, mert a következő resetek a lépcső szerint ritkulnak.
+
+#### A reset menete
+
+1. relé be → **90 mp** áramtalanítás (`RESET_PULSE`) → relé ki;
+2. legfeljebb **10 perc** várakozás (`RESET_DELAY`), ami korán véget ér, ha a
+   hálózat és az internet visszajött;
+3. Wi-Fi újracsatlakozás, majd újra ellenőrzés. Ha a Wi-Fi nem jön vissza: a
+   Wi-Fi-hiba ága (alvás és újrapróbálkozás, lásd lent).
+
+Ha működés közben a **Wi-Fi** vész el és 3 próbára sem jön vissza, a reset
+azonnal jön (rossz jelszónál helyette AP mód) – kivéve, ha a kiesés már kapott
+resetet: ekkor a lépcső szerint vár.
+
+A stabil méréshez a Wi-Fi modem-alvás ki van kapcsolva, és DHCP mellett is van
+tartalék DNS (`1.1.1.1`, a router DNS-e után).
 
 ### 3. Fizikai gombok
 
@@ -345,8 +231,8 @@ választ, és ez a hiba némán, a redundancia elvesztésével jelentkezne. A
 > **Egy rövid koppintás is elég.** A firmware minden saját várakozó ciklusában
 > 10 ms-onként mintavételezi mindkét gombot (mérve: `BTN1`) – egy futó **HTTP
 > teszt alatt viszont nem tud**, mert a `http.GET()` az ESP32 core blokkoló
-> hívása. Ez az ablak legfeljebb egy kérésnyi: 15 mp hallgató szervernél,
-> 33 mp halott DNS-nél (mérve: `BTN2`).
+> hívása, és a ping egy-egy próbája alatt sem. Ez az ablak legfeljebb egy kérés
+> és két ping-próba: halott DNS-nél 35 mp (mérve: `BTN2`).
 >
 > Ezt az ablakot **megszakítás-alapú retesz** hidalja át. Mindkét gomb lábán
 > `CHANGE` megszakítás fut, és a kezelő **megméri a lenyomás hosszát**: a
@@ -385,14 +271,14 @@ választ, és ez a hiba némán, a redundancia elvesztésével jelentkezne. A
 
 | | |
 |---|---|
-| **Elalvás oka** | 5 sikertelen router reset, vagy sikertelen Wi-Fi újracsatlakozás |
+| **Elalvás oka** | a router reset után sem jön vissza a Wi-Fi (újrapróbálkozási kör), AP-időtúllépés, végzetes hiba |
 | **Alvás hossza** | 1 óra (timer), vagy 60 mp beragadt gomb esetén |
 | **Ébresztés** | timer **vagy** a reset gomb (D1) lenyomása. Végzetes hiba utáni alvásnál **csak a gomb** |
 | **Ébredés után** | teljes újraindulás – a `setup()` fut le elölről |
 
 Az ESP32-C3 deep sleepből mindig **újraindulással** ébred: a RAM tartalma elvész,
-így a hibaszámlálók (`resetEvents`, `failedCount`) nullázódnak, és az eszköz
-tiszta lappal kezdi az internet tesztelését. Három érték él RTC memóriában:
+így a reset-számláló (`resetEvents`) nullázódik, és az eszköz tiszta lappal
+kezdi az internet figyelését. Három érték él RTC memóriában:
 az újrapróbálkozási körök száma (`rtcRetryRounds`, csak a deep sleepet éli túl),
 a watchdog-újraindulások számlálója és a 32 bejegyzéses diagnosztikai napló
 (mindkettő `RTC_NOINIT`, a resetet is túléli – csak az áramtalanítás törli).
@@ -431,7 +317,7 @@ bazsi-router-reboot/
 ├── webportal.h/.cpp          # az AP beállító portál HTTP felülete
 │
 ├── partitions_custom.csv     # Egyedi partíciós tábla: OTA nélkül, 512 KiB LittleFS
-├── test/                     # host tesztkészlet (362 forgatókönyv)
+├── test/                     # host tesztkészlet (356 forgatókönyv)
 │
 ├── ATTEKINTES.md             # egyoldalas összefoglaló
 ├── MUKODES.md                # minden időzítés és döntés táblázatban
@@ -450,7 +336,7 @@ utóbbi ~1,5 KB, 128 bejegyzés).
 
 **Nyolc fordítási egység**, ~3500 sor, **114 függvény**, egysoros kommentekkel. A gerinc
 három üzemmód (`MODE_MONITOR` / `MODE_CONFIG` / `MODE_FATAL`) és három állapot
-(`TESTING` → `SUCCESS`, vagy `TESTING` → `FAILURE`). `MODE_MONITOR`-ból van út
+(`CHECK` → `WAIT`, vagy `CHECK` → `RESET`). `MODE_MONITOR`-ból van út
 a másik kettőbe, **visszaút nincs**.
 
 A modulok külön fordítási egységek, saját headerrel: **amit a header nem hirdet
@@ -468,9 +354,9 @@ lentebb állóktól függ:
 | `strutil` | `trimInPlace()` | 1 függvény |
 
 A főmodulban a **döntéshozatal** maradt: `setup()`, `loop()`, az állapotgép
-(`runTestingState()` / `runFailureState()` / `runSuccessState()`), a reset előtti
-diagnózis (`diagnoseNetwork()`), a Wi-Fi, a relé, az alvások, a gombok, a
-watchdog és a heap-felügyelet.
+(`runCheckState()` / `runResetState()`), az internet- és routerellenőrzés
+(`internetOk()`, `gatewayPingOk()`), a reset időzítése (`resetWaitMs()`), a
+Wi-Fi, a relé, az alvások, a gombok, a watchdog és a heap-felügyelet.
 
 Teljes függvénylistával és a határhúzás indoklásával:
 [MUKODES.md 16. fejezet](MUKODES.md).
@@ -480,11 +366,11 @@ Teljes függvénylistával és a határhúzás indoklásával:
 | Könyvtár | Leírás |
 |----------|--------|
 | `WiFi.h` | ESP32 Wi-Fi kezelés (a board package része) |
-| `ESPAsyncWebServer` (**ESP32Async** fork, tesztelve: 3.12.0) | Aszinkron webszerver |
-| `AsyncTCP` (**ESP32Async** fork, tesztelve: 3.5.0) | Aszinkron TCP az ESPAsyncWebServer-hez |
+| `ESPAsyncWebServer` (**ESP32Async** fork, tesztelve: 3.12.1) | Aszinkron webszerver |
+| `AsyncTCP` (**ESP32Async** fork, tesztelve: 3.6.1 – a 3.6.0-t kerüld, bootolási hurok) | Aszinkron TCP az ESPAsyncWebServer-hez |
 | `LittleFS` | Fájlrendszer a flash memóriában (a board package része) |
 | `HTTPClient` | HTTP kérések az internettesztekhez (a board package része) |
-| `ESPping` (dvarrel, tesztelve: 1.0.5) | ICMP ping a saját gateway ellenőrzéséhez |
+| `ESPping` (dvarrel, tesztelve: 1.0.5) | ICMP ping (internet és router) |
 
 > A webszervernél kifejezetten a karbantartott **ESP32Async** forkot használd
 > (`ESP32Async/ESPAsyncWebServer` + `ESP32Async/AsyncTCP`): a régi, elhagyott
@@ -534,8 +420,8 @@ platform = espressif32
 board = seeed_xiao_esp32c3
 framework = arduino
 lib_deps =
-    ESP32Async/ESPAsyncWebServer @ ^3.12.0
-    ESP32Async/AsyncTCP @ ^3.5.0
+    ESP32Async/ESPAsyncWebServer @ ^3.12.1
+    ESP32Async/AsyncTCP @ ^3.6.1
     dvarrel/ESPping @ ^1.0.5
 board_build.filesystem = littlefs
 board_build.partitions = partitions_custom.csv
@@ -576,17 +462,13 @@ Amit ez hoz:
 | Paraméter | Érték | Leírás |
 |-----------|-------|--------|
 | `WIFI_CONNECT_TIMEOUT_MS` | 20s | Wi-Fi csatlakozási timeout |
-| `SUCCESS_DELAY` | 1 perc | Várakozás sikeres teszt után |
-| `PROBE_DELAY` | 12s | Várakozás sikertelen teszt után (újrapróbálkozás előtt) |
+| `CHECK_INTERVAL_MS` | 1 perc | Ilyen sűrűn ellenőriz (a kör kezdetétől); a hosszú várakozások korai lezárását is ilyen sűrűn nézi |
+| `ROUTER_DOWN_WINDOW_MS` | 2 perc | Ennyi internet nélküli idő után reset, ha a router sem válaszol |
+| `WAN_DOWN_WINDOW_MS` | 15 perc | Ennyi után reset, ha a router válaszol (szolgáltatói hiba) |
+| `RETRY_BACKOFF_MS` | 30 / 60 / 120 / 240 perc | Ha a reset nem segített, ennyivel az előző után jön a következő (az utolsó ismétlődik) |
 | `RESET_PULSE` | 90s | Router áramtalanítás időtartama |
 | `RESET_DELAY` | **max.** 10 perc | Várakozás a router reset után (bootolási idő) – korábban véget ér, ha a hálózat és az internet is visszajött |
 | `firstStartDelay` | **max.** 10 perc | Első indítás utáni várakozás – ugyanígy korábban is véget érhet |
-| `ONLINE_PROBE_INTERVAL_MS` | 60 mp | Ilyen sűrűn nézzük a két hosszú várakozás alatt, hogy vége lehet-e |
-| `maxfailureEvents` | 5 | A reset esemény számláló határa → **4** tényleges router újraindítás után deep sleep |
-| `maxfailureEventsAfterSleep` | 2 | Az első sikertelen reset-kör (alvás) után ébredésenként már csak **1** router újraindítás |
-| `CONFIRM_DELAY_MS` | 3 perc | Szolgáltatói hibánál (a router él, az internet nem) ennyi múlva még egy teljes tesztsorozat, csak utána reset |
-| `GW_LEARN_INTERVAL_MS` | 1 óra | Ha a router pingre nem válaszolt, legfeljebb ennyi időnként próbáljuk újra megtanulni |
-| `HOLD_OFF_MS` | 10 perc | Kihagyott reset után (a router él) ennyi múlva tesztel újra |
 | `wifi_maxRetries` | 3 | Wi-Fi újracsatlakozási próbálkozások |
 | `wifiInterval` | 30s | Szünet a próbálkozások között |
 | `MAX_RETRY_ROUNDS` | 33 | 33 × 25,5 perc + 32 × 60 perc = **46 óra** türelem, körönként egy router újraindítással (az utolsó kör már nem alszik) |
@@ -612,12 +494,17 @@ Ping 2 sikeres.
 Uptime: 0h 0m 2s
 First start wait end (halozat es internet visszajott).
 Uptime: 0h 0m 2s
-Beginning Test.
-Teszt ciklus index = 1
-Uptime: 0h 3m 1s
+Internet ellenorzes.
+Ping teszt futtatasa (internet - 1.1.1.1)...
+...
 Successful Test
+```
 
-SUCCESS_DELAY delay start.
+Kiesésnél minden körben ez áll (a perc a kiesés kezdete óta):
+
+```
+Nincs internet 1 perce, a router sem valaszol.
+Router reset legkorabban 1 perc mulva.
 ```
 
 ### Indulás és lezárás
@@ -669,45 +556,35 @@ reset utáni ellenőrző ablakban**. Mindegyik helyzetnek megvan a maga kiútja:
 portál 5 perc után elalszik, a többi eset pedig a következő mérésnél újra sorra
 kerül.
 
-> Az utolsó kizárás a legkevésbé nyilvánvaló. A gateway-eszkaláció **kétfázisú**:
-> ha a saját gateway sem érhető el, a router kap egy esélyt (újraindítás), és a
-> várakozás után **újra** ellenőrizzük – ha még mindig nincs gateway, a statikus
-> IP a rossz, jön az AP mód, hogy javítani lehessen. Azt, hogy „az első fázis már
-> lefutott", három sima globális hordozza együtt, és egy újraindulás mindhármat
-> elveszti. Az eszköz elölről kezdené: a router kapna **még egy fölösleges
-> áramtalanítást**, és az AP módba menetel egy teljes körrel később születne meg –
-> épp az járna rosszul, akinek a statikus IP-jét javítani kellene.
+> Az utolsó kizárás azért kell, mert a statikus IP ellenőrzése **kétfázisú**: ha
+> a saját gateway sem érhető el, a router kap egy resetet, és a várakozás után
+> **újra** ellenőrizzük – ha még mindig nincs gateway, jön az AP mód. Egy
+> újraindulás ezt a félbehagyott második fázist veszítené el.
 
-**Amit az újraindulás átvisz** – két számláló, mindkettő egy-egy többfázisú
-létra állását őrzi:
+**Amit az újraindulás átvisz** (RTC memórián, a `setup()` pontosan egyszer
+használja fel; gombnyomásnál nincs átvitel):
 
-- a `testState.resetEvents`: hányszor indítottuk már újra a routert. Ez viszi az
-  eszközt az ötödiknél az 1 órás alvásba; enélkül **végtelenül újraindíthatná a
-  routert** ahelyett, hogy elalszik.
-- az `rtcRetryRounds`: a **2 napos ablak** állása. Ez `RTC_DATA_ATTR`, tehát
-  szoftveres resetre szándékosan nullázódik (a *felhasználói* beavatkozás tiszta
-  lapot kap) – a heap-újraindulás viszont nem felhasználói beavatkozás. Átvitel
-  nélkül az eszköz sosem érné el a 2 napos határt, vagyis **sosem menne AP
-  módba**, és a felhasználó sosem kapna esélyt a javításra.
+- `testState.resetEvents` – a reset-lépcső állása. Nélküle egy heap-újraindulás
+  után a következő reset 30+ perc helyett 2–15 perc múlva jönne.
+- `rtcRetryRounds` – a **2 napos ablak** állása. Nélküle az eszköz sosem érné el
+  a 2 napos határt, tehát sosem menne AP módba.
 
-Mindkettő az RTC memórián megy át, és a `setup()` pontosan egyszer használja fel.
-Gombnyomásnál nincs átvitel, tehát ott marad a tiszta lap. Részletek:
-[MUKODES.md](MUKODES.md)
+Részletek: [MUKODES.md](MUKODES.md)
 
 ## ✅ Tesztelt konfiguráció
 
 | | |
 |---|---|
-| **Board package** | ESP32 Arduino **3.3.11** |
-| **Beágyazott ESP-IDF** | `release_v5.5` (`esp32-arduino-libs-idf-release_v5.5-b774170f`) |
+| **Board package** | ESP32 Arduino **4.0.0** (a 3.3.x is fordul: a kód mindkét IDF-et kezeli) |
+| **Beágyazott ESP-IDF** | v6.1 (`esp32-arduino-libs-idf-release_v6.1-051e4c4e-v2`) |
 | **Board** | XIAO ESP32-C3 (`D0`=GPIO2, `D1`=GPIO3, `D3`=GPIO5, `D4`=GPIO6, `D10`=GPIO10) |
-| **ESPAsyncWebServer** | ESP32Async fork, **3.12.0** |
-| **AsyncTCP** | ESP32Async fork, **3.5.0** |
+| **ESPAsyncWebServer** | ESP32Async fork, **3.12.1** |
+| **AsyncTCP** | ESP32Async fork, **3.6.1** |
 | **ESPping** | dvarrel, **1.0.5** |
 | **Partíciós séma** | `partitions_custom.csv` (OTA nélkül, 512 KiB LittleFS) |
 
-A firmware viselkedését meghatározó feltételezések ezen a konkrét verzión lettek
-ellenőrizve a core, illetve az ESP-IDF forrásában:
+A firmware viselkedését meghatározó feltételezések a 4.0.0-s core és az IDF 6.1
+forrásában lettek ellenőrizve (a stubokat a `make stubcheck` is igazolja):
 
 - `WiFi.disconnect(true)` → az első paraméter `wifioff`, **nem** `eraseap`
   (`WiFiSTA.h`), tehát a mentett hálózat nem törlődik.
@@ -722,8 +599,9 @@ ellenőrizve a core, illetve az ESP-IDF forrásában:
   a router reset után.
 - Deep sleepben az ESP32-C3 `GPIO6–21` lábai nagyimpedanciásak, csak a
   `GPIO0–5` tartható hold funkcióval (ESP-IDF *Sleep Modes*, esp32c3).
-- `esp_deep_sleep_enable_gpio_wakeup()` ezen a néven létezik IDF 5.5-ben
-  (IDF 6.0-ban átnevezték – a kód mindkét nevet kezeli), és csak RTC-képes
+- A deep sleep gomb-ébresztés IDF 6-ban
+  `esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown()`, IDF 5.5-ben
+  `esp_deep_sleep_enable_gpio_wakeup()` – a kód mindkettőt kezeli. Csak RTC-képes
   lábat fogad el; a `D1` = GPIO3 megfelel.
 
 ## 🐕 Watchdog – védelem lefagyás ellen
@@ -813,7 +691,7 @@ A `NetworkClient::connect(host, port, timeout)` **először** névfeloldást vé
 ```cpp
 int NetworkClient::connect(const char *host, uint16_t port, int32_t timeout_ms) {
   IPAddress srv((uint32_t)0);
-  if (!Network.hostByName(host, srv)) {   // <- nincs timeout paraméter
+  if (Network.hostByName(host, srv) != 1) {   // <- nincs timeout paraméter
     return 0;
   }
   return connect(srv, port, timeout_ms);
@@ -828,20 +706,21 @@ a `tmr`-t 1, 1, 2, 3 lépésekben növeli – összesen 7 tick. DHCP-től jellem
 Ha az eszköznek van **globális IPv6 címe** (a lib-builder `CONFIG_LWIP_IPV6_AUTOCONFIG=y`),
 a `hostByName()` **kétszer** kérdez: előbb csak `AF_INET6`-ot, aztán `AF_UNSPEC`-et.
 
-Ráadásul a `lwip_getaddrinfo()` hibakódjai **pozitívak** (`netdb.h`: `EAI_NONAME`
-200 … `HOST_NOT_FOUND` 210), amit a `!Network.hostByName(...)` igaznak lát – így
-a sikertelen névfeloldás után még egy `0.0.0.0`-ra irányuló `connect()` is lefut
-a maga 5 másodpercével.
+A 3.3.x core-ban ráadásul a sikertelen névfeloldás után még egy `0.0.0.0`-ra
+irányuló `connect()` is lefutott a maga 5 másodpercével (a `lwip_getaddrinfo()`
+pozitív hibakódját a `!hostByName()` nem vette észre). A 4.0.0 ezt javította
+(`NetworkClient::connect()`: `hostByName(...) != 1` → azonnali kilépés), így ott
+a legrosszabb eset ~28 mp.
 
 | eset | egy bukott HTTP teszt |
 |---|---|
 | szerver hallgat, DNS jó | 15 mp |
 | 1 DNS szerver, nincs IPv6 | ~12 mp |
 | 2 DNS szerver, nincs IPv6 | ~19 mp |
-| 2 DNS szerver + globális IPv6 | **~33 mp** |
+| 2 DNS szerver + globális IPv6 | ~28 mp (4.0.0), **~33 mp** (3.3.x) |
 
-A 90 mp tehát ~2,7-szeres tartalékot ad, nem hatszorosat. A `WD13` teszt ezt a
-33 mp-es legrosszabb esetet méri.
+A 90 mp tehát legalább ~2,7-szeres tartalékot ad. A `WD13` teszt a 33 mp-es
+legrosszabb esetet méri.
 
 A „kemény" megállást tehát az INT_WDT 300 ms alatt elkapja, akkor is, ha a
 task watchdog még nem élesedett. Amit **csak** a task watchdog lát, az a
@@ -918,12 +797,12 @@ kétlépcsős próba, és a **sorrend a lényeg**:
    A kudarcnak **nincs következménye**: nem nő számláló, nem változik állapot,
    a várakozás megy tovább. Ehhez semmi köze a „3 próba, aztán router reset"
    eszkalációnak – az csak a `firstStartDelay` *lejárta után* kezdődik.
-2. **Internet – csak ha az 1. lépés szerint van kapcsolat.** Ilyenkor megy ki
-   egy ping a `1.1.1.1`-re (ha nem válaszol, a `8.8.8.8`-ra). Hálózat nélkül **el sem indul**: pingelni
-   értelmetlen (és pazarlás) lenne, ha a csomag ki sem tudna menni.
+2. **Internet – csak ha az 1. lépés szerint van kapcsolat.** Ugyanaz az
+   ellenőrzés, mint normál üzemben (1.1.1.1, 8.8.8.8, végül HTTP). Hálózat
+   nélkül **el sem indul**.
 
-A várakozás akkor ér véget korábban, ha **mindkét lépés** sikerül; ekkor jöhet
-a rendes tesztsorozat.
+A várakozás akkor ér véget korábban, ha **mindkét lépés** sikerül; ekkor jön a
+rendes, percenkénti ellenőrzés.
 
 **A próba ismétlődik, tehát nem kell induláskor meglennie mindennek.** Ha egy
 adott próba elbukik, a várakozás egyszerűen megy tovább a következő ütemig – és
@@ -936,14 +815,11 @@ Ugyanez a próba fut a router reset utáni `RESET_DELAY` alatt is – ott ráad�
 az újracsatlakozási kört is megspórolja, hiszen a kapcsolatot épp az imént
 mértük.
 
-> **Miért ping, amikor az internettesztek szándékosan HTTP-t használnak?**
-> Mert itt más a tét. A ciklikus tesztnél egy hamis pozitív végzetes: befagyott
-> router-DNS mellett a ping megy, és az eszköz sosem indítaná újra a routert.
-> Itt viszont a ping legrosszabb esetben annyit ér el, hogy a várakozás
-> korábban ér véget – utána **azonnal a rendes HTTP tesztsorozat következik**,
-> ami a befagyott DNS-t így is elbukja. A hamis pozitív itt tehát nem elrejt
-> egy hibát, hanem hamarabb deríti ki. Cserébe a ping olcsó: nincs névfeloldás,
-> nincs TCP, kevés rádióidő.
+> **Ismert korlát: a befagyott router-DNS.** Ha a routernek csak a DNS-e áll
+> le, a ping megy, tehát az eszköz élő internetet lát, és nem resetel. Az ESP
+> maga ilyenkor is működik (tartalék DNS: `1.1.1.1`), a hálózat többi eszköze
+> viszont nem. Ezt a döntést tudatosan vállaltuk: a HTTP-alapú döntés a
+> 2026-11-22-i terepi napon négy téves resetet okozott.
 
 > **Flash kímélés.** A próba semmit nem ír a fájlrendszerre, és a benne lévő
 > `WiFi.begin()` sem ír NVS-be, mert a `setup()` `WiFi.persistent(false)`-t
@@ -955,7 +831,8 @@ mértük.
 ```
 kapcsolatvesztés → 3 próba (30 mp szünetekkel)
                  → rossz jelszó → AP beállító portál (router reset nélkül)
-                 → egyéb sikertelen → ROUTER ÚJRAINDÍTÁS (relé ki 90 mp, be)
+                 → egyéb sikertelen → ROUTER ÚJRAINDÍTÁS (relé ki 90 mp, be);
+                   ha a kiesés már kapott resetet, a lépcső szerint később
                  → max. 10 perc várakozás (RESET_DELAY, korán is végetérhet)
                  → 3 próba (30 mp szünetekkel)
                  → sikertelen → rossz jelszó: AP mód; egyébként 1 óra alvás,
@@ -1246,15 +1123,15 @@ naplóírási hiba, amit kezelni kellene, és akkor is olvasható marad, ha épp
 fájlrendszer csatolása bukott meg. Flashre csak a **négy mentési ponton**
 íródik ki (router reset, AP mód, alvás, heap-újraindulás előtt).
 
-Ennek a következménye mérve: **működő internet mellett az eszköz 66,9 perc
-alatt nulla flash-írást végez.** Halott internetnél egy újrapróbálkozási kör
-10 írás (5 mentés × 2), tehát a 33 körös felső korlát ~330 írás – egy 512 KB-os
+Ennek a következménye mérve: **működő internet mellett az eszköz 67,9 perc
+alatt nulla flash-írást végez.** Wi-Fi nélkül egy újrapróbálkozási kör
+6 írás (3 mentés × 2), tehát a 33 körös felső korlát ~200 írás – egy 512 KB-os
 partíción, ahol a LittleFS másolás-írással szórja a blokkokat, ez nem éri el a
 NOR flash élettartamát. (A `WEAR` teszt ezt méri; a LittleFS a tényleges
 törlési ciklusszámot nem adja vissza, tehát a kopás közvetlenül nem olvasható.)
 
-Az ismétlődő eseményekből (`TEST FAIL`, `WIFI LOST`, `STUCK BUTTON`, `LOW
-HEAP`, `RESET SKIPPED`) csak az **első** kerül be, hogy egy tartós hiba ne söpörje ki a puffert
+Az ismétlődő eseményekből (`WIFI LOST`, `STUCK BUTTON`, `LOW HEAP`) csak az
+**első** kerül be, a `TEST FAIL` pedig kiesésenként egyszer, hogy egy tartós hiba ne söpörje ki a puffert
 – épp a hiba kezdetét veszítenénk el. Részletek: [MUKODES.md](MUKODES.md)
 
 ## 🧪 Tesztek
