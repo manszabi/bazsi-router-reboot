@@ -330,6 +330,9 @@ public:
     char t[20]; snprintf(t,sizeof(t),"%u.%u.%u.%u",o[0],o[1],o[2],o[3]); return t;
   }
   bool isZero() const { return !o[0] && !o[1] && !o[2] && !o[3]; }
+  // IPAddress.h: uint8_t operator[](int index) const - oktett a megadott
+  // helyen, a halozati sorrendben (a 0. a legelso).
+  uint8_t operator[](int i) const { return o[i]; }
   uint8_t o[4];
 private:
   IPType t_ = IPv4;

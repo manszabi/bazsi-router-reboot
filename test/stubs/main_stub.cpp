@@ -378,3 +378,15 @@ time_t stub_time(time_t* out) {
   if (out) *out = t;
   return t;
 }
+
+// --- esp_random() modell ----------------------------------------------------
+int g_randomCalls = 0;
+uint32_t g_randomState = 0x12345678u;
+uint32_t esp_random(void) {
+  g_randomCalls++;
+  simLog("esp_random");
+  g_randomState ^= g_randomState << 13;
+  g_randomState ^= g_randomState >> 17;
+  g_randomState ^= g_randomState << 5;
+  return g_randomState;
+}

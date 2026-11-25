@@ -71,7 +71,14 @@ a másik ellenfázisban. A reset pulzus alatt azért villog a státusz LED, mert
 Ha nincs mentett Wi-Fi adat (vagy a Wi-Fi reset gombot megnyomtad):
 
 1. Az ESP **Access Point módba** lép
-2. Az AP neve: `ESP-<chipmodel>`, jelszó: `12345678`
+2. Az AP neve: `ESP-<chipmodel>-XXXX` (a MAC cím utolsó két bájtja). A
+   **jelszó eszközönként egyedi**: az első portálindításkor generálódik
+   (12 karakter, hardveres véletlenszám), és a **soros monitoron** jelenik meg:
+   `UJ AP jelszo generalva (irdd fel az eszkozre!): ...`. Ezután minden
+   indulásnál kiíródik (`AP beallito portal jelszava: ...`), és a wifireset gomb
+   sem törli. **Első telepítéskor tartsd nyitva a soros monitort, és írd fel a
+   jelszót egy címkére az eszközön.** (A régi, mindenhol azonos `12345678` ma
+   tilos: ETSI EN 303 645 5.1-1, EU RED / EN 18031, brit PSTI.)
 3. Csatlakozz az AP-hez, majd nyisd meg a böngészőben: `192.168.4.1`
 4. Töltsd ki az űrlapot (az **SSID, IP és Gateway előkitöltve** jelenik meg a
    mentett értékekkel – a **jelszó soha nem**, azt mindig újra kell írni):
@@ -316,9 +323,29 @@ választ, és ez a hiba némán, a redundancia elvesztésével jelentkezne. A
    > `cycleIndex = 4`-re ugrik, és nem játssza végig az öt tesztet – nincs
    > hálózat, amin bármelyik végpont elérhető lenne.
 
-2. Ha **4 router újraindítás** sem hozza vissza az internetet → deep sleep 1 órára,
+2. **Diagnózis a router áramtalanítása előtt.** Az eszköz megnézi, *hol* a hiba:
+   - a **ping sem megy** (vagy nincs Wi-Fi) → valódi kiesés, jön a router reset;
+   - a **ping megy, de a DNS nem**, vagy **ping és DNS is megy, csak a HTTP bukik**
+     → az internet IP-n elérhető. Ilyenkor előbb egy **3 perces megerősítő
+     kör** jön (egy rövid zavar miatt nem kapcsoljuk le a routert), és ha a
+     második tesztsorozat is bukik, a router **legfeljebb 6 óránként egy**
+     esélyt kap (egy befagyott router-DNS ezt indokolja). Ezen felül nincs
+     reset: a firmware 10 percenként újra tesztel, és a naplóba írja, miért
+     marad el (`NET DIAG`, `RESET SKIPPED`). Korábban ilyenkor a jó routert is
+     ~4 percenként újraindította.
+
+3. Ha **4 router újraindítás** sem hozza vissza az internetet → deep sleep 1 órára,
    majd magától ébred és újrapróbálja. (A `maxfailureEvents = 5` a *reset esemény*
    számláló határa; a számláló még a reset előtt nő, ezért 4 tényleges újraindítás történik.)
+   Ha az ébredés után is tart a kiesés, **körönként már csak 1** reset jár, aztán
+   újra alvás – így a router tartós hibánál legfeljebb óránként egyszer kap
+   áramtalanítást (korábban 85 percenként 4-szer, vég nélkül). Egy sikeres teszt
+   mindent nulláz.
+
+4. **A Wi-Fi beállítások a stabil méréshez:** a modem-alvás ki van kapcsolva
+   (egyes routereknél elhúzódó TCP-válaszokat okoz), és DHCP mellett is van
+   tartalék DNS (1.1.1.1, a router DNS-e után). Ha a Wi-Fi **rossz jelszó** miatt
+   esik ki, router reset helyett AP beállító mód jön.
 
 ### 3. Fizikai gombok
 
@@ -562,6 +589,10 @@ Amit ez hoz:
 | `firstStartDelay` | **max.** 10 perc | Első indítás utáni várakozás – ugyanígy korábban is véget érhet |
 | `ONLINE_PROBE_INTERVAL_MS` | 60 mp | Ilyen sűrűn nézzük a két hosszú várakozás alatt, hogy vége lehet-e |
 | `maxfailureEvents` | 5 | A reset esemény számláló határa → **4** tényleges router újraindítás után deep sleep |
+| `maxfailureEventsAfterSleep` | 2 | Az első „tartós kiesés" alvás után körönként már csak **1** router újraindítás |
+| `CONFIRM_DELAY_MS` | 3 perc | Megerősítő kör: ha a ping megy, ennyi múlva még egy teljes tesztsorozat, csak utána reset |
+| `PING_OK_RESET_MIN_GAP_MS` | 6 óra | „Pinggel elérhető internet" mellett legfeljebb ennyi időnként egy router reset |
+| `HOLD_OFF_MS` | 10 perc | Kihagyott reset után (az internet IP-n elérhető, egy reset már nem segített) ennyi múlva tesztel újra |
 | `wifi_maxRetries` | 3 | Wi-Fi újracsatlakozási próbálkozások |
 | `wifiInterval` | 30s | Szünet a próbálkozások között |
 | `MAX_RETRY_ROUNDS` | 33 | 33 × 25,5 perc + 32 × 60 perc = **46 óra** türelem, körönként egy router újraindítással (az utolsó kör már nem alszik) |
@@ -1052,14 +1083,16 @@ beírt adatok sem vesznek el.
 - **Az előkitöltött értékek HTML-escape-elve mennek ki** (`AP3`). Az SSID
   tetszőleges 32 bájt lehet, idézőjelet és `<` jelet is: escape nélkül az
   előkitöltés maga nyitna XSS-t a saját portálunkon.
-- Az AP jelszava (`12345678`) a forráskódban van; éles használat előtt
-  érdemes lecserélni az `AP_PASSWORD` konstansban. A hosszát `static_assert`
-  őrzi (WPA2: 8–63 karakter), mert a core rövidebbnél nem indítana AP-t, és a
-  `softAP()` visszatérési értékét nem nézzük.
-- Mivel az AP jelszava (a PSK) nyilvános, a WPA2 titkosítás a portál forgalmát
-  gyakorlatilag nem védi olyan támadótól, aki a kapcsolódási kézfogást is
-  rögzíti – a beállítást ezért ne végezze senki olyan környezetben, ahol a
-  rádiótávolságon belüli lehallgatás reális kockázat.
+- **Az AP jelszava eszközönként egyedi** (`APP1`–`APP6`): 12 karakter egy
+  32 elemű, összetéveszthető jelek nélküli ábécéből (60 bit), az `esp_random()`
+  hardveres véletlenszám-generátorából – a rádió bekapcsolása UTÁN, mert csak
+  akkor valódi véletlen (`esp_random.h`). Kódolva a `/appass.txt`-ben áll, a
+  wifireset gomb nem törli. Sérült vagy hiányzó fájlnál új jelszó generálódik
+  (a soros port kiírja). Normál üzemben nincs flash-írás.
+- **Ami tudatosan NINCS**, és miért: *flash-titkosítás* (az eFuse égetése
+  visszafordíthatatlan – éles eszközön a Wi-Fi jelszó valódi védelméhez ez
+  kellene, a mostani kódolás csak elfedés); *OTA frissítés* (hitelesített
+  frissítési lánc nélkül nagyobb rés lenne, mint a hiánya).
 
 ### A mentett jelszó összekeverése
 

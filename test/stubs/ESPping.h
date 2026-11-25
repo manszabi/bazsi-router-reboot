@@ -17,6 +17,11 @@ struct PingSim {
   // etetes nelkuli szakaszt.
   uint32_t okMs   = 50;                      // sikeres ping valaszideje
   uint32_t failMs = 1000;                    // sikertelen: a teljes timeout
+  // Az ESPping 1.0.5 hibaja: ha a ping_send() el sem kuldte a csomagot
+  // (mem_malloc hiba), a transmitted 0 marad, igy _errors = 0 es
+  // _success = count - 0 -> a ping() IGAZAT ad valasz nelkul. Ilyenkor az
+  // averageTime() 0 (nem volt merheto valasz).
+  bool phantomSuccess = false;
 };
 extern PingSim pingSim;
 
@@ -33,7 +38,13 @@ public:
     const uint32_t eltelt = ok ? pingSim.okMs : pingSim.failMs;
     g_millis += eltelt;                 // blokkol, etetes nelkul
     wdtAdvanceTime(eltelt);             // ...es ez az ido a meresbe is beleszamit
+    if (pingSim.phantomSuccess) { avg_ = 0.0f; return true; }
+    avg_ = ok ? (float)pingSim.okMs : 0.0f;
     return ok;
   }
+  // ESPping.h: float averageTime() - az atlagos valaszido ms-ban.
+  float averageTime() { return avg_; }
+private:
+  float avg_ = 0.0f;
 };
 extern PingClass Ping;

@@ -12,7 +12,7 @@ Az eszköz mindig pontosan egy üzemmódban van.
 | Üzemmód | Mikor | Mit csinál |
 |---|---|---|
 | `MODE_MONITOR` | Van Wi-Fi kapcsolat, vagy épp épül | Internetet tesztel, szükség esetén routert indít újra |
-| `MODE_CONFIG` | Nincs használható Wi-Fi konfiguráció | AP beállító portál (`ESP-<chip>` / `12345678`, `192.168.4.1`) |
+| `MODE_CONFIG` | Nincs használható Wi-Fi konfiguráció | AP beállító portál (`ESP-<chip>-XXXX`, eszközönként egyedi jelszó – a soros porton, `192.168.4.1`) |
 | `MODE_FATAL` | A fájlrendszer nem használható, vagy 3 watchdog reset | Mindkét LED villog, semmi más nem fut |
 
 ---
@@ -224,23 +224,26 @@ ez pontosan **5 egymás utáni sikertelen teszt** – de a feltétel szándékos
 **végpont-lefedettséget** mondja ki, nem az időt: mind az öt üzemeltetőt
 végig kell próbálni, hogy egyetlen szolgáltató kiesése soha ne látszódjon
 internetkimaradásnak. Az első teszt indulásától a relé
-megszólalásáig **123 mp** (2,05 perc), ha a nevek feloldódnak és csak a
+megszólalásáig **128 mp** (2,1 perc), ha a nevek feloldódnak és csak a
 szerverek hallgatnak:
 
 ```
-5 × 15 mp (HTTP timeout)  +  4 × 12 mp (PROBE_DELAY)  =  123 mp
+5 × 15 mp (HTTP timeout)  +  4 × 12 mp (PROBE_DELAY)  +  ~5 mp (diagnózis)  =  128 mp
 ```
 
 Halott DNS mellett – ez a tipikus eset, amit az eszköz javít – minden teszt
 33 mp-ig tart, tehát:
 
 ```
-5 × 33 mp (DNS + connect)  +  4 × 12 mp (PROBE_DELAY)  =  213 mp (3,55 perc)
+5 × 33 mp (DNS + connect)  +  4 × 12 mp (PROBE_DELAY)  +  ~5 mp (diagnózis)  =  218 mp (3,6 perc)
 ```
 
 Ha az internet közvetlenül egy sikeres teszt után hal meg, ehhez még hozzájön
 a `SUCCESS_DELAY` hátralévő része, tehát a **legrosszabb felismerési idő
-60 + 213 = 273 mp ≈ 4,5 perc** (élő DNS mellett 60 + 123 = 183 mp ≈ 3 perc).
+60 + 218 = 278 mp ≈ 4,6 perc** (élő DNS mellett 60 + 128 = 188 mp ≈ 3,1 perc).
+Ezek a **valódi kiesés** (a ping sem megy) számai. Ha a ping megy, a reset
+előtt még egy 3 perces **megerősítő kör** és egy második tesztsorozat jön
+(mérve: `H9`, ~8,7 perc) – lásd lejjebb.
 
 | Lépés | Időtartam |
 |---|---|
@@ -250,27 +253,75 @@ a `SUCCESS_DELAY` hátralévő része, tehát a **legrosszabb felismerési idő
 | Várakozás a router bootolására | **legfeljebb 10 perc** (`RESET_DELAY`) – 60 mp-enként megnézzük, hogy visszajött-e a hálózat és az internet; ha igen, a várakozás azonnal véget ér |
 | Wi-Fi újracsatlakozás: 3 próba, köztük 30 mp | max. ~2 perc |
 
-**Egy teljes reset ciklus:** 5 teszt (123–213 mp) + 90 mp + 10 perc +
+**Egy teljes reset ciklus:** 5 teszt (128–218 mp) + 90 mp + 10 perc +
 újracsatlakozás ≈ **13,6–15,1 perc**, ha a Wi-Fi az első próbára visszajön;
 ha mind a 3 próba kell, ≈ **15,5–17,0 perc**.
 
-### Milyen sűrűn kapcsolja ki a routert?
+### Diagnózis a router áramtalanítása előtt
 
-A `maxfailureEvents = 5` felső korlátja **4 tényleges újraindítás**, utána
-1 órás alvás – ezen a korai kilépés nem változtat, csak a *tempón*. Mérve:
+A tesztek mind HTTP-k, a „visszajött-e" kérdést viszont a ping dönti el. Ha a
+HTTP olyan okból bukik, amin a router újraindítása **nem** segít (az ESP-nek
+nincs működő DNS-e, egy szűrő tiltja a teszt-címeket, a 80-as port blokkolt),
+a ping viszont megy, a régi firmware körbe-körbe indította újra a jó routert:
+5 bukott teszt → reset → a ping ~1 perc múlva „rendben" → 5 bukott teszt →
+reset. Ez volt a terepen látott „ok nélkül újraindítja" tünet.
+
+Ezért a reset **előtt** a `diagnoseNetwork()` megnézi, hol a hiba:
+
+| `NET DIAG` | Mit talált | Mi történik |
+|:---:|---|---|
+| **1** | nincs Wi-Fi, vagy a ping (1.1.1.1) sem megy | valódi kiesés → reset, a régi szabályok szerint |
+| **2** | a ping megy, a névfeloldás nem (`www.google.com`, `www.cloudflare.com`) | a router **egy** esélyt kap |
+| **3** | ping és DNS is megy, csak a HTTP bukik | a router **egy** esélyt kap |
+
+A 2-es és 3-as esetben két további fék van:
+
+1. **Megerősítő kör** (`CONFIRM_DELAY_MS`, 3 perc): az első teljesen bukott
+   sorozat után nincs reset, hanem 3 perc múlva még egyszer lefut mind az öt
+   teszt. Csak ha az is mind bukik, jön a reset. Mérve (`FT-R1a`, `FT-HATAR`
+   – 10 mp-es válasz-időtúllépésekkel, mint a terepi naplóban):
+   **legfeljebb 4 perces zavar nem okoz resetet, 5 perces már igen** – ekkor a
+   reset a megerősítő kör kezdetétől ~4,6 perccel jön (`FT-R1b`).
+2. **Legfeljebb 6 óránként egy** ilyen reset (`PING_OK_RESET_MIN_GAP_MS`).
+   Ezt egy sikeres teszt **nem** nullázza: a terepi napló napján a sorozatok
+   között mindig volt egy-egy sikeres teszt, és egy sikerre nullázódó jelző
+   minden sorozatnak új resetet adott volna (`ND3`, `FT-R2`). A jelzőt a
+   `loop()` minden körben lejárathatja, nem csak a döntésnél – különben a
+   `millis()` 49,7 napos körbefordulása után egy régi reset hamisan tiltana
+   (`FT-EXP`). Heap miatti újraindulás után az ablak folytatódik, nem
+   kezdődik elölről (`FT-CARRY`).
+3. **Valódi kiesésnél** (a ping sem megy) egyik fék sem érvényes: a reset az
+   öt bukott teszt után azonnal jön, a 6 órás ablakon belül is, és akkor is,
+   ha a ping épp a megerősítő kör alatt tűnik el (`FT-R3`, `FT-R3b`). Ha a korlát miatt marad el
+   a reset (`RESET SKIPPED`), 10 perc múlva (`HOLD_OFF_MS`) újra tesztelünk.
+
+Az ismétlődő kör a naplót nem söpri ki: csak a változás kerül bele.
+
+### A terepi napló (2026-11-22) tanulsága
+
+A `TEST FAIL` az első bukott teszt *után*, a `ROUTER RESET` a relé *előtt*
+íródik, a kettő között 4 × 12 mp és a 2–5. teszt telik el – ebből egy teszt
+ideje visszaszámolható:
+
+| Mikor | TEST FAIL → RESET | Egy teszt | Jelentése |
+|---|---|---|---|
+| hajnali esetek (04:25, 06:42, 08:02) | 68–69 mp | ~5 mp | a **kapcsolódási** időkorlát: a TCP sem épült fel – valódi kiesés |
+| 2026-11-22 nappal (4 reset 5 óra alatt) | 89–97 mp | 10–12 mp | a **válasz**-időkorlát: DNS és TCP rendben, a válasz nem jött meg |
+
+A nappali eset tehát nem internetkiesés volt, hanem az ESP felé elvesző
+csomagok – tipikusan a Wi-Fi modem-alvás tünete (azóta kikapcsolva), vagy egy
+szűrő a 80-as porton. A `CONF2` ezt a napot játssza vissza: a régi firmware
+4 resetje helyett most legfeljebb 1.
+
+### Milyen sűrűn kapcsolja ki a routert?
 
 | Helyzet | Két újraindítás között | Újraindítások |
 |---|---|---|
-| **Befagyott router-DNS** (a ping megy, a HTTP nem) | **4 perc 34 mp** | 4 (`RR1`) |
-| **Teljes internetkiesés** (a ping sem megy) | **13 perc 38 mp** | 4 (`RR2`) |
+| **A ping megy, a HTTP nem** (DNS-szűrő, tiltott port, befagyott router-DNS) | – | **1**, utána 10 percenként csak teszt (`RR1`, `ND2`: 4 óra alatt is 1) |
+| **Teljes internetkiesés** (a ping sem megy) | **13 perc 38 mp** | 4, alvás, utána óránként 1 (`RR2`, `SLP1`) |
 
-A különbség szándékos, és épp a helyes irányba mutat. A korai kilépés csak
-akkor rövidít, ha az `onlineProbe()` pingje **sikerül** – vagyis az IP-szintű
-út él, és mégsem megy a HTTP. Ez pontosan a beragadt router esete, ahol a
-gyorsabb újraindítás indokolt. Ha az internet tényleg halott, a ping is bukik,
-korai kilépés nincs, és a routernek szánt **10 perces bootvárakozás
-érintetlen** – az új mechanizmus tehát nem teszi agresszívebbé a firmware-t
-ott, ahol az ártana.
+Ha az internet tényleg halott, a ping is bukik, korai kilépés nincs, és a
+routernek szánt **10 perces bootvárakozás érintetlen**.
 
 Egyetlen sikeres teszt **nullázza a reset-számlálót** (`RR3`), tehát az eszköz
 nem „gyűjtögeti" a resetet napokon át.
@@ -309,6 +360,13 @@ Az eszköz ezért a router áramtalanítása előtt megpingeli a saját gateway-
 
 Tehát **4 tényleges router újraindítás** történik: a `maxfailureEvents = 5`
 számláló még a relé kapcsolása előtt nő, és az ötödik eseménynél alszik el.
+
+**A kör véges.** A `resetEvents` sima RAM-változó, az alvás nullázza – ezért
+korábban tartós hibánál a kör sosem állt meg (85 percenként 4 reset, naponta
+~65). Most az `rtcInternetFailRounds` (RTC_DATA_ATTR, túléli a deep sleepet)
+számolja az ilyen alvásokat: az első után **körönként csak 1 reset** jár
+(`maxfailureEventsAfterSleep = 2`), aztán újra alvás. Egy sikeres teszt és a
+bekapcsolás nullázza; a heap miatti újraindulás átviszi (`SLP1`–`SLP3`).
 
 Ez az egyetlen alvás, ami **magától felébred** – itt a Wi-Fi működik, csak az
 internet nem, tehát érdemes később újrapróbálni.
@@ -964,6 +1022,9 @@ Minden bejegyzés uptime bélyeget, egy eseménykódot és egy paramétert tarta
 | `WIFI OK` | hányadik újrapróbálkozási körben sikerült |
 | `WIFI LOST` | `WiFi.status()` a kiesés pillanatában (csak a kiesés-sorozat **első** tagja) |
 | `TEST FAIL` | a teszt sorszáma **1-alapon**, 1–5 (csak a hibasorozat **első** tagja) |
+| `HTTP ERROR` | a bukott teszt HTTP kódja, közvetlenül a `TEST FAIL` után: 200/204/403/5xx változatlan (200 = jött válasz, de nem a várt szöveg); kliens hibánál 1000 + \|kód\|: **1001** = nem sikerült kapcsolódni vagy a nevet feloldani, **1011** = nem jött válasz időben, **1100** = a kérés el sem indult |
+| `NET DIAG` | a router reset előtti diagnózis: 1 = nincs út (nincs Wi-Fi / a ping sem megy), 2 = a ping megy, a DNS nem, 3 = ping és DNS megy, csak a HTTP bukik |
+| `RESET SKIPPED` | a router reset **elmaradt**, mert egy reset már nem segített (a param a `NET DIAG` értéke) |
 | `ROUTER RESET` | hányadik reset esemény (1–4) |
 | `AP MODE` | 1 = nincs mentett SSID, 2 = hitelesítési hiba, 3 = letelt a 2 nap, 4 = a gateway sem érhető el |
 | `GW UNREACH` | 1 = a router reset előtt, 2 = a reset után is |

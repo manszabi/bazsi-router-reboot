@@ -57,12 +57,55 @@ struct WifiSim {
   int softApCount = 0;
   std::string apPass;            // amivel a softAP()-ot hivtuk
   std::string lastPass, lastSsid;  // amivel a WiFi.begin()-t hivtuk
+  // Modem-alvas: a valodi alapertek a WIFI_PS_MIN_MODEM (bekapcsolva).
+  bool sleepEnabled = true;
+  int setSleepCount = 0;
+  // A DNS modellje. dnsOk = false: a nevfeloldas bukik (a valodi
+  // NetworkManager::hostByName() ilyenkor POZITIV lwIP hibakodot ad, nem 0-t).
+  bool dnsOk = true;
+  int dnsQueries = 0;
+  uint32_t dnsOkMs = 30;       // sikeres feloldas ideje
+  uint32_t dnsFailMs = 14000;  // bukott: ket szerver x ~7 mp (lasd WDT_TIMEOUT_MS)
+  // A STA netif DNS-tablazata (ESP_NETIF_DNS_MAIN/BACKUP/FALLBACK = 0/1/2).
+  IPAddress staDns[3];
+  int dnsSetCount = 0;
   void reset() { *this = WifiSim(); }
 };
 extern WifiSim wifiSim;
 
+// NetworkInterface (core 3.x): a WiFi.STA tagon at erheto el.
+class STAClassStub {
+public:
+  // NetworkInterface.h: bool dnsIP(uint8_t dns_no, IPAddress ip)
+  bool dnsIP(uint8_t dns_no, IPAddress ip) {
+    if (dns_no >= 3) return false;
+    wifiSim.staDns[dns_no] = ip; wifiSim.dnsSetCount++;
+    simLog("STA.dnsIP(" + std::to_string(dns_no) + "," + ip.str() + ")");
+    return true;
+  }
+};
+
 class WiFiClass {
 public:
+  STAClassStub STA;
+  // WiFiGeneric.h: bool setSleep(bool enabled)
+  bool setSleep(bool enabled) {
+    wifiSim.sleepEnabled = enabled; wifiSim.setSleepCount++;
+    simLog(enabled ? "WiFi.setSleep(true)" : "WiFi.setSleep(false)");
+    return true;
+  }
+  // WiFiGeneric.h: static int hostByName(const char*, IPAddress&). Siker: 1.
+  // Hiba: a lwIP hibakodja (POZITIV, pl. 202), a cim 0.0.0.0.
+  static int hostByName(const char* host, IPAddress& out) {
+    wifiSim.dnsQueries++;
+    const bool ok = wifiSim.dnsOk;
+    const uint32_t eltelt = ok ? wifiSim.dnsOkMs : wifiSim.dnsFailMs;
+    g_millis += eltelt;
+    wdtAdvanceTime(eltelt);
+    simLog(std::string("hostByName(") + (host ? host : "") + (ok ? ")=ok" : ")=FAIL"));
+    out = ok ? IPAddress(13, 107, 4, 52) : IPAddress();
+    return ok ? 1 : 202;
+  }
   void mode(int m) {
     wifiSim.mode = m;
     simLog(m == WIFI_AP ? "WiFi.mode(AP)" : "WiFi.mode(STA)");

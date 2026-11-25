@@ -45,5 +45,32 @@ static_assert(HTTP_MAX_CHUNKS > HTTP_MAX_PAYLOAD,
 // Igaz, ha a valasz a vartnak megfelel.
 bool testInternetHTTP(const char* url, const char* expectedResponse);
 
+// AZ UTOLSO HTTP TESZT KODJA - a diagnozis legfontosabb adata.
+//
+// MIERT KELL? Korabban a hibakod CSAK a soros portra ment ki. Egy terepen
+// dolgozo eszkoznel soros kabel nincs, a naplo pedig csak annyit orzott meg,
+// hogy "a 3. teszt bukott" - azt nem, hogy MIERT. Pedig a kod epp ezt mondja
+// meg: -1 = nem sikerult kapcsolodni (ide tartozik a bukott nevfeloldas is,
+// mert a core ilyenkor 0.0.0.0-ra probal kapcsolodni), -11 = a szerver nem
+// valaszolt idoben, 200 = jott valasz, de nem a vart szoveg (captive portal,
+// szuro), 403/5xx = a szerver vagy egy kozbeiktatott szuro utasitotta el.
+//
+// Ertekek: a HTTPClient kodja (negativ = kliens oldali hiba), vagy
+// HTTP_CODE_BEGIN_FAILED, ha a kerest el sem lehetett inditani.
+constexpr int HTTP_CODE_BEGIN_FAILED = -100;
+int lastHttpCode();
+
+// A kod NAPLOZHATO alakja (az esemenynaplo parametere uint16_t). A nemnegativ
+// kod valtozatlan (200, 204, 403...), a negativ kod 1000 + |kod| (-1 -> 1001,
+// -11 -> 1011, a begin hiba -> 1100). Igy a /log lapon ember is olvashatja.
+uint16_t httpCodeLogParam(int code);
+
+// Nevfeloldas-proba: igaz, ha a host IPv4 cimre feloldhato.
+//
+// FIGYELEM, a core csapdaja: a hostByName() hibanal NEM 0-t ad, hanem a lwIP
+// POZITIV hibakodjat (NetworkManager.cpp: "return err;"), tehat a puszta
+// igazsagertek siker volna. Ezert a visszateresi ERTEK (1) es a cim is szamit.
+bool testDnsResolve(const char* host);
+
 // ICMP ping tobbsegi dontessel (PING_ATTEMPTS probabol PING_MIN_SUCCESS siker).
 bool testInternetPing(const IPAddress& target, const char* targetName);
