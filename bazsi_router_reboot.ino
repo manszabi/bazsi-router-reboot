@@ -1140,21 +1140,31 @@ uint8_t diagnoseNetwork() {
     Serial.println("Diagnozis: nincs gateway cim - router hiba.");
     return DIAG_ROUTER;
   }
-  if (testInternetPing(gw, "router")) {
-    gwAnswersPing = true;
-  } else if (gwAnswersPing || staticConfigActive) {
-    Serial.println("Diagnozis: a router nem valaszol - router hiba.");
-    return DIAG_ROUTER;
-  } else {
-    Serial.println("Diagnozis: a router pingre nem valaszol, ezt a jelet nem hasznaljuk.");
-  }
+  const bool gwOk = testInternetPing(gw, "router");
   const IPAddress inet(PROBE_PING_IP[0], PROBE_PING_IP[1], PROBE_PING_IP[2], PROBE_PING_IP[3]);
-  if (!testInternetPing(inet, "internet")) {
+  const bool inetOk = testInternetPing(inet, "internet");
+  if (inetOk) {
+    // Az internet elérhető: a router továbbít, tehát nem a router a hibás.
+    if (gwOk) {
+      gwAnswersPing = true;
+    } else if (gwAnswersPing && !staticConfigActive) {
+      gwAnswersPing = false;
+      Serial.println("Diagnozis: a router mar nem valaszol pingre - ezt a jelet nem hasznaljuk.");
+    }
+    Serial.println("Diagnozis: az internet elerheto - csak a HTTP tesztek buknak.");
+    return DIAG_HTTP;
+  }
+  if (gwOk) {
+    gwAnswersPing = true;
     Serial.println("Diagnozis: a router el, az internet nem - szolgaltatoi hiba.");
     return DIAG_WAN;
   }
-  Serial.println("Diagnozis: router es internet rendben - csak a HTTP tesztek buknak.");
-  return DIAG_HTTP;
+  if (gwAnswersPing || staticConfigActive) {
+    Serial.println("Diagnozis: sem a router, sem az internet nem valaszol - router hiba.");
+    return DIAG_ROUTER;
+  }
+  Serial.println("Diagnozis: a router pingre nem valaszol, ezt a jelet nem hasznaljuk - szolgaltatoi hibakent kezeljuk.");
+  return DIAG_WAN;
 }
 
 // A router pingelhetőségének megtanulása működő hálózatnál (óránként legfeljebb egyszer).

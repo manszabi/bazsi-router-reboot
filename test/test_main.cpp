@@ -1414,10 +1414,10 @@ static void scR7() {
   const int elo = merd(15000);
   printf("     [info] elo DNS, hallgato szerver: %d mp\n", elo);
 
-  CHECK(elo >= 126 && elo <= 130, "elo DNS mellett 128 mp (a doksi szama)");
+  CHECK(elo >= 131 && elo <= 135, "elo DNS mellett 133 mp (a doksi szama)");
   const int halott = merd(33000);
   printf("     [info] halott DNS: %d mp\n", halott);
-  CHECK(halott >= 216 && halott <= 220, "halott DNS mellett 218 mp");
+  CHECK(halott >= 221 && halott <= 225, "halott DNS mellett 223 mp");
 }
 
 static void scR8() {
@@ -7217,9 +7217,9 @@ static void scRD5() {
   g_httpFailMs = 10000;
   auto r = ftJatszik(60, [](uint32_t) { return FtPerc{ false, false, true }; });
   CHECK(r.empty(), "router-jel nelkul, el internet mellett: nincs reset");
-  CHECK(serialHas("ezt a jelet nem hasznaljuk"), "kimondja, hogy a router-jelet nem hasznalja");
   r = ftJatszik(60, [](uint32_t) { return FtPerc{ false, false, false }; });
   CHECK(r.size() == 1, "es ha az internet sem megy: szolgaltatoi agon egy reset");
+  CHECK(serialHas("ezt a jelet nem hasznaljuk"), "kimondja, hogy a router-jelet nem hasznalja");
   (void)r0;
 }
 
@@ -7263,6 +7263,33 @@ static void scRD10() {
   CHECK(diagnoseNetwork() == 1, "gateway nelkul: router hiba");
   CHECK(serialHas("nincs gateway cim"), "kimondja, miert");
   CHECK(pingSim.targets.empty(), "0.0.0.0-t nem pingel");
+}
+
+static void scRD11() {
+  // A router korabban valaszolt pingre, mostanra nem (pl. beallitas valtozott),
+  // de az internet el: a router tovabbit, tehat nincs reset, es a jelzo torlodik.
+  ftIndit();
+  CHECK(gwAnswersPing, "kiindulas: a router pingelheto volt");
+  auto r = ftJatszik(40, [](uint32_t) { return FtPerc{ false, false, true }; });
+  CHECK(r.empty(), "nincs router reset");
+  CHECK(!gwAnswersPing, "a 'pingelheto' jelzo torlodott");
+  CHECK(serialHas("a router mar nem valaszol pingre"), "kimondja");
+  // Ezutan egy valodi kieses (internet sem) mar szolgaltatoi agon megy: egy reset.
+  r = ftJatszik(60, [](uint32_t) { return FtPerc{ false, false, false }; });
+  CHECK(r.size() == 1, "valodi kiesesnel egyetlen reset, nem negy");
+}
+
+static void scRD12() {
+  // Router hiba, reset - de utana rossz jelszo miatt nem sikerul visszacsatlakozni: AP mod.
+  ftIndit();
+  pingSim.perTarget["192.168.1.1"] = false; pingSim.perTarget["1.1.1.1"] = false;
+  g_httpCode = -11;
+  futtat(30u * 60 * 1000, [] { return relayPulses() >= 1 && serialHas("Reset is done in FAILURE_STATE."); });
+  CHECK(relayPulses() == 1, "router hiba: reset");
+  wifiSim.authFail = true; wifiSim.willConnect = false; wifiSim.begun = false;
+  futtat(30u * 60 * 1000, [] { return deviceMode != (DeviceMode)0; });
+  CHECK(deviceMode == (DeviceMode)1, "a reset utan rossz jelszo: AP beallito mod");
+  CHECK(relayPulses() == 1, "es nem indit ujabb resetet");
 }
 
 static void scRD9() {
@@ -7475,7 +7502,7 @@ static const Scenario kScenarios[] = {
   { "FS10: a fileMatches() minden elbukási módja", scFS10 },
   { "R5: a rossz jelszó csak a 2. próbálkozástól látszik (STA.cpp)", scR5 },
   { "R6: egy újrapróbálkozási kör ébren töltött ideje 25,5 perc", scR6 },
-  { "R7: a felismerési idő router hibánál 128 mp élő és 218 mp halott DNS mellett", scR7 },
+  { "R7: a felismerési idő router hibánál 133 mp élő és 223 mp halott DNS mellett", scR7 },
   { "R8: 33 kör, 32 alvás - a tényleges türelem ~46 óra", scR8 },
   { "CH1: a chunked válasz keretbájtjai nem buktatják el a tesztet", scCH1 },
   { "CH2: több darabra vágott választ is összefűz", scCH2 },
@@ -7657,6 +7684,8 @@ static const Scenario kScenarios[] = {
   { "RD8: a megerosito kor alatt elhalo router: azonnali reset", scRD8 },
   { "RD9: heap-ujraindulas: a diagnozis allapota atjon", scRD9 },
   { "RD10: Wi-Fi van, gateway nincs: router hiba", scRD10 },
+  { "RD11: a router mar nem valaszol pingre, az internet el: nincs reset", scRD11 },
+  { "RD12: reset utan rossz jelszo: AP mod", scRD12 },
 
   { "APP1: az elso portal-inditas egyedi, eros AP jelszot general", scAPP1 },
   { "APP2: az AP jelszo allando, indulaskor kiirva, normal uzemben nincs iras", scAPP2 },

@@ -246,11 +246,11 @@ implementáció sem ICMP-vel validál: a NetworkManager (libcurl HTTP), a Firefo
 A ping arra kell, hogy az öt bukott teszt után kiderüljön, **hol** a hiba – a
 router újraindítása ugyanis csak az egyik esetben segít:
 
-| A router (gateway) pingje | Az internet (1.1.1.1) pingje | Diagnózis | Router reset |
+| Az internet (1.1.1.1) pingje | A router (gateway) pingje | Diagnózis | Router reset |
 |---|---|---|---|
-| nem válaszol (vagy nincs Wi-Fi / gateway) | – | router hiba | **azonnal** |
-| válaszol | nem válaszol | szolgáltatói hiba | 3 perces megerősítő kör után, kiesésenként **egyszer** |
-| válaszol | válaszol | csak a HTTP bukik (szűrő, Wi-Fi-zavar) | **nincs** |
+| válaszol | – (a router továbbít) | csak a HTTP bukik (szűrő, Wi-Fi-zavar) | **nincs** |
+| nem válaszol | válaszol | szolgáltatói hiba | 3 perces megerősítő kör után, kiesésenként **egyszer** |
+| nem válaszol | nem válaszol (vagy nincs Wi-Fi / gateway) | router hiba | **azonnal** |
 
 A ping még egy helyen él: a hosszú várakozások (`firstStartDelay`,
 `RESET_DELAY`) korai lezárásánál (`onlineProbe()`). Itt legrosszabb esetben

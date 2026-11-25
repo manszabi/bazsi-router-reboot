@@ -223,9 +223,9 @@ még nem áramtalanít, hanem megnézi, **hol** a hiba (`diagnoseNetwork()`):
 
 | `NET DIAG` | Mit talált | Mi történik |
 |:---:|---|---|
-| **1 – router hiba** | nincs Wi-Fi, nincs gateway-cím, vagy a router (gateway) nem válaszol pingre | **azonnali reset** |
-| **2 – szolgáltatói hiba** | a router válaszol, az internet (1.1.1.1) nem | **3 perces megerősítő kör**, utána kiesésenként **egy** reset |
-| **3 – csak HTTP** | a router és az internet is válaszol, csak a HTTP tesztek buknak | **nincs reset** |
+| **1 – router hiba** | nincs Wi-Fi vagy gateway-cím, vagy **sem a router, sem az internet** nem válaszol (és ismert, hogy a router pingre válaszolni szokott) | **azonnali reset** |
+| **2 – szolgáltatói hiba** | a router válaszol, az internet (1.1.1.1) nem – vagy egyik sem, de a router pingelhetősége nem ismert | **3 perces megerősítő kör**, utána kiesésenként **egy** reset |
+| **3 – csak HTTP** | az internet válaszol pingre (a router tehát továbbít), csak a HTTP tesztek buknak | **nincs reset** |
 
 Ha a reset elmarad (3-as eset, vagy 2-es, amikor a kiesés már kapott egy
 resetet), a naplóba egyszer `RESET SKIPPED` kerül, és **10 perc múlva**
@@ -236,7 +236,8 @@ echóra. Az eszköz ezért működő hálózatnál, egy sikeres teszt után megp
 routert (legfeljebb óránként egyszer), és ha válaszol, megjegyzi
 (`gwAnswersPing`, RTC – a deep sleepet túléli, bekapcsoláskor nullázódik).
 Amíg ez nem igazolt, a hallgató routert nem tekinti hibásnak: ilyenkor az
-internet pingje dönt (2-es vagy 3-as eset). Statikus IP-nél a gateway mindig
+internet pingje dönt (2-es vagy 3-as eset). Ha a router már nem válaszol, de az
+internet igen, a jelző törlődik (`RD11`). Statikus IP-nél a gateway mindig
 számít (lásd lejjebb).
 
 ### Mennyi idő alatt dönt?
@@ -244,13 +245,14 @@ számít (lásd lejjebb).
 Az első teszt indulásától a relé megszólalásáig, router hibánál:
 
 ```
-5 × 15 mp (HTTP timeout)  +  4 × 12 mp (PROBE_DELAY)  +  ~5 mp (diagnózis)  =  128 mp
-5 × 33 mp (halott DNS)    +  4 × 12 mp (PROBE_DELAY)  +  ~5 mp (diagnózis)  =  218 mp
+5 × 15 mp (HTTP timeout)  +  4 × 12 mp (PROBE_DELAY)  +  ~10 mp (diagnózis)  =  133 mp
+5 × 33 mp (halott DNS)    +  4 × 12 mp (PROBE_DELAY)  +  ~10 mp (diagnózis)  =  223 mp
 ```
 
 Ha a kiesés közvetlenül egy sikeres teszt után jön, ehhez a `SUCCESS_DELAY`
-hátralévő része adódik: legrosszabb esetben **60 + 218 = 278 mp ≈ 4,6 perc**
-(mérve: `R7`; az első bukástól a resetig `RD1`: 93 mp).
+hátralévő része adódik: legrosszabb esetben **60 + 223 = 283 mp ≈ 4,7 perc**
+(mérve: `R7`; az első bukástól a resetig `RD1`: 98 mp). A diagnózis a router
+és az internet pingjét is elvégzi (két hallgató célpont: ~2 × 5 mp).
 
 Szolgáltatói hibánál ehhez jön a 3 perces megerősítő kör és egy második
 sorozat: mérve (`RD2`) a reset a kiesés kezdete után **~8 perccel** jön.

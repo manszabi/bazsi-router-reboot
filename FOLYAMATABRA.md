@@ -187,12 +187,13 @@ A diagnózis csak akkor indul, ha **mind az öt** üzemeltető végpontja elbuko
 flowchart TD
     IN([Mind az 5 végpont elbukott]) --> W{"Van Wi-Fi és<br>gateway-cím?"}
     W -->|nem| R1["NET DIAG 1: router hiba"]
-    W -->|igen| GP{"A router (gateway)<br>válaszol pingre?"}
-    GP -->|igen| GWOK["gwAnswersPing = true"] --> IP
+    W -->|igen| P["ping: router (gateway) és internet (1.1.1.1)"]
+    P --> IP{"Az internet<br>válaszol?"}
+    IP -->|"igen (a router továbbít)"| H3["NET DIAG 3: csak a HTTP bukik<br>(ha a router már nem válaszol:<br>gwAnswersPing = false)"] --> SKIP
+    IP -->|nem| GP{"A router<br>válaszol?"}
+    GP -->|igen| WAN{"A kiesés kapott már resetet?<br>(wanResetDone)"}
     GP -->|"nem, és ismert, hogy szokott<br>(vagy statikus IP)"| R1
-    GP -->|"nem, és sosem válaszolt"| IP{"Az internet (1.1.1.1)<br>válaszol pingre?"}
-    IP -->|igen| H3["NET DIAG 3: csak a HTTP bukik"] --> SKIP
-    IP -->|nem| WAN{"A kiesés kapott már resetet?<br>(wanResetDone)"}
+    GP -->|"nem, és sosem válaszolt"| WAN
     WAN -->|igen| SKIP["EV_RESET_SKIPPED (a sorozat 1.)<br>NINCS reset, 10 perc múlva<br>újra teszt (HOLD_OFF_MS)"]
     WAN -->|nem| CF{"Megerősítő kör<br>lefutott már?"}
     CF -->|nem| CONF["3 perc múlva még egyszer<br>mind az 5 teszt (CONFIRM_DELAY_MS)"]
