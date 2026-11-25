@@ -224,23 +224,26 @@ ez pontosan **5 egymás utáni sikertelen teszt** – de a feltétel szándékos
 **végpont-lefedettséget** mondja ki, nem az időt: mind az öt üzemeltetőt
 végig kell próbálni, hogy egyetlen szolgáltató kiesése soha ne látszódjon
 internetkimaradásnak. Az első teszt indulásától a relé
-megszólalásáig **123 mp** (2,05 perc), ha a nevek feloldódnak és csak a
+megszólalásáig **128 mp** (2,1 perc), ha a nevek feloldódnak és csak a
 szerverek hallgatnak:
 
 ```
-5 × 15 mp (HTTP timeout)  +  4 × 12 mp (PROBE_DELAY)  =  123 mp
+5 × 15 mp (HTTP timeout)  +  4 × 12 mp (PROBE_DELAY)  +  ~5 mp (diagnózis)  =  128 mp
 ```
 
 Halott DNS mellett – ez a tipikus eset, amit az eszköz javít – minden teszt
 33 mp-ig tart, tehát:
 
 ```
-5 × 33 mp (DNS + connect)  +  4 × 12 mp (PROBE_DELAY)  =  213 mp (3,55 perc)
+5 × 33 mp (DNS + connect)  +  4 × 12 mp (PROBE_DELAY)  +  ~5 mp (diagnózis)  =  218 mp (3,6 perc)
 ```
 
 Ha az internet közvetlenül egy sikeres teszt után hal meg, ehhez még hozzájön
 a `SUCCESS_DELAY` hátralévő része, tehát a **legrosszabb felismerési idő
-60 + 213 = 273 mp ≈ 4,5 perc** (élő DNS mellett 60 + 123 = 183 mp ≈ 3 perc).
+60 + 218 = 278 mp ≈ 4,6 perc** (élő DNS mellett 60 + 128 = 188 mp ≈ 3,1 perc).
+Ezek a **valódi kiesés** (a ping sem megy) számai. Ha a ping megy, a reset
+előtt még egy 3 perces **megerősítő kör** és egy második tesztsorozat jön
+(mérve: `H9`, ~8,7 perc) – lásd lejjebb.
 
 | Lépés | Időtartam |
 |---|---|
@@ -250,7 +253,7 @@ a `SUCCESS_DELAY` hátralévő része, tehát a **legrosszabb felismerési idő
 | Várakozás a router bootolására | **legfeljebb 10 perc** (`RESET_DELAY`) – 60 mp-enként megnézzük, hogy visszajött-e a hálózat és az internet; ha igen, a várakozás azonnal véget ér |
 | Wi-Fi újracsatlakozás: 3 próba, köztük 30 mp | max. ~2 perc |
 
-**Egy teljes reset ciklus:** 5 teszt (123–213 mp) + 90 mp + 10 perc +
+**Egy teljes reset ciklus:** 5 teszt (128–218 mp) + 90 mp + 10 perc +
 újracsatlakozás ≈ **13,6–15,1 perc**, ha a Wi-Fi az első próbára visszajön;
 ha mind a 3 próba kell, ≈ **15,5–17,0 perc**.
 
@@ -271,12 +274,35 @@ Ezért a reset **előtt** a `diagnoseNetwork()` megnézi, hol a hiba:
 | **2** | a ping megy, a névfeloldás nem (`www.google.com`, `www.cloudflare.com`) | a router **egy** esélyt kap |
 | **3** | ping és DNS is megy, csak a HTTP bukik | a router **egy** esélyt kap |
 
-Ha a 2-es vagy 3-as esetben a router már kapott egy esélyt, és nem segített,
-a reset **elmarad** (`RESET SKIPPED`), és 10 perc múlva (`HOLD_OFF_MS`) újra
-tesztelünk – korai kilépés nélkül, mert itt épp a ping „rendben"-je nem
-bizonyít semmit. Az ismétlődő kör a naplót nem söpri ki: csak a változás kerül
-bele. Egy sikeres teszt mindent nulláz, és egy új hibasorozatban a router újra
-kap esélyt.
+A 2-es és 3-as esetben két további fék van:
+
+1. **Megerősítő kör** (`CONFIRM_DELAY_MS`, 3 perc): az első teljesen bukott
+   sorozat után nincs reset, hanem 3 perc múlva még egyszer lefut mind az öt
+   teszt. Csak ha az is mind bukik, jön a reset. Egy 1–2 perces zavar így nem
+   kapcsolja le a routert (`CONF1`).
+2. **Legfeljebb 6 óránként egy** ilyen reset (`PING_OK_RESET_MIN_GAP_MS`).
+   Ezt egy sikeres teszt **nem** nullázza: a terepi napló napján a sorozatok
+   között mindig volt egy-egy sikeres teszt, és egy sikerre nullázódó jelző
+   minden sorozatnak új resetet adott volna (`ND3`). Ha a korlát miatt marad el
+   a reset (`RESET SKIPPED`), 10 perc múlva (`HOLD_OFF_MS`) újra tesztelünk.
+
+Az ismétlődő kör a naplót nem söpri ki: csak a változás kerül bele.
+
+### A terepi napló (2026-11-22) tanulsága
+
+A `TEST FAIL` az első bukott teszt *után*, a `ROUTER RESET` a relé *előtt*
+íródik, a kettő között 4 × 12 mp és a 2–5. teszt telik el – ebből egy teszt
+ideje visszaszámolható:
+
+| Mikor | TEST FAIL → RESET | Egy teszt | Jelentése |
+|---|---|---|---|
+| hajnali esetek (04:25, 06:42, 08:02) | 68–69 mp | ~5 mp | a **kapcsolódási** időkorlát: a TCP sem épült fel – valódi kiesés |
+| 2026-11-22 nappal (4 reset 5 óra alatt) | 89–97 mp | 10–12 mp | a **válasz**-időkorlát: DNS és TCP rendben, a válasz nem jött meg |
+
+A nappali eset tehát nem internetkiesés volt, hanem az ESP felé elvesző
+csomagok – tipikusan a Wi-Fi modem-alvás tünete (azóta kikapcsolva), vagy egy
+szűrő a 80-as porton. A `CONF2` ezt a napot játssza vissza: a régi firmware
+4 resetje helyett most legfeljebb 1.
 
 ### Milyen sűrűn kapcsolja ki a routert?
 

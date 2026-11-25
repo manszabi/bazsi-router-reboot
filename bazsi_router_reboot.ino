@@ -433,11 +433,39 @@ constexpr const char* DIAG_DNS_HOSTS[] = { "www.google.com", "www.cloudflare.com
 // A kihagyott reset utáni várakozás, mielőtt újra tesztelünk.
 constexpr uint32_t HOLD_OFF_MS = 10 * 60 * 1000;
 
-// Kapott-e már a router esélyt "pinggel elérhető internet" mellett ebben a
-// hibasorozatban? Egy sikeres HTTP teszt nullázza.
+// A MEGERŐSÍTŐ KÖR. Ha az internet IP-n elérhető (a ping megy), az első
+// teljesen bukott sorozat után NEM indítjuk újra azonnal a routert: ennyi
+// várakozás után még egyszer lefut mind az öt teszt, és csak akkor jön a
+// reset, ha az is mind bukik.
+//
+// MIÉRT? A terepi napló (2026-11-22) szerint a nappali bukások nem
+// internetkiesések voltak: a TEST FAIL és a ROUTER RESET között 96-97 mp telt
+// el, ami tesztenként ~12 mp - vagyis a névfeloldás és a TCP kapcsolat
+// SIKERÜLT, csak a válasz nem érkezett meg a 10 mp-es határidőn belül. Az
+// ilyen zavar percek alatt elmúlik, közben a felhasználó böngészik - egy
+// 1,5 perces ablak túl rövid ahhoz, hogy a routert áramtalanítsuk miatta.
+constexpr uint32_t CONFIRM_DELAY_MS = 3 * 60 * 1000;
+
+// "Pinggel elérhető internet" mellett legfeljebb ennyi időnként egy reset.
+//
+// MIÉRT IDŐALAPÚ, és miért nem nullázza egy sikeres teszt? Ugyanaz a nap:
+// a négy reset-sorozat között MINDIG volt egy-egy sikeres teszt (a TEST FAIL
+// csak a sorozat első tagjánál íródik, és 10:19 után is volt ilyen). Egy
+// sikerre nullázódó jelző tehát minden új sorozatnak új resetet adott volna -
+// 5 óra alatt négyet. Egy befagyott router-DNS-t viszont egy reset
+// megold; ha 6 órán belül újra ugyanez a kép, az már nem a router.
+constexpr uint32_t PING_OK_RESET_MIN_GAP_MS = 6UL * 60 * 60 * 1000;
+
+// Volt-e "pinggel elérhető internet" melletti reset az utóbbi
+// PING_OK_RESET_MIN_GAP_MS-ben, és mikor (millis()).
 bool pingOkResetUsed = false;
-// Fut-e a kihagyott reset utáni várakozás (a kezdete: timing.stateStart).
+uint32_t pingOkResetAt = 0;
+// Fut-e a megerősítő kör (a második tesztsorozat még hátravan).
+bool confirmPending = false;
+// Fut-e a várakozás (kihagyott reset vagy megerősítő kör), és meddig. A
+// kezdete: timing.stateStart.
 bool holdOffActive = false;
+uint32_t holdOffMs = HOLD_OFF_MS;
 // A legutóbbi KIHAGYOTT reset diagnózisa (0 = nincs ilyen sorozat). A
 // spam-védelemhez kell: a 10 percenként ismétlődő kör ugyanazt a négy
 // bejegyzést írná újra és újra, és pár óra alatt kiszorítaná a 32 elemű
@@ -625,6 +653,9 @@ void applyHeapCarry() {
   rtcRetryRounds = rtcCarryRetryRounds;
   rtcInternetFailRounds = rtcCarryInternetFailRounds;
   pingOkResetUsed = (rtcCarryDiagState & 1u) != 0;
+  // A millis() az újraindulással nulláról indul: a 6 órás ablakot
+  // óvatosan, az újraindulástól számítjuk újra.
+  pingOkResetAt = millis();
   lastSkipDiag = (uint8_t)((rtcCarryDiagState >> 8) & 0xFFu);
   rtcCarryResetEvents = CARRY_NONE;
   printUptime();
@@ -828,6 +859,11 @@ static uint8_t cmdLen = 0;
 static bool cmdOverflow = false;
 
 static void runSerialCommand(const char* cmd) {
+  // A "/log" is elfogadott: a /log weboldal neve alapján kézenfekvő beírni
+  // (a terepi napló pontosan ezt mutatta: "Ismeretlen parancs: /log").
+  if (cmd[0] == '/') {
+    cmd++;
+  }
   if (strcasecmp(cmd, "LOG") == 0) {
     printEventLogs();
   } else if (strcasecmp(cmd, "HELP") == 0 || strcasecmp(cmd, "?") == 0) {
@@ -2452,9 +2488,11 @@ void runTestingState() {
     testState.cycleIndex = 0;
     testState.failedCount = 0;
     testState.resetEvents = 0;
-    // Működik az internet: minden "a reset nem segített" emlék törlődik.
+    // Működik az internet: a tartós-kiesés számláló, a megerősítő kör és a
+    // kihagyott-reset sorozat lezárul. A pingOkResetUsed viszont NEM:
+    // az időalapú (lásd PING_OK_RESET_MIN_GAP_MS).
     rtcInternetFailRounds = 0;
-    pingOkResetUsed = false;
+    confirmPending = false;
     lastSkipDiag = 0;
     currentState = SUCCESS_STATE;
   } else {
@@ -2463,7 +2501,8 @@ void runTestingState() {
     // bejegyzések különben percek alatt kiszorítanák a fontos eseményeket.
     // Egy már kihagyott-reset sorozatban (lastSkipDiag) sem: ott a 10
     // percenként ismétlődő kör ugyanazt írná újra.
-    if (testState.failedCount == 1 && lastSkipDiag == 0) {
+    // A megerősítő kör második sorozata sem: az ugyanannak a hibának a folytatása.
+    if (testState.failedCount == 1 && lastSkipDiag == 0 && !confirmPending) {
       // 1-alapú, hogy a /log oldal ugyanazt a számot mutassa, mint a
       // soros port "Teszt ciklus index" sora.
       logEvent(EV_TEST_FAIL, (uint16_t)(testState.cycleIndex + 1));
@@ -2493,7 +2532,7 @@ void runFailureState(uint32_t currentMillis) {
   // A kihagyott reset utáni várakozás. Itt nincs korai kilépés: a ping
   // "rendben"-je épp az, ami ebben a helyzetben nem bizonyít semmit.
   if (holdOffActive) {
-    if (currentMillis - timing.stateStart >= HOLD_OFF_MS) {
+    if (currentMillis - timing.stateStart >= holdOffMs) {
       printUptime();
       Serial.println("A varakozas letelt - ujra teszteljuk az internetet.");
       holdOffActive = false;
@@ -2519,32 +2558,52 @@ void runFailureState(uint32_t currentMillis) {
       // DIAGNÓZIS a reset előtt - lásd a NetDiag leírását.
       const uint8_t diag = diagnoseNetwork();
       if (diag != DIAG_NO_PATH) {
-        if (pingOkResetUsed) {
-          // A router már kapott egy esélyt ugyanilyen helyzetben, és nem
-          // segített: a hiba nem a routerben van. Nem áramtalanítunk.
+        // 1. MEGERŐSÍTŐ KÖR: az első teljesen bukott sorozat után még nem.
+        if (!confirmPending) {
+          confirmPending = true;
           printUptime();
-          Serial.println("A router reset ELMARAD: az internet IP-n elerheto, es egy");
-          Serial.println("ujrainditas mar nem segitett. A hiba nem a routerben van.");
+          Serial.print("Az internet IP-n elerheto - megerosito kor: ");
+          Serial.print(CONFIRM_DELAY_MS / 60000);
+          Serial.println(" perc mulva ujra tesztelunk, csak utana jon reset.");
+          if (diag != lastSkipDiag) {
+            logEvent(EV_NET_DIAG, diag);
+          }
+          holdOffActive = true;
+          holdOffMs = CONFIRM_DELAY_MS;
+          timing.stateStart = millis();
+          return;
+        }
+        confirmPending = false;
+        // 2. IDŐALAPÚ KORLÁT: 6 órán belül csak egy ilyen reset.
+        const bool engedett = !pingOkResetUsed
+                              || millis() - pingOkResetAt >= PING_OK_RESET_MIN_GAP_MS;
+        if (!engedett) {
+          printUptime();
+          Serial.println("A router reset ELMARAD: az internet IP-n elerheto, es");
+          Serial.print(PING_OK_RESET_MIN_GAP_MS / 3600000UL);
+          Serial.println(" oran belul mar volt ilyen ujrainditas. A hiba nem a routerben van.");
           Serial.print(HOLD_OFF_MS / 60000);
           Serial.println(" perc mulva ujra tesztelunk.");
           if (diag != lastSkipDiag) {
-            logEvent(EV_NET_DIAG, diag);
             logEvent(EV_RESET_SKIPPED, diag);
             lastSkipDiag = diag;
           }
           holdOffActive = true;
+          holdOffMs = HOLD_OFF_MS;
           timing.stateStart = millis();
           return;
         }
-        // Az első ilyen alkalom: egy befagyott router-DNS vagy -proxy
-        // indokolhatja a resetet - egy esélyt kap.
+        // Egy befagyott router-DNS vagy -proxy indokolhatja: a router
+        // megkapja az esélyét, és 6 órára ez volt az utolsó ilyen.
         pingOkResetUsed = true;
+        pingOkResetAt = millis();
+        Serial.println("A megerosito kor is bukott - router reset.");
       } else {
-        // Valódi kiesés: a régi szabályok érvényesek, és egy korábbi
-        // "kihagyott" sorozat lezárult.
+        // Valódi kiesés: a régi szabályok érvényesek, azonnal.
+        confirmPending = false;
         lastSkipDiag = 0;
+        logEvent(EV_NET_DIAG, diag);
       }
-      logEvent(EV_NET_DIAG, diag);
 
       // Statikus IP mellett: ha a saját gateway-ünket sem érjük el, a hiba
       // helyi, és a router újraindítása nem javíthatja. Egy esélyt azért

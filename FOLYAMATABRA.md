@@ -184,8 +184,9 @@ Router reset csak akkor indul, ha **mind az öt** üzemeltető végpontja elbuko
 flowchart TD
     IN([Mind az 5 végpont elbukott]) --> DG{"diagnoseNetwork()<br>Wi-Fi? ping 1.1.1.1? DNS?<br>EV_NET_DIAG(1/2/3)"}
     DG -->|"1: nincs út (valódi kiesés)"| GW1
-    DG -->|"2/3: IP-n elérhető,<br>első alkalom"| GW1
-    DG -->|"2/3: egy reset már<br>nem segített"| SKIP["EV_RESET_SKIPPED<br>NINCS reset, 10 perc múlva<br>újra teszt (HOLD_OFF_MS)"]
+    DG -->|"2/3: IP-n elérhető,<br>első bukott sorozat"| CONF["MEGERŐSÍTŐ KÖR<br>3 perc múlva még egyszer<br>mind az 5 teszt (CONFIRM_DELAY_MS)"]
+    DG -->|"2/3: a megerősítő kör is bukott,<br>6 órán belül nem volt ilyen reset"| GW1
+    DG -->|"2/3: a megerősítő kör is bukott,<br>de 6 órán belül már volt ilyen reset"| SKIP["EV_RESET_SKIPPED<br>NINCS reset, 10 perc múlva<br>újra teszt (HOLD_OFF_MS)"]
     GW1{"Statikus IP aktív ÉS<br>a saját gateway sem pingelhető?"}
     GW1 -->|igen| GWL["EV_GW_UNREACHABLE(1)<br>a router kap még egy esélyt"]
     GW1 -->|nem| CNT

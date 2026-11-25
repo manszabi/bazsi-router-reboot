@@ -96,6 +96,9 @@ extern uint32_t rtcCarryRetryRounds;
 extern uint32_t rtcInternetFailRounds;
 extern uint32_t rtcCarryInternetFailRounds;
 extern bool pingOkResetUsed;
+extern uint32_t pingOkResetAt;
+extern bool confirmPending;
+extern uint32_t holdOffMs;
 extern bool holdOffActive;
 extern uint8_t lastSkipDiag;
 extern uint32_t rtcCarryDiagState;
@@ -324,6 +327,7 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   }
   // Sima globalisok: minden ujraindulas nullazza oket.
   pingOkResetUsed = false; holdOffActive = false; lastSkipDiag = 0;
+  pingOkResetAt = 0; confirmPending = false; holdOffMs = 10u * 60 * 1000;
   // Egy valodi hidegindulas ezeket is nullazza (sima globalisok). Enelkul egy
   // korabbi mentes utan beallitott halasztott ujrainditas atszivarogna a
   // "reboot" utanra, es kesobb, a scenario kozepen inditana ujra az eszkozt.
@@ -1604,6 +1608,7 @@ static void scR7() {
     setup();
     loop();                       // a firstStart lezarasa
     g_httpCode = -1;              // innentol minden teszt bukik
+    pingSim.ok = false;           // VALODI kieses: nincs megerosito kor
     g_httpFailMs = failMs;
     g_serialLog.clear(); g_log.clear();
     int guard = 0;
@@ -1617,10 +1622,11 @@ static void scR7() {
   };
   const int elo = merd(15000);
   printf("     [info] elo DNS, hallgato szerver: %d mp\n", elo);
-  CHECK(elo >= 121 && elo <= 125, "elo DNS mellett 123 mp (a doksi szama)");
+  // +5 mp: a reset elotti diagnozis (valodi kiesesnel 3 bukott ping).
+  CHECK(elo >= 126 && elo <= 130, "elo DNS mellett 128 mp (a doksi szama)");
   const int halott = merd(33000);
   printf("     [info] halott DNS: %d mp\n", halott);
-  CHECK(halott >= 211 && halott <= 215, "halott DNS mellett 213 mp");
+  CHECK(halott >= 216 && halott <= 220, "halott DNS mellett 218 mp");
 }
 
 // Hany teljes kort var ki az eszkoz, mielott feladja? A doksi 33 kort ir es
@@ -2381,7 +2387,7 @@ static void scH9() {
   const uint32_t t0 = g_millis;
   size_t before = g_log.size();
   try {
-    while (++guard < 400000 && g_millis - t0 < 30u * 60 * 1000 && relays == 0) {
+    while (++guard < 900000 && g_millis - t0 < 30u * 60 * 1000 && relays == 0) {
       loop();
       for (size_t i = before; i < g_log.size(); i++)
         if (g_log[i] == RELAY_HIGH) relays++;
@@ -2389,7 +2395,11 @@ static void scH9() {
     }
   } catch (DeepSleepSignal&) {}
   CHECK(relays == 1, "a befagyott DNS-t router resettel kezeli");
-  CHECK(g_millis - t0 < 5u * 60 * 1000, "5 percen belül, nem órákon át tétlenül");
+  // A ping megy, tehat jon a 3 perces MEGEROSITO KOR, es csak a masodik
+  // teljesen bukott sorozat utan a reset (lasd CONFIRM_DELAY_MS).
+  printf("     [info] befagyott DNS: reset %.1f perc utan\n", (g_millis - t0) / 60000.0);
+  CHECK(g_millis - t0 < 10u * 60 * 1000, "10 percen belül, nem órákon át tétlenül");
+  CHECK(g_httpUrls.size() >= 10, "a megerosito kor is lefutott (ket teljes sorozat)");
   // A regi teszt azt kotötte ki, hogy egyaltalan NINCS ping. Az onlineProbe()
   // ota van - es epp ezert lett ez a teszt ERŐSEBB: most azt allitjuk, hogy a
   // ping tenyleg lefutott ES SIKERULT (pingSim.ok = true), a router reset
@@ -8765,7 +8775,8 @@ static void scND1() {
   wifiSim.dnsOk = true; g_httpCode = 200; g_httpBody = "Microsoft Connect Test";
   futtat(30u * 60 * 1000, [] { return serialHas("Successful Test"); });
   CHECK(serialHas("Successful Test"), "a reset utan sikeres a teszt");
-  CHECK(!pingOkResetUsed && lastSkipDiag == 0, "a sikeres teszt torolte a jelzoket");
+  CHECK(!confirmPending && lastSkipDiag == 0, "a sikeres teszt lezarta a sorozatot");
+  CHECK(pingOkResetUsed, "de a 6 oras reset-ablak tovabb el (idoalapu, nem sikerre nullazodik)");
   CHECK(relayPulses() == 1, "es tobb reset nem volt");
 }
 
@@ -8794,8 +8805,10 @@ static void scND2() {
 }
 
 static void scND3() {
-  // A kihagyott-reset sorozat UTAN visszajon a net, majd ujra elromlik: az uj
-  // hibasorozatban a router ujra kap eselyt (nem marad orokre "tiltva").
+  // A kihagyott-reset sorozat UTAN visszajon a net, majd ujra elromlik. 6 oran
+  // belul NEM kap uj resetet (a terepi naplo napja: a sorozatok kozott mindig
+  // volt egy sikeres teszt, es egy sikerre nullazodo jelzo minden sorozatnak
+  // uj resetet adott volna). A 6 ora letelte utan viszont igen.
   coldBoot(true, "TestNet", "pw", "", "");
   setup();
   monitorUzembe();
@@ -8807,10 +8820,71 @@ static void scND3() {
   g_httpCode = 200; g_httpBody = "Microsoft Connect Test";
   futtat(30u * 60 * 1000, [] { return serialHas("Successful Test"); });
   CHECK(serialHas("Successful Test"), "visszajott");
-  CHECK(!holdOffActive && !pingOkResetUsed, "a kihagyas allapota torlodott");
-  g_httpCode = -1;
-  futtat(30u * 60 * 1000, [] { return relayPulses() >= 2; });
-  CHECK(relayPulses() == 2, "az uj hibasorozat ujra kap egy resetet");
+  CHECK(!holdOffActive && !confirmPending, "a varakozas allapota torlodott");
+  g_httpCode = -1; g_serialLog.clear();
+  futtat(40u * 60 * 1000, [] { return serialHas("A router reset ELMARAD"); });
+  CHECK(relayPulses() == 1, "6 oran belul az uj hibasorozat sem kap resetet");
+  // A 6 oras ablak letelt.
+  pingOkResetAt = g_millis - 6u * 3600 * 1000 - 1;
+  futtat(40u * 60 * 1000, [] { return relayPulses() >= 2; });
+  CHECK(relayPulses() == 2, "6 ora utan a router ujra kap egy eselyt");
+}
+
+static void scCONF1() {
+  // RÖVID ZAVAR: mind az ot teszt bukik (~1,5 perc), de a 3 perces megerosito
+  // kor alatt helyreall. NINCS reset. Ez a terepi naplo 10:13-as esete.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  monitorUzembe();
+  ujNaplo(); g_log.clear();
+  g_httpCode = -11; g_httpFailMs = 10000; pingSim.ok = true;
+  futtat(15u * 60 * 1000, [] { return confirmPending; });
+  CHECK(confirmPending, "az ot bukas utan megerosito kor indult, nem reset");
+  CHECK(relayPulses() == 0, "a router aramot kapott");
+  CHECK(serialHas("megerosito kor"), "a soros porton kimondja");
+  g_httpCode = 200; g_httpBody = "Microsoft Connect Test";      // helyreallt
+  futtat(30u * 60 * 1000, [] { return false; });
+  CHECK(relayPulses() == 0, "a zavar elmult - reset nelkul");
+  CHECK(!confirmPending, "a megerosito kor lezarult");
+  CHECK(evCount(EVC_TEST_FAIL) == 1, "a naploba egy TEST FAIL kerult (a megerosito sorozat nem ismetli)");
+}
+
+static void scCONF2() {
+  // A TEREPI NAPLO NAPJANAK (2026-11-22) VISSZAJATSZASA: negy rovid
+  // hibasorozat ot ora alatt, kozottuk sikeres tesztekkel, mikozben a ping
+  // megy. A regi firmware 4-szer indította ujra a routert. Most legfeljebb 1.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  monitorUzembe();
+  g_log.clear();
+  pingSim.ok = true; g_httpFailMs = 10000;
+  // perc: mikor kezdodik a zavar, es hany percig tart
+  const struct { uint32_t kezd, hossz; } zavar[] = {
+    { 10, 8 }, { 290, 9 }, { 297, 4 }, { 305, 6 } };
+  const uint32_t t0 = g_millis;
+  int guard = 0;
+  try {
+    while (g_millis - t0 < 6u * 3600 * 1000 && ++guard < 4000000) {
+      const uint32_t perc = (g_millis - t0) / 60000;
+      bool rossz = false;
+      for (auto& z : zavar) if (perc >= z.kezd && perc < z.kezd + z.hossz) rossz = true;
+      if (rossz) { g_httpCode = -11; }
+      else { g_httpCode = 200; g_httpBody = "Microsoft Connect Test"; }
+      loop();
+    }
+  } catch (DeepSleepSignal&) {}
+  printf("     [info] 4 zavar 6 ora alatt: %d router reset (a regi firmware: 4)\n", relayPulses());
+  CHECK(relayPulses() <= 1, "legfeljebb egy router reset a negy helyett");
+}
+
+static void scSERlog() {
+  // A soros "/log" parancs is mukodik (a terepi naplo: "Ismeretlen parancs: /log").
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  g_serialIn = "/log\n";
+  loop();
+  CHECK(serialHas("=== ESEMENYNAPLO ==="), "a /log is kiirja a naplot");
+  CHECK(!serialHas("Ismeretlen parancs"), "nem ismeretlen parancs");
 }
 
 static void scND4() {
@@ -9556,8 +9630,11 @@ static const Scenario kScenarios[] = {
   // --- A router reset elotti diagnozis es a tartos kieses korlatja ---
   { "ND1: befagyott router-DNS - egy reset, ami megoldja", scND1 },
   { "ND2: a reset nem segit - 4 ora alatt egyetlen reset, naplo-spam nelkul", scND2 },
-  { "ND3: kihagyott reset utan uj hibasorozat - ujra kap eselyt", scND3 },
+  { "ND3: 6 oran belul az uj hibasorozat sem kap resetet, utana igen", scND3 },
   { "ND4: valodi kieses - NET DIAG 1, a regi szabalyok", scND4 },
+  { "CONF1: rovid zavar - a megerosito kor alatt helyreall, nincs reset", scCONF1 },
+  { "CONF2: a 2026-11-22-i terepi nap visszajatszasa - 4 reset helyett legfeljebb 1", scCONF2 },
+  { "SERL: a soros /log parancs is mukodik", scSERlog },
   { "ND5: a DNS-diagnozis ket fuggetlen nevvel", scND5 },
   { "SLP1: a tartos kieses kore veges - az elso alvas utan 1 reset/kor", scSLP1 },
   { "SLP2: bekapcsolaskor a tartos-kieses szamlalo nullazodik", scSLP2 },
