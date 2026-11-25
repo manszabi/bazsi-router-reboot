@@ -5,8 +5,6 @@
 
 #include "strutil.h"
 
-// Sikerult-e a LittleFS csatolasa. STATIC: kivulrol csak a filesystemReady()
-// / setFilesystemReady() paron at erheto el.
 static bool fsReady = false;
 
 bool filesystemReady() { return fsReady; }
@@ -21,44 +19,29 @@ const char passPath[] = "/pass.txt";
 const char ipPath[] = "/ip.txt";
 const char gatewayPath[] = "/gateway.txt";
 
-// Használható-e ez a cím statikus IPv4 konfigurációnak?
-//
-// Az IPAddress::fromString() az IPv4 után IPv6-ot is megpróbál (IPAddress.cpp),
-// ezért a "::1" vagy a "fe80::1" is érvényesnek látszik - és mindkettő befér a
-// 15 karakteres mezőbe. Az eszköz viszont végig IPv4-en dolgozik (a gateway
-// pingje, a HTTP tesztek, az 1.1.1.1-es tartalék DNS, a /24-es maszk), a
-// WiFi.config() pedig az IPAddress uint32_t konverzióját használja
-// (NetworkInterface.cpp:390), ami IPv6-ra 0-t ad
-// (IPAddress.h:83). Vagyis egy IPv6 cím csendben DHCP-t vagy - ami rosszabb -
-// egy 0.0.0.0-s gateway-t és DNS-t eredményezne. A 0.0.0.0 ugyanezt jelenti,
-// ezért az sem fogadható el.
 bool isUsableIPv4(const IPAddress& addr) {
   return (uint32_t)addr != 0;
 }
 
+// Az operator[] az oktetteket hálózati sorrendben adja.
 bool staticPairValid(const IPAddress& ip, const IPAddress& gateway) {
   if (!isUsableIPv4(ip) || !isUsableIPv4(gateway)) {
     return false;
   }
-  // Az operator[] az oktetteket halozati sorrendben adja, a (uint32_t)
-  // konverzio bajtsorrendjetol fuggetlenul.
+
   for (int i = 0; i < 3; i++) {
     if (ip[i] != gateway[i]) {
-      return false;   // nem ugyanaz a /24 - a fix maszkkal nincs ut
+      return false;
     }
   }
   if (ip[3] == 0 || ip[3] == 255 || gateway[3] == 0 || gateway[3] == 255) {
-    return false;     // halozati vagy broadcast cim
+    return false;
   }
-  return ip[3] != gateway[3];   // az eszkoz nem lehet a gateway
+  return ip[3] != gateway[3];
 }
 
-// A fajlrendszer csatolasa. formatOnFail = true: az ELSO indulaskor magatol
-// megformazza a particiot, tehat nem kell kulon adatfeltoltes.
 bool initLittleFS() {
   if (!LittleFS.begin(true)) {
-    // A begin() csak ESP_FAIL esetén próbál formázni. Ha a partíció egyáltalán
-    // nincs meg, ESP_ERR_NOT_FOUND jön, és formázás nélkül elbukik.
     Serial.println("LittleFS mount FAILED (a formázási kísérlet után is).");
     Serial.println("Valószínű ok: a használt partíciós séma nem tartalmaz");
     Serial.println("'spiffs' cimkéju partíciót. Használd a partitions_custom.csv-t,");
@@ -76,9 +59,6 @@ bool initLittleFS() {
   return true;
 }
 
-// A kiírt tartalom ellenőrzése visszaolvasással. Erre azért van szükség, mert
-// a File::close() és a File::flush() is void: a lezáráskor jelentkező hibát
-// (pl. megtelt fájlrendszer) másképp nem lehetne észrevenni.
 bool fileMatches(fs::FS& fs, const char* path, const char* value, size_t len) {
   File file = fs.open(path);
   if (!file) {
@@ -103,12 +83,10 @@ bool fileMatches(fs::FS& fs, const char* path, const char* value, size_t len) {
   return true;
 }
 
-// Egy konfigurációs érték beolvasása fix méretű bufferbe (String allokáció nélkül)
 static ConfigStatus readValue(fs::FS& fs, const char* path, char* out, size_t outSize,
                               bool trimAll) {
   out[0] = '\0';
 
-  // A hiányzó fájl nem hiba: első indításkor és wifireset után is ez a helyzet.
   if (!fs.exists(path)) {
     Serial.printf("- %s missing (no config yet)\r\n", path);
     return CONFIG_MISSING;
@@ -122,8 +100,7 @@ static ConfigStatus readValue(fs::FS& fs, const char* path, char* out, size_t ou
     }
     return CONFIG_ERROR;
   }
-  // Méret szerint olvasunk: a Stream::readBytesUntil() EOF-nál kivárná a teljes
-  // 1 másodperces stream-timeoutot, fájlonként (indulásnál ez 4 mp veszteség).
+
   const size_t fileSize = file.size();
   const size_t toRead = (fileSize < outSize - 1) ? fileSize : outSize - 1;
   const size_t n = file.read((uint8_t*)out, toRead);
@@ -135,20 +112,19 @@ static ConfigStatus readValue(fs::FS& fs, const char* path, char* out, size_t ou
   }
   out[n] = '\0';
 
-  char* nl = strchr(out, '\n');  // csak az első sor érdekel
+  char* nl = strchr(out, '\n');
   if (nl != nullptr) {
     *nl = '\0';
   }
   if (trimAll) {
     trimInPlace(out);
   } else {
-    // Csak a sorveg: Windows alatt szerkesztett fajlban a '\n' elott '\r' all.
     const size_t hossz = strlen(out);
     if (hossz > 0 && out[hossz - 1] == '\r') {
       out[hossz - 1] = '\0';
     }
   }
-  // Az üres tartalom is érvényes eredmény: a wifireset csonkolt fájlt hagy hátra.
+
   return CONFIG_OK;
 }
 
@@ -160,7 +136,6 @@ ConfigStatus readSecretValue(fs::FS& fs, const char* path, char* out, size_t out
   return readValue(fs, path, out, outSize, false);
 }
 
-// Írás ellenőrzéssel. true csak akkor, ha a tartalom vissza is olvasható.
 bool writeConfigValue(fs::FS& fs, const char* path, const char* message) {
   Serial.printf("Writing file: %s\r\n", path);
   const size_t len = strlen(message);
@@ -170,7 +145,7 @@ bool writeConfigValue(fs::FS& fs, const char* path, const char* message) {
     Serial.println("- failed to open file for writing");
     return false;
   }
-  // Üres értéknél a print() jogosan ad 0-t; ez nem hiba, csak csonkolás.
+
   const size_t written = (len > 0) ? file.print(message) : 0;
   file.flush();
   file.close();
@@ -191,9 +166,7 @@ bool writeConfigValue(fs::FS& fs, const char* path, const char* message) {
   return true;
 }
 
-// Érték törlése. Először csonkolással próbáljuk; ha az nem megy, a fájlt
-// magát töröljük - a readConfigValue() a hiányzó fájlt is "nincs érték"-ként
-// kezeli, tehát a végeredmény ugyanaz.
+// Üresre írás; ha az nem megy, törlés.
 bool clearConfigValue(fs::FS& fs, const char* path) {
   Serial.printf("Clearing file: %s\r\n", path);
   if (writeConfigValue(fs, path, "")) {

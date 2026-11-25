@@ -1,3 +1,4 @@
+// LittleFS modell memóriában, hibainjektálással.
 #pragma once
 #include <set>
 #include <Arduino.h>
@@ -5,37 +6,20 @@
 
 extern std::map<std::string,std::string> g_fs;
 extern bool g_fsMountOk;
-extern uint32_t g_fsMountMs;   // a csatolas/formazas ideje (0 = azonnali)
-extern bool   g_fsWritable;   // false = minden megnyitás írásra elbukik
-extern size_t g_fsCapacity;   // 0 = korlátlan; egyébként a tárolható összméret
-extern bool   g_fsRemoveOk;   // a remove() sikerül-e
-extern bool   g_fsReadable;   // false = a létező fájl sem nyitható olvasásra
-// A legalattomosabb hiba: az írás a helyes bájtszámot adja vissza, a tartalom
-// mégsem kerül ki. Pontosan ezért nem elég a print() visszatérési értéke - a
-// File::close() és a File::flush() ugyanis void, tehát a lezáráskori hibát
-// másképp nem lehet észrevenni. Csak a visszaolvasás fogja meg.
+extern uint32_t g_fsMountMs;
+extern bool   g_fsWritable;
+extern size_t g_fsCapacity;
+extern bool   g_fsRemoveOk;
+extern bool   g_fsReadable;
+
 extern bool   g_fsSilentWriteFail;
-// A méret szerint kért olvasás kevesebb bájtot ad vissza (sérült fájlrendszer).
+
 extern bool   g_fsShortRead;
 extern int    g_fsShortReadSkip;
 extern size_t g_fsUsed();
 
-// A FLASH-IRAS MINT MEGSZAKITASI PONT.
-//
-// Ez a horog azt modellezi, amit a valo eletben a flash-iras jelent: a LittleFS
-// muvelet ideje alatt a FreeRTOS utemezo mas taskot futtathat. A programban
-// pontosan EZ a veszelyes ablak - az async_tcp task ilyenkor MAR megszerezte a
-// mentesi zarat (savingConfig), de meg NEM engedte el, es kozben a loop task
-// eljuthat az alvas vagy az ujraindulas dontesig.
-//
-// A g_onDelay a masik iranyt modellezi (a loop() blokkolo szakaszaiban fut le
-// a HTTP kezelo); ez a ketto egyutt adja ki a ket task tenyleges osszefonasat.
 extern void (*g_onFsWrite)();
 
-// KONYVTAR EGY KONFIG UTVONALON. A LittleFS-en ez valos eset (egy korabbi
-// firmware, egy kezi feltoltes), es a configstore kezeli is - de a stub eddig
-// nem tudta eloallitani, ezert az az ag lefedetlen maradt. Egy stub, ami egy
-// valos allapotot nem tud modellezni, csendben csokkenti a tesztek erejet.
 extern std::set<std::string> g_fsDirs;
 
 class File : public Stream {
@@ -49,22 +33,16 @@ public:
   void close() {}
   size_t size() { return data_.size(); }
   size_t read(uint8_t* b, size_t n) {
-    if (pos_ >= data_.size()) return 0;      // tullepett olvasasi pozicio
+    if (pos_ >= data_.size()) return 0;
     size_t c = n < data_.size() - pos_ ? n : data_.size() - pos_;
-    // Serult FS: rovidebb olvasas. A g_fsShortReadSkip azt mondja meg, hany
-    // olvasast engedjunk MEG at epen, mielott a rovidites elkezdodik. Ez a
-    // naplo betoltesehez kell: ott a fejlec es a bejegyzesek KULON olvasasok,
-    // es kulon kell tudni elrontani a masodikat - kulonben a fejlec bukik el
-    // eloszor, es a bejegyzes-betoltes aga sosem fut le. (Ezen mult az NV8
-    // ures atmenete.)
+
     if (g_fsShortRead) {
       if (g_fsShortReadSkip > 0) g_fsShortReadSkip--;
       else if (c > 0) c--;
     }
     memcpy(b, data_.data() + pos_, c); pos_ += c; return c;
   }
-  // Szimulált írás: a kapacitás túllépésekor rövidebb visszatérési érték,
-  // mint a valóságban egy megtelt fájlrendszernél.
+
   size_t print(const char* s) {
     if (!ok_) return 0;
     if (g_onFsWrite) g_onFsWrite();
@@ -80,13 +58,11 @@ public:
         return want.size();
       }
     }
-    if (g_fsSilentWriteFail) return want.size();   // "sikeres" írás, üres fájl
+    if (g_fsSilentWriteFail) return want.size();
     g_fs[path_] = want;
     return want.size();
   }
-  // BINARIS iras. A naplo mentese (saveEventLog) nem szoveget ir, hanem a
-  // strukturak nyers bajtjait - ugyanazt a kapacitas- es nema-hiba modellt
-  // kell kovetnie, mint a print()-nek, kulonben a hibainjektalas nem hatna ra.
+
   size_t write(const uint8_t* b, size_t n) {
     if (!ok_) return 0;
     if (g_onFsWrite) g_onFsWrite();
@@ -103,7 +79,7 @@ public:
         return want.size();
       }
     }
-    if (g_fsSilentWriteFail) return want.size();   // "sikeres" iras, ures fajl
+    if (g_fsSilentWriteFail) return want.size();
     g_fs[path_] += want;
     return n;
   }
@@ -117,26 +93,18 @@ class FS {
 public:
   File open(const char* p) { return File(p, g_fsReadable && g_fs.count(p) > 0); }
   File open(const char* p, const char* mode) {
-    // OLVASASI mod: NEM csonkol. Korabban a stub minden mode-ra csonkolt,
-    // mert a sketch csak FILE_WRITE-tal hivta; a naplo visszaolvasasa viszont
-    // "r"-rel nyit, es az igy toroltte tette volna a friss mentest.
     if (mode && mode[0] == 'r') {
       return File(p, g_fsReadable && g_fs.count(p) > 0);
     }
-    if (!g_fsWritable) return File();   // nem nyitható írásra
-    g_fs[p] = "";                        // FILE_WRITE csonkol
+    if (!g_fsWritable) return File();
+    g_fs[p] = "";
     return File(p, true);
   }
   bool remove(const char* p) { if (!g_fsRemoveOk) return false; return g_fs.erase(p) > 0; }
   bool remove(const String& p) { return remove(p.c_str()); }
   size_t totalBytes() { return g_fsCapacity ? g_fsCapacity : 1048576; }
   size_t usedBytes() { return g_fsUsed(); }
-  // A VALODI begin(true) elso indulaskor FORMAZ, es kozben senki nem eteti a
-  // watchdogot. A firmware epp erre meretezte a WDT_TIMEOUT_MS-t (a 512 KiB-os
-  // particio 128 szektora), tehat a harnessnek modelleznie kell az idot is -
-  // kulonben a "watchdog a setup() elejen" dontes tesztelhetetlen maradna.
-  // A csatolas/formazas BLOKKOL es nem etet - eppen ezert kellett a watchdogot
-  // a setup() elejere hozni. Az idot bejelentjuk az etetes-meresnek is.
+
   bool begin(bool) { g_millis += g_fsMountMs; wdtAdvanceTime(g_fsMountMs); return g_fsMountOk; }
   bool exists(const char* p) { return g_fs.count(p) > 0; }
   bool exists(const String& p) { return g_fs.count(p.c_str()) > 0; }

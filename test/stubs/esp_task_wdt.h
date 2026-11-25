@@ -1,6 +1,6 @@
 #pragma once
 #include <Arduino.h>
-// Az IDF v5.5 esp_task_wdt.h-jának minimális mása
+
 typedef struct {
   uint32_t timeout_ms;
   uint32_t idle_core_mask;
@@ -16,6 +16,5 @@ typedef int esp_err_t;
 
 esp_err_t esp_task_wdt_init(const esp_task_wdt_config_t*);
 esp_err_t esp_task_wdt_reconfigure(const esp_task_wdt_config_t*);
-// ESP_OK = a task fel van iratkozva, ESP_ERR_NOT_FOUND = nincs,
-// ESP_ERR_INVALID_STATE = a TWDT nincs inicializálva. NULL = az aktuális task.
+
 esp_err_t esp_task_wdt_status(void*);

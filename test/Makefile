@@ -1,22 +1,13 @@
-# A tényleges sketch-et fordítja host gcc-vel, stub Arduino/ESP32 API-k felett.
-# A suite KÉTSZER fut: az ESP32 Arduino 3.3.11 által használt IDF 5-ös ágon, és
-# az IDF 6-os ágon is (a gomb-ébresztés API-ját ott átnevezték).
+# Host build: a valódi sketch és modulok, stub Arduino/ESP32 API-k felett; IDF 5 és IDF 6 ágon.
 CXX      ?= g++
 CXXFLAGS ?= -std=gnu++17 -Wall -Wextra -Wshadow -Wno-unused-parameter -Wno-overloaded-virtual -Istubs -I..
 SKETCH   := ../bazsi_router_reboot.ino
-# A sketch melletti modulok. Az Arduino ezeket kulon forditasi egysegkent
-# forditja es linkeli - a host build UGYANIGY, tehat itt derul ki, ha egy
-# deklaracio hianyzik vagy egy szimbolum nem talalhato. Uj modul hozzaadasakor
-# EZT a listat kell bovíteni (a -I.. a headereket teszi elerhetove).
 MODULES  := ../sync.cpp ../webportal.cpp ../configstore.cpp ../eventlog.cpp ../strutil.cpp ../secret.cpp ../netprobe.cpp
 BUILD    := build
 SRC      := $(BUILD)/sketch.cpp $(MODULES) stubs/main_stub.cpp test_main.cpp
 DEPS     := $(BUILD)/sketch.cpp $(MODULES) $(wildcard ../*.h) test_main.cpp \
             stubs/main_stub.cpp $(wildcard stubs/*.h) $(wildcard stubs/driver/*.h)
 
-# A sanitizeres futtatas kulon cel: ugyanazok a forgatokonyvek, de ASan+UBSan
-# alatt. Puffertulcsordulast, hasznalat-utani-felszabaditast es definialatlan
-# viselkedest fog meg - olyasmit, amit egy CHECK() sosem latna.
 .PHONY: test san cov covgate lint warn stack clean
 test: $(BUILD)/run-idf5 $(BUILD)/run-idf6
 	@echo "=== IDF 5 (ESP32 Arduino 3.3.11) ==="
@@ -34,6 +25,7 @@ $(BUILD)/run-idf5: $(DEPS)
 $(BUILD)/run-idf6: $(DEPS)
 	$(CXX) $(CXXFLAGS) -DESP_IDF_VERSION_MAJOR=6 -o $@ $(SRC)
 
+# ASan + UBSan alatt ugyanazok a forgatókönyvek.
 $(BUILD)/run-san: $(DEPS)
 	$(CXX) $(CXXFLAGS) -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer \
 	  -DESP_IDF_VERSION_MAJOR=5 -o $@ $(SRC)
@@ -42,9 +34,7 @@ san: $(BUILD)/run-san
 	@echo "=== ASan + UBSan (IDF 5) ==="
 	@ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 $(BUILD)/run-san
 
-# Sorlefedettseg: megmutatja, mely agakat NEM futtatja egyetlen forgatokonyv
-# sem. A gyerekprocesszek _exit()-tel lepnek ki, ami nem uritene a szamlalokat,
-# ezert a COVERAGE_BUILD kezzel hivja a __gcov_dump()-ot.
+# Sorlefedettség; a covgate küszöb alatt bukik.
 $(BUILD)/run-cov: $(DEPS)
 	$(CXX) $(CXXFLAGS) -O0 --coverage -DESP_IDF_VERSION_MAJOR=5 -DCOVERAGE_BUILD -o $@ $(SRC)
 
@@ -53,11 +43,6 @@ cov: $(BUILD)/run-cov
 	@$(BUILD)/run-cov > /dev/null 2>&1 || true
 	@python3 covreport.py $(BUILD) $(BUILD)/run-cov
 
-# Lefedettsegi kapu a CI-nak. Ugyanazt meri, mint a "cov", de EMBERI OLVASAS
-# helyett kilepesi kodot ad: a kuszob alatt megbukik. A szam nem oncel - azt
-# vedi, hogy egy uj, egyetlen forgatokonyv altal sem erintett ag ne csusszon be
-# eszrevetlenul. A kuszob a jelenlegi szint alatt all egy kicsivel, hogy egy
-# jogos, atmeneti visszaeses ne blokkoljon - de a szandekos elhanyagolas igen.
 COV_MIN ?= 98.8
 
 covgate: $(BUILD)/run-cov
@@ -65,23 +50,11 @@ covgate: $(BUILD)/run-cov
 	@$(BUILD)/run-cov > /dev/null 2>&1 || true
 	@python3 covreport.py $(BUILD) $(BUILD)/run-cov $(COV_MIN)
 
-# Statikus ellenorzes: minden blokkolo ciklus etesse a watchdogot. Ez a
-# futasideju res-invarianst egesziti ki: az csak a bejart utakat meri, ez
-# viszont a FORRAST nezi, tehat a meg teszteletlen uj agakat is elkapja.
+# Forrásszabályok: watchdog-etetés, nincs dinamikus foglalás, átfordulás-biztos idők.
 lint:
 	@python3 ../tools_lint.py
 
-# SZIGORU FIGYELMEZTETESEK, KULON CELBAN.
-#
-# MIERT NEM A FO BUILDBEN? Mert a -Wformat-truncation es a -Wstringop-* csak
-# OPTIMALIZALAS mellett fut le (a fordito a konstansokat elobb terjeszti). A fo
-# teszt-build -O0, hogy a lefedettseg es a hibakereses pontos legyen - ott ezek
-# a figyelmeztetesek CSENDBEN nem szolalnanak meg. Ezert kulon, -O2-vel.
-#
-# Amit fog: egy snprintf(), aminek a puffere kicsi a lehetseges kimenethez; egy
-# strlcpy/memcpy, ami tul irhat. Ez ma tiszta - a puffermeretek helyesek -, de
-# eddig SEMMI nem tartotta be: egy uj mezo vagy egy hosszabb hibauzenet
-# eszrevetlenul csonkolt volna.
+# Szigorú figyelmeztetések -O2-vel (csonkolás, túlcsordulás).
 WARNFLAGS := -O2 -Wall -Wextra -Wshadow -Wno-unused-parameter -Wno-overloaded-virtual \
              -Wformat-truncation=2 -Wformat-overflow=2 \
              -Wstringop-truncation -Wstringop-overflow=4 -Werror
@@ -93,15 +66,7 @@ warn: $(BUILD)/sketch.cpp
 	 done
 	@echo "Szigoru figyelmeztetesek (-O2, csonkolas/tulcsordulas): tiszta."
 
-# VEREMKOLTSEGVETES az async_tcp taskra.
-#
-# A ket HTTP kezelo NEM a loop taskon fut, hanem az AsyncTCP sajat taskjan,
-# aminek a verme veges. A kod tobb helyen EPP ERRE hivatkozva valaszt kozos
-# puffert vagy ket lepest egy helyett - de a szamot eddig semmi nem merte.
-#
-# OSZINTEN A MERES HATARAIROL: ez HOST (x86-64) veremkeret, nem a RISC-V-e. A
-# ket szam nem egyenlo. Iranymutatonak viszont pontos: ha valaki egy 2 KB-os
-# puffert tesz a POST kezelobe, az ITT is azonnal latszik.
+# A HTTP kezelők veremkerete az async_tcp taskon.
 STACK_LIMIT ?= 1200
 
 stack:
@@ -116,10 +81,7 @@ $(BUILD):
 clean:
 	@rm -rf $(BUILD) *.gcov
 
-# --- FUZZING (clang libFuzzer) ---------------------------------------------
-# Negy kulon binaris, celpontonkent egy: igy a lefedettseg-vezerelt kereses
-# nem oszlik meg a celpontok kozott. ASan+UBSan alatt futnak, mert a fuzzer
-# onmagaban csak az osszeomlast latna - a csendes puffertulcsordulast nem.
+# libFuzzer a négy bemenet-elemzőre (POST, titok, naplófájl, konfig).
 FUZZCXX  ?= clang++
 FUZZSEC  ?= 30
 FUZZFLAGS = -std=gnu++17 -g -O1 -Istubs -I.. -DESP_IDF_VERSION_MAJOR=5 \
@@ -149,13 +111,7 @@ fuzz: $(FUZZBINS)
 	if [ $$rc -ne 0 ]; then echo "FUZZING: TALALAT - lasd a crash-* fajlokat"; exit 1; fi; \
 	echo "Fuzzing: mind a negy celpont tisztan futott."
 
-# --- A STUBOK IGAZOLASA A VALODI KONYVTARAK ELLEN --------------------------
-# A teljes host-tesztkeszlet ervenyessege ezen all: ha egy stub teved, a teszt
-# ZOLD, az eszkoz meg hibazik. A gyokereket kivulrol kell megadni, mert a
-# valodi forrasok nem a repoban vannak:
-#   STUBROOTS="$HOME/.arduino15 $HOME/Arduino/libraries" make stubcheck
-# A CI a firmware-build jobban futtatja, ahol a konyvtarak mar telepitve
-# vannak - ott a pontosan kituzott verziok allnak a lemezen.
+# A stubok igazolása a valódi könyvtárak ellen: STUBROOTS="<gyökerek>" make stubcheck.
 .PHONY: stubcheck
 stubcheck:
 	@if [ -z "$(STUBROOTS)" ]; then \

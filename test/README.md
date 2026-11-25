@@ -11,7 +11,7 @@ make test
 
 > A teljes készlet ~2 perc ágonként; a CI-ban a `make test` + `make san` +
 > `make covgate` együtt ~7-8 perc (mindhárom újrafordít és újra lefuttat
-> mind a 328 forgatókönyvet).
+> minden forgatókönyvet).
 
 **A fordítási modell megegyezik az Arduinóéval**: a `bazsi_router_reboot.ino`
 és a hét modul (`secret.cpp`, `strutil.cpp`, `netprobe.cpp`, `sync.cpp`,
@@ -44,7 +44,7 @@ make cov        # a lefedettség + a nem érintett sorok listája
 make covgate    # ugyanaz, de kilépési kóddal (a CI ezt futtatja)
 ```
 
-A `covgate` küszöbe a `COV_MIN` (alapértelmezés 97,0%). A mérést a
+A `covgate` küszöbe a `COV_MIN` (alapértelmezés 98,8%). A mérést a
 `covreport.py` végzi: a gcov fájlonként számol, tehát a „legelső százalék"
 több modul mellett már nem a program lefedettsége lenne.
 
@@ -90,7 +90,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 
 ## Lefedett esetek
 
-**328 forgatókönyv, 1946 ellenőrzés. Sorlefedettség: 99,14%.**
+**361 forgatókönyv, 2140 ellenőrzés. Sorlefedettség: 99,53%.**
 
 ### A watchdog-etetés globális invariánsa
 
@@ -169,10 +169,10 @@ helyes eszköz – egy rossz globális küszöb csak zajt adna.
 | `W1`–`W9` | Wi-Fi: konfig portál, DHCP vs. statikus IP, DNS, timeout, újracsatlakozás, netif-elvesztés |
 | `S1`–`S6` | Deep sleep: beragadt gomb, kimenetek állapota alvás előtt, ébresztőforrások, RTC-láb megkötés, **a relé láb (`D10` = GPIO10) hold-ja alvás alatt és a feloldása ébredéskor** |
 | `RL1`–`RL2` | Relé: a 90 másodperces reset pulzus hossza, elalvás N reset után |
-| `R6`–`R8` | **A dokumentált idők mérése**: egy újrapróbálkozási kör ébren töltött 25,5 perce, a felismerési idő 123 mp (élő DNS) / 213 mp (halott DNS), és mind a 33 kör végigjátszása (46,0 óra türelem) |
-| `H1`–`H9` | HTTP teszt: CR/LF vágás, hibás státusz, captive portal, Content-Length nélküli válasz, beragadt szerver, **204-es ellenőrzés**, az eszkaláció végpont-sorrendje, **befagyott router-DNS** |
+| `R6`–`R8` | **A dokumentált idők mérése**: egy újrapróbálkozási kör ébren töltött 25,5 perce, a felismerési idő router hibánál 133 mp (élő DNS) / 223 mp (halott DNS), és mind a 33 kör végigjátszása (46,0 óra türelem) |
+| `H1`–`H9` | HTTP teszt: CR/LF vágás, hibás státusz, captive portal, Content-Length nélküli válasz, beragadt szerver, **204-es ellenőrzés**, az eszkaláció végpont-sorrendje; ha a router és az internet pingje él, csak a HTTP bukik: **nincs router reset** |
 | `CH1`–`CH5` | **Chunked keretezés**: egy és több darab, darab-kiterjesztés, nagybetűs hexa, szabálytalan és túlcsorduló méret, 50 kB-os darabfolyam |
-| `PG1`–`PG2` | Ping (a gateway-ellenőrzéshez és a várakozások korai lezárásához): 2-a-4-ből szabály és korai kilépés |
+| `PG1`–`PG3` | Ping: 2-a-4-ből szabály és korai kilépés; az **ESPping 1.0.5 fantom-sikere** (el sem küldött csomagra igaz) bukásnak számít |
 | `C1` | Konfig fájlok írása/olvasása, csonkítás, hiányzó fájl |
 | `B1` | Gomb debounce: zajtüske vs. tartós nyomás |
 | `LAT1`–`LAT7` | **Megszakítás-alapú gombretesz**: blokkoló szakaszba eső rövid nyomás sem vész el; a retesz nem kerüli meg a debounce-t (zajtüske); a wifireset is reteszel; fájlírás alatt a nyomás késik, de megmarad; beragadt gomb nem reteszel; **foglalt zárnál a retesz megmarad**; alvás előtt a megszakítások leválasztva |
@@ -209,14 +209,23 @@ helyes eszköz – egy rossz globális küszöb csak zajt adna.
 | `X1`–`X14` | Határesetek: gomb a relé pulzus közben, nyílt hálózat, SSID/jelszó határértékek, wifireset törlési sorrend és **sikertelen törlés → végzetes hiba**, query-paraméter, 1 napnál hosszabb uptime |
 | `PO1`–`PO3` | Áramszünet: mekkora router-indulási késést tolerál |
 | `R1`–`R4` | Újrapróbálkozási politika: rossz jelszó vs. hiányzó hálózat, 2 napos határ |
-| `L1`–`L7` | Diagnosztikai napló: rögzítés, /log oldal, körpuffer, spam-védelem, esemény-kódok, **mind a 12 címke**, üres napló |
+| `L1`–`L7` | Diagnosztikai napló: rögzítés, /log oldal, körpuffer, spam-védelem, esemény-kódok, **mind a 17 címke**, üres napló |
 | `SB1`–`SB5` | Beragadt gomb: mindkét gomb, váltakozó LED-villogás, naplózás, **az ismétlődő kör spam-védelme** |
 | `SER1`–`SER5` | Soros kimenet: terhelés (nem árasztja el a konzolt), **1-alapú teszt sorszám**, a hibaszámláló a teszt **után**, sikernél csak `Successful Test`, eltérésnél a kapott törzs is |
 | `OV1` | Számlálók korlátosak több reset cikluson át |
 | `IP1`–`IP3` | Csak IPv4 fogadható el (IPv6 és `0.0.0.0` nem) |
 | `LED4`–`LED6` | **LED-ek őszintesége**: a Wi-Fi LED legfeljebb egy `SUCCESS_DELAY`-ig késhet (mérve: 60 mp), a státusz LED normál üzemben végig világít, AP módban a mentés utáni türelmi idő alatt is villog |
 | `WDT8b` | **A LittleFS formázása** is belefér a watchdog ablakába: 7,5 mp tipikus és 51,5 mp rossz eset, mindkettő a 90 mp alatt |
-| `RR1`–`RR3` | **A router újraindításának üteme**: befagyott DNS-nél 4 reset, köztük 4 p 34 mp; teljes kiesésnél 4 reset, köztük 13 p 38 mp (a 10 perces bootvárakozás érintetlen); egyetlen sikeres teszt nullázza a reset-számlálót |
+| `RR1`–`RR3` | **A router újraindításának üteme**: ha a router és az internet él, de a HTTP bukik, 3 óra alatt **nulla** reset; router hibánál 4 reset, köztük 13 p 43 mp (a 10 perces bootvárakozás érintetlen); egyetlen sikeres teszt nullázza a reset-számlálót |
+| `RD1`–`RD10` | **A reset előtti diagnózis** (funkcióteszt, percre bontott menetrenddel): router hiba (a router és az internet is hallgat) → azonnali reset (98 mp az első bukástól); szolgáltatói hiba → 3 perces megerősítő kör, kiesésenként **egy** reset; 1–4 perces zavar → nincs reset; **a 2026-11-22-i terepi nap → 0 reset**; pingre nem válaszoló router → a router-jel kimarad; a tanulás óránként legfeljebb egyszer; külön kiesések külön resetet kapnak; a megerősítő kör alatt elhaló router → azonnali reset; heap-átvitel; Wi-Fi van, gateway nincs; ha a router már nem válaszol pingre, de az internet él → nincs reset, a jelző törlődik |
+| `SLP1`–`SLP3` | **A sikertelen reset-kör véges**: 4 reset + alvás után ébredésenként 1; a számláló és a router pingelhetősége túléli a deep sleepet, bekapcsoláskor nullázódik, a heap-újraindulás átviszi |
+| `HC1`–`HC2` | A **HTTP hibakód** naplózható alakja (1000 + \|kód\|) és az első bukáskor a naplóba kerül |
+| `FB1`, `SL1` | DHCP mellett **tartalék DNS** (1.1.1.1 a fallback helyen, a router DNS-ét nem írja felül); a Wi-Fi **modem-alvás kikapcsolva** a csatlakozás előtt |
+| `WL1`–`WL2` | Wi-Fi-vesztés **rossz jelszóval** → AP mód, router reset nélkül; jelszóhiba nélkül marad a reset |
+| `SP1`–`SP3` | **Statikus IP pár**: azonos /24, nem .0/.255, nem azonos; régi rossz konfig → DHCP; a portál nem menti |
+| `PW1` | A jelszó vezető/záró szóköze megmarad, a CR/LF nem |
+| `APP1`–`APP6` | **Eszközönként egyedi AP jelszó**: 12 karakter, a rádió bekapcsolása után generálva, kódolva mentve, újraindulás és wifireset után is ugyanaz, egyedi AP név, sérült fájl → új jelszó, nem írható fájlrendszer mellett is indul |
+| `SERL` | A soros `/log` parancs is működik |
 | `BTN4` | **A reset gomb is atomikusan szerzi meg a konfigzárat** újraindítás előtt (regresszió: korábban csak a gyors jelző-ellenőrzést végezte, a `wifiresetbutton()`-nal ellentétben) |
 | `SE11` | Az `onlineProbe()` `WiFi.begin()`-je is a **nyílt** jelszót adja, nem a `v1:` kódolt alakot |
 | `WF10` | A `RESET_DELAY` korai kilépése után a **statikus IP/DNS érintetlen** – a próba nem hív `config()`-ot, ezért ez az invariáns kötelező |
@@ -232,21 +241,18 @@ eseteket is futtatja.
 
 ### Ami szándékosan fedetlen
 
-A `make cov` tíz sort jelez, mindegyik védekező vagy bizonyíthatóan
-elérhetetlen – ezeket **nem** kell tesztelni:
+A `make cov` két sort jelez, mindkettő a **két task közötti valódi verseny**
+védőága, amit egyszálú host-futás nem tud előállítani:
 
-| Hol | Miért nem érhető el |
+| Hol | Miért nem érhető el egyszálú futásban |
 |---|---|
-| `eventName()` `default` ága | mind a **14** eseménykódnak van címkéje – az `L6` mindet ellenőrzi. Ez a lista **kétszer is elcsúszott** (előbb a `GW UNREACH`, majd a `LOW HEAP` / `HEAP RESTART` maradt ki), ezért a teszt kommentje most kimondja: új eseménykódnál ezt is bővíteni kell |
-| A maradék ~1,4% | mind **megjelölve** a forrásban: védelmi ágak (`eventName` `default`, `localtime_r` hibája, `encodeSecret` túlcsordulása – ez utóbbi szerkezetileg elérhetetlen, mert 3 + 2×63 = 129 = a puffer mérete), és olyan sorok, ahová csak a **két task közötti valódi verseny** vezet (a gombkezelők foglalt-zár visszatérései). A `break` a `wifiGiveUp()` után azért fehér, mert a harness az elalvást kivétellel modellezi |
-| `readConfigValue()` `file.close()` a könyvtár-ágon | a stub nem tud könyvtárat adni |
-| `readChunked()` záró `return n`-je | csak akkor érhető el, ha a záró CRLF olvasása közben szakad meg a stream – a `CH*` esetek a többi ágon lépnek ki |
-| `testInternetPing()` záró `return`-je | a ciklus minden ága korábban visszatér (az utolsó körben `remaining == 0`) |
-| `gatewayUnreachable()` cím-értelmezési ága | a `staticConfigActive` csak akkor igaz, ha az `initWiFi()` már sikeresen értelmezte a gateway-t, és azt csak a POST kezelő írja át – az viszont újraindít |
-| POST `!fsReady` ága | ha a LittleFS nem csatolható, a `setup()` `MODE_FATAL`-ba megy, és a portál el sem indul |
-| A jelszókódolás puffer-hiba ága (3 sor) | a POST már ellenőrzi a hosszt, a puffer pedig pontosan 63 karakterre méretezett – nem tud elbukni |
-| A wifireset zár-ütközési `return`-je | a `savingConfig` kapu és a zárszerzés közé egyszálú futásban nem ékelődhet másik író – ez pont a valódi kéttaskos versenyhelyzet védőága |
-| `FAILURE_STATE` záró `break`-je | előtte `wifiGiveUp()` deep sleepbe vagy AP módba visz |
+| `resetbutton()` reteszelt ágának `return`-je | a `restartFromButton()` csak akkor tér vissza, ha a konfigzár foglalt – a gyors kapu ugyanezt a jelzőt nézi mikroszekundumokkal korábban |
+| `wifiresetbutton()` reteszelt ágának `return`-je | ugyanaz a `doWifiReset()`-tel |
+
+Minden más sor lefut: a korábban szerkezetileg elérhetetlen záró `return`-ök és
+védelmi ágak (a `readChunked()` darabszám-korlátja, a `testInternetPing()` záró
+`return`-je, a `localtime_r` hibaága, a jelszókódolás puffer-hibája) a kódból
+kikerültek.
 
 ## Fontos
 
@@ -256,7 +262,7 @@ lwIP, LittleFS és a relé viselkedését hardveren kell igazolni.
 
 ## Veletlen allapotgep-bejaras (PROP1-PROP8)
 
-A tobbi 328 forgatokonyv **kezzel irt**: pontosan azokat az utakat jarja be,
+A tobbi forgatokonyv **kezzel irt**: pontosan azokat az utakat jarja be,
 amikre a szerzo gondolt. A PROP forgatokonyvek forditva dolgoznak - veletlen
 kornyezeti esemenysorozatot generalnak (WiFi-szakadas, gombnyomas tetszoleges
 pillanatban, HTTP-valasz, heap-eses, fajlrendszer-hiba), es nem azt allitjak,
@@ -415,7 +421,7 @@ szama valaha megvaltozik, a sketch tovabbra is lefordul, minden teszt zold marad
 (a teszt is a sajat konstansat hasznalja) - es az eszkoz **egy masik labat**
 kapcsolgatna.
 
-Amit osszevet (40 allitas):
+Amit osszevet (50 allitas):
 
 | | |
 |---|---|
@@ -428,10 +434,15 @@ Amit osszevet (40 allitas):
 | `ESPAsyncWebServer` | `params()`, `getParam(size_t)`, `name()`/`value()` **referenciat** ad, `isPost()` |
 | **viselkedes** | `STA.cpp`: az AUTH_FAIL ag `!first_connect` feltetele - a `WifiSim::authFail` modellje ezen all |
 | **viselkedes** | `main.cpp`: a loopTask minden iteracioban etet, ha fel van iratkozva - a `coreLoopStep()` ezt modellezi |
+| Wi-Fi | `setSleep(bool)`, `WiFi.STA.dnsIP(uint8_t, IPAddress)` (a `STA` tag publikus), `gatewayIP()` |
+| **viselkedes** | `NetworkInterface::gatewayIP()`: netif nelkul 0.0.0.0, kulonben a netif atjaroja - a diagnozis erre epul |
+| `IPAddress` | `operator[](int) const` (a statikus IP par ellenorzese) |
+| ESPping | `averageTime()` tipusa, es az 1.0.5 fantom-sikerenek oka (`_success = _expected_count - _errors`) |
+| `esp_random()` | szignatura, es a dokumentalt feltetel: bekapcsolt Wi-Fi mellett valodi veletlen |
 
-Az utolso ketto azert van benne, mert a **forraskod kommentjei nev szerint
-hivatkoznak rajuk**. Ha azok elmozdulnak, a rajuk epulo indoklas is ervenyet
-veszti.
+A **viselkedesi** allitasok azert vannak benne, mert a program dontesei es a
+dokumentacio indoklasa ezekre epul. Ha azok elmozdulnak, a rajuk epulo
+indoklas is ervenyet veszti.
 
 A CI a **firmware-build** jobban futtatja: az az egyetlen hely, ahol a pontosan
 kituzott verziok a lemezen vannak. Helyben:
@@ -471,26 +482,13 @@ amikor mar amugy is baj van.
 | COV3 | a naplofajl eltunik a fejlec es a bejegyzesek olvasasa **kozott** |
 | COV4 | **konyvtar** egy konfig utvonalon |
 | COV5 | a wifireset foglalt zarnal nem torol es nem indit ujra |
-| COV6 | a gateway-ellenorzes vedelmi aga ertelmezhetetlen cimnel |
+| COV6 | a statikus gateway-ellenorzes a `WiFi.gatewayIP()` alapjan (kapcsolat nelkul 0.0.0.0 -> elerhetetlen, vakon nem pingel) |
 
 A COV4 kedveert a stub megtanult **konyvtarat** modellezni (`g_fsDirs`). Egy
 stub, ami egy valos allapotot nem tud eloallitani, csendben csokkenti a
 tesztek erejet: az az ag addig lefedhetetlen volt.
 
 **Lefedettseg: 98,71% -> 99,14%**, a kapu kuszobe 97,0% -> 98,8%.
-
-### Ami szandekosan feher marad - es mostantol a FORDITO tartja igy
-
-Nyolc sor maradt, mindegyik **szerkezetileg elerhetetlen**. Eddig ezt csak
-kommentek allitottak; harom premissza mostantol `static_assert`:
-
-| Sor | Miert elerhetetlen | Mi tartja |
-|---|---|---|
-| `webportal` - "a jelszo kodolasa nem fert a pufferbe" (3 sor) | a `ConfigDraft::pass` legfeljebb `PASS_MAX_LEN`, a kodolt alak pedig pontosan ekkora pufferbe megy | **2 `static_assert`** a `webportal.cpp`-ben |
-| `netprobe` - a `readChunked()` zaro `return n` | minden nem ures darab legalabb egy bajtot ad, tehat a hasznos-teher korlat mindig elobb ut a darabszam-korlatnal | **`static_assert`** a `netprobe.h`-ban |
-| `netprobe` - a ping zaro `return` | 4 probaval es 2-es kuszobbel a ciklus mindig korabban lep ki | komment (a fordito koveteli meg a sort) |
-| `eventlog` - `localtime_r` hibaja | az `epoch` `uint32_t`, tehat legfeljebb 2106 - azt minden platform ertelmezi | komment (ha a mezo 64 bitesre no, a kezeles keszen all) |
-| `sketch` - ket "csak a ket task kozotti valodi verseny vezet ide" ag | a fenti kapu ugyanazt a jelzot nezi mikromasodpercekkel korabban | komment |
 
 ### Amit ez a kor megtanitott
 

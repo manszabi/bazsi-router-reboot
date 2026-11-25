@@ -1,23 +1,15 @@
+// Az Arduino/ESP32 API host-modellje: szimulált idő, lábak, soros port, heap.
 #pragma once
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <strings.h>  // strcasecmp - a String::equalsIgnoreCase mogott
+#include <strings.h>
 #include <cctype>
 #include <cstdlib>
 #include <string>
 #include <vector>
 #include <map>
 
-// ---------------------------------------------------------------------------
-// A core makroi. NEM azert vannak itt, mert a sketch mind hasznalja, hanem
-// hogy a harness elkapja a NEVUTKOZESEKET. Ezek makrok, tehat barmely azonos
-// nevu lokalis valtozobol vagy fuggvenybol a valodi forditason szemet lesz -
-// pl. "static const char HEX[]" -> "static const char 16[]". A hoston enelkul
-// csendben lefordul, az eszkozon meg elhasal; pontosan ezt a kulonbseget
-// zarjuk ki. Az ertekek a 3.3.11 fejleceibol szo szerint valok.
-//
-// esp32-hal-gpio.h
 #define LOW               0x0
 #define HIGH              0x1
 #define INPUT             0x01
@@ -30,18 +22,18 @@
 #define OUTPUT_OPEN_DRAIN 0x13
 #define ANALOG            0xC0
 #define DISABLED          0x00
-// Megszakitas modok (Arduino.h / esp32-hal-gpio.h)
+
 #define RISING   0x01
 #define FALLING  0x02
 #define CHANGE   0x03
 #define ONLOW    0x04
 #define ONHIGH   0x05
-// Print.h szamrendszerek
+
 #define DEC 10
 #define HEX 16
 #define OCT 8
 #define BIN 2
-// Arduino.h konstansok
+
 #define PI         3.1415926535897932384626433832795
 #define HALF_PI    1.5707963267948966192313216916398
 #define TWO_PI     6.283185307179586476925286766559
@@ -58,12 +50,7 @@
 #define NOT_A_PORT       -1
 #define NOT_AN_INTERRUPT -1
 #define NOT_ON_TIMER     0
-// ---------------------------------------------------------------------------
-// A valodi variants/XIAO_ESP32C3/pins_arduino.h szo szerint. Ott ezek NEM
-// makrok, hanem static const uint8_t-k - itt is azok, hogy a tipusuk is
-// egyezzen (a #define int-et adna). Mind a 11 lab szerepel, nem csak az
-// altalunk hasznaltak: igy egy kesobbi D2/D6... hasznalat is a valos szamot
-// kapja, es egy azonos nevu sajat valtozo itt is utkozne.
+
 static const uint8_t TX = 21;
 static const uint8_t RX = 20;
 static const uint8_t SDA = 6;
@@ -87,29 +74,22 @@ static const uint8_t D8 = 8;
 static const uint8_t D9 = 9;
 static const uint8_t D10 = 10;
 
-// --- megszakitasok ---
-// A sketch attachInterrupt()-tel reteszeli a gombnyomasokat. A harness NEM
-// szimulal valodi megszakitasokat: a regisztralt kezelot a teszt hivja meg
-// kezzel (simIsr), miutan beallitotta a lab allapotat. Igy pontosan az
-// ellenorizheto, amit a valodi ISR is latna.
 typedef void (*IsrFn)();
 extern std::map<int, IsrFn> g_isr;
 extern std::map<int, int>   g_isrMode;
 void attachInterrupt(uint8_t pin, IsrFn fn, int mode);
 void detachInterrupt(uint8_t pin);
 static inline uint8_t digitalPinToInterrupt(uint8_t p) { return p; }
-// A teszt ezzel "sut el" egy elt: eloszor allitsd be a g_pinRead[pin]-t.
+
 void simIsr(int pin);
 
-// --- gomb-mintavetelezes merese (lasd main_stub.cpp) ---
 extern bool     g_btnTrack;
 extern uint32_t g_btnLastPoll;
 extern uint32_t g_btnMaxGap;
 
-// --- szimulált idő / naplózás ---
 extern uint32_t g_millis;
 extern std::vector<std::string> g_log;
-extern std::vector<std::string> g_serialLog;  // a soros kimenet sorai
+extern std::vector<std::string> g_serialLog;
 extern std::map<int,int> g_pinState;
 extern std::map<int,int> g_pinRead;
 extern bool g_serialOn;
@@ -118,50 +98,42 @@ void simLog(const std::string& s);
 struct RestartSignal { };
 struct DeepSleepSignal { uint64_t us; };
 
-// FONTOS: az ESP32-C3 32 bites, ott az `unsigned long` = 32 bit, tehat a
-// millis() uint32_t-t ad. A hoston viszont az `unsigned long` 64 BITES - ha a
-// stub is azt adna vissza, a "millis() - start" korbefordulas-biztos idiomak
-// MASKEPP viselkednenek, mint a celhardveren, es a wrap koruli viselkedes
-// tesztelese ertelmetlen lenne. Ezert itt kifejezetten uint32_t.
 uint32_t millis();
 void pinMode(uint8_t, uint8_t);
 void digitalWrite(uint8_t, uint8_t);
 int digitalRead(uint8_t);
 void yield();
 void delay(uint32_t ms);
-// Minden delay()-nel meghivodik, ha be van allitva: ezzel modellezik a tesztek,
-// hogy egy masik task kozben befejez valamit (lasd main_stub.cpp).
+
 extern void (*g_onDelay)();
 void feedLoopWDT();
 void enableLoopWDT();
 void disableLoopWDT();
-// FreeRTOS kritikus szakasz (a valodiban makro + spinlock). A hoston nincs
-// valodi parhuzamossag; a stub a hivasok kiegyensulyozottsagat szamolja, hogy
-// egy kritikus szakaszban felejtett return kimutathato legyen.
+
 struct portMUX_TYPE { int dummy; };
 #define portMUX_INITIALIZER_UNLOCKED {0}
 void portENTER_CRITICAL(portMUX_TYPE*);
 void portEXIT_CRITICAL(portMUX_TYPE*);
-extern int g_criticalDepth;     // aktualis beagyazottsag (0 = nincs nyitva)
+extern int g_criticalDepth;
 extern int g_criticalMaxDepth;
-extern int g_criticalEnters;  // megnyitott kritikus szakaszok szama
+extern int g_criticalEnters;
 extern bool     g_wdtEnabled;
 extern uint32_t g_wdtTimeoutMs;
 extern uint32_t g_wdtIdleMask;
 extern bool     g_wdtPanic;
-extern uint32_t g_wdtMaxFeedGap;   // leghosszabb szakasz etetés nélkül
+extern uint32_t g_wdtMaxFeedGap;
 extern uint32_t g_wdtLastFeed;
-extern uint32_t g_wdtFeedBeforeEnable;  // etetes a feliratkozas ELOTT
-extern bool     g_wdtInited;            // fut-e mar a TWDT (ESP_TASK_WDT_INIT)
-extern bool     g_wdtInitFails;         // az esp_task_wdt_init() hibat adjon
-extern bool     g_wdtReconfigureFails;  // az esp_task_wdt_reconfigure() hibazzon
-extern uint32_t g_wdtFeedNotSubscribed; // ennyi log_e() sor menne ki
+extern uint32_t g_wdtFeedBeforeEnable;
+extern bool     g_wdtInited;
+extern bool     g_wdtInitFails;
+extern bool     g_wdtReconfigureFails;
+extern uint32_t g_wdtFeedNotSubscribed;
 extern bool     g_wdtTrack;
-extern bool g_wdtInProgram;        // a setup()/loop() belsejeben vagyunk?
-void feedLoopWDT_fromCore();       // a core per-iteracios etetese (nem naploz)
-void wdtAdvanceTime(uint32_t ms);  // eltelt ido bejelentese az etetes-meresnek
-// --- a rele behuzott allapotanak merese (lasd main_stub.cpp) ---
-extern uint32_t g_relayMaxHighMs;   // a leghosszabb HIGH szakasz
+extern bool g_wdtInProgram;
+void feedLoopWDT_fromCore();
+void wdtAdvanceTime(uint32_t ms);
+
+extern uint32_t g_relayMaxHighMs;
 extern uint32_t g_relayHighSince;
 extern bool     g_relayIsHigh;
 void relayTrackTime();
@@ -171,15 +143,14 @@ void esp_sleep_enable_timer_wakeup(uint64_t);
 void esp_deep_sleep_start();
 void esp_sleep_disable_wakeup_source(int);
 #define ESP_SLEEP_WAKEUP_ALL 0
-// Mindket nev letezik, hogy a sketch mindket aga leforduljon.
+
 int esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown(uint64_t, int);
 int esp_deep_sleep_enable_gpio_wakeup(uint64_t, int);
-extern int g_gpioWakeResult;   // 0 = sikeres armolas, mas = hiba
+extern int g_gpioWakeResult;
 #define ESP_GPIO_WAKEUP_GPIO_LOW 0
 #define BIT(n) (1ULL << (n))
 #define F(x) (x)
-// A valódi RTC_DATA_ATTR deep sleepet túlélő memóriába tesz. A teszt egyetlen
-// processzben fut, ezért itt sima globális - a persztenciát kézzel modellezzük.
+
 #define RTC_DATA_ATTR
 extern uint64_t g_wakeupUs;
 extern uint64_t g_gpioWakeMask;
@@ -196,8 +167,7 @@ public:
   const char* c_str() const { return s_.c_str(); }
   size_t length() const { return s_.size(); }
   bool equals(const char* o) const { return s_ == o; }
-  // core: String::equalsIgnoreCase(const String&) - a fejlecek erteke tetszoleges
-  // kis/nagybetus lehet, a HTTP fejlecek ertekei nem case-sensitive-ek.
+
   bool equalsIgnoreCase(const char* o) const {
     return strcasecmp(s_.c_str(), o ? o : "") == 0;
   }
@@ -238,9 +208,7 @@ public:
   size_t println(unsigned long v) { buf_ += std::to_string(v); flushLine(); return 0; }
   size_t println(long v) { buf_ += std::to_string(v); flushLine(); return 0; }
   size_t println() { flushLine(); return 0; }
-  // A valodi Print::printf formaz es kiir. Ha ezt no-opkent hagyjuk, a
-  // Serial.printf()-fel irt diagnosztika (konfig fajlok irasa/olvasasa/torlese,
-  // POST parameterek) LATHATATLAN a tesztek szamara - vagyis ellenorizhetetlen.
+
   size_t printf(const char* f, ...);
 protected:
   void flushLine();
@@ -248,20 +216,13 @@ protected:
   std::string buf_;
 };
 
-// A soros port ELETCIKLUSA merheto: mikor indult, mikor ment ki az elso sor
-// (a CDC beallasa utan kell), lezarult-e rendezetten (flush, majd end), es
-// irtunk-e barmit a lezaras UTAN (az elveszne).
 extern unsigned long g_serialBaud;
-extern uint32_t g_serialFirstWriteMs;   // az elso kiirt sor ideje
-extern int      g_serialWritesAfterEnd; // end() utani irasok szama
-extern bool     g_serialFlushedAll;     // az utolso iras ota volt-e flush
+extern uint32_t g_serialFirstWriteMs;
+extern int      g_serialWritesAfterEnd;
+extern bool     g_serialFlushedAll;
 
-// A SOROS BEMENET. A parancs-feldolgozashoz (serialCommands) modellezni kell
-// azt is, ami a portra ERKEZIK - eddig a stub csak a kimenetet ismerte. A
-// teszt a g_serialIn-be teszi a bejovo bajtokat.
 extern std::string g_serialIn;
-// Az available() > 0, de a read() -1-et ad. Valodi UART-on ez elofordulhat:
-// a FIFO-t egy megszakitas a ket hivas KOZOTT is kiuritheti.
+
 extern bool g_serialReadLies;
 
 class HardwareSerial : public Print {
@@ -281,12 +242,6 @@ public:
 };
 extern HardwareSerial Serial;
 
-// A core IPAddress-e IPv6-ot is kezel, es ez itt szamit:
-//  - fromString() eloszor IPv4-kent, majd IPv6-kent probal (IPAddress.cpp),
-//    tehat a "::1" is ervenyes cimnek szamit;
-//  - az uint32_t konverzio viszont IPv6-ra 0-t ad (IPAddress.h:83), es a
-//    WiFi.config() pont ezt hasznalja (NetworkInterface.cpp:390).
-// A stub ezt a ketto egyuttest modellezi.
 enum IPType { IPv4, IPv6 };
 
 class IPAddress : public Print {
@@ -304,8 +259,7 @@ public:
     }
     return fromString6(s);
   }
-  // Csak annyira reszletes, amennyire a viselkedes szamit: hexa csoportok
-  // kettosponttal, legfeljebb egy "::" tomoritessel.
+
   bool fromString6(const char* s) {
     bool sawColon = false, sawDouble = false;
     for (const char* p = s; *p; p++) {
@@ -321,7 +275,7 @@ public:
     t_ = IPv6; return true;
   }
   IPType type() const { return t_; }
-  // IPAddress.h:83 - IPv6-ra szandekosan 0
+
   operator uint32_t() const {
     return t_ == IPv4 ? ((uint32_t)o[0]<<24 | (uint32_t)o[1]<<16 | (uint32_t)o[2]<<8 | o[3]) : 0u;
   }
@@ -330,8 +284,7 @@ public:
     char t[20]; snprintf(t,sizeof(t),"%u.%u.%u.%u",o[0],o[1],o[2],o[3]); return t;
   }
   bool isZero() const { return !o[0] && !o[1] && !o[2] && !o[3]; }
-  // IPAddress.h: uint8_t operator[](int index) const - oktett a megadott
-  // helyen, a halozati sorrendben (a 0. a legelso).
+
   uint8_t operator[](int i) const { return o[i]; }
   uint8_t o[4];
 private:
@@ -341,15 +294,8 @@ private:
 inline size_t Print::print(const IPAddress& a) { buf_ += a.str(); return 0; }
 inline size_t Print::println(const IPAddress& a) { buf_ += a.str(); flushLine(); return 0; }
 
-// A valodi getEfuseMac() az esp_efuse_mac_get_default()-tel 6 bajtot ir egy
-// uint64_t-be (Esp.cpp), a felso 2 bajt nulla marad. A tesztekben allithato,
-// hogy a "masik lapkan nem mukodik" viselkedes ellenorizheto legyen.
 extern uint64_t g_efuseMac;
 
-// A heap merhetove tetele. A valodi ertekeket a forgatokonyv allitja; a
-// g_heapDrainPerCall-lal modellezheto egy LASSU SZIVARGAS is (minden lekerdezes
-// ennyivel kevesebbet ad vissza), ami nelkul a kuszob atlepese nem lenne
-// jatszhato.
 extern uint32_t g_freeHeap;
 extern uint32_t g_minFreeHeap;
 extern uint32_t g_maxAllocHeap;
@@ -367,19 +313,10 @@ public:
 };
 extern EspClass ESP;
 
-// --- Ido (NTP) modell ------------------------------------------------------
-// A valodi eszkozon a configTzTime() elinditja az SNTP klienst, es a
-// rendszerora a hatterben all be. A harness ezt egyetlen valtozoval modellezi:
-// g_epochNow = 0 -> nincs szinkron (a time() 1970-et ad), egyebkent ennyi.
 extern uint32_t g_epochNow;
 extern int      g_ntpStarts;
 void configTzTime(const char* tz, const char* server);
 
-// A time() ATIRANYITASA. A hoston a valodi time() a mai datumot adna, es
-// azzal a "nincs meg oraszinkron" ag SOSEM futna le - epp az, amit meg kell
-// merni. A <time.h>-t ITT hozzuk be, es CSAK utana definialjuk a makrot: a
-// sketch kesobbi #include <time.h> sora igy az include guard miatt ures, tehat
-// a makro sosem ir at egy fejlecbeli deklaraciot.
 #include <time.h>
 time_t stub_time(time_t* out);
 #define time(p) stub_time(p)
