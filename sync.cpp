@@ -2,6 +2,7 @@
 
 portMUX_TYPE evLogMux = portMUX_INITIALIZER_UNLOCKED;
 
+// Csak az evLogMux alatt érhetők el (a jelző és a határidő párban változik).
 static volatile bool     savingConfig   = false;
 static volatile bool     restartPending = false;
 static volatile uint32_t restartAt      = 0;

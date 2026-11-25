@@ -1,3 +1,4 @@
+// A stubok közös állapota és a nem inline modellek.
 #include <Arduino.h>
 #include <set>
 #include <cstdarg>

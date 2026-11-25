@@ -1,3 +1,4 @@
+// ESPping modell: célpontonként állítható elérhetőség, blokkolási idő.
 #pragma once
 #include <Arduino.h>
 #include <map>

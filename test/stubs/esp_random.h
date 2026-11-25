@@ -1,3 +1,4 @@
+// esp_random() determinisztikus (xorshift) modellje.
 #pragma once
 #include <stdint.h>
 

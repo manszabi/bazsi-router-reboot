@@ -1,3 +1,4 @@
+// LittleFS modell memóriában, hibainjektálással.
 #pragma once
 #include <set>
 #include <Arduino.h>

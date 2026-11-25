@@ -1,6 +1,6 @@
+// Router-újraindító: internetteszt, és ha kell, a router áramtalanítása reléval (XIAO ESP32-C3).
 #include <Arduino.h>
 #include <WiFi.h>
-
 #include <string.h>
 #include "LittleFS.h"
 #include "esp_sleep.h"
@@ -8,12 +8,9 @@
 #include "esp_task_wdt.h"
 #include "esp_system.h"
 #include "esp_attr.h"
-
 #include "esp_timer.h"
 #include <time.h>
-
 #include "driver/gpio.h"
-
 #include "limits_config.h"
 #include "sync.h"
 #include "eventlog.h"
@@ -24,73 +21,76 @@
 #include "app_hooks.h"
 #include "netprobe.h"
 
+// Lábak (XIAO ESP32-C3). A D0 (GPIO2) strapping láb: bekapcsoláskor ne legyen lenyomva.
 constexpr uint8_t ledPin = D4;
-
 constexpr uint8_t wifiledPin = D3;
 
+// HIGH = a router áram nélkül; külső 22k lehúzó tartja LOW-n a boot alatt.
 constexpr uint8_t relayPin = D10;
-
 constexpr uint8_t wifiresetPin = D0;
-
 constexpr uint8_t resetPin = D1;
 
+// Időzítések.
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 20 * 1000;
 constexpr uint32_t SUCCESS_DELAY = 1 * 60 * 1000;
 
+// Szünet két bukott teszt között.
 constexpr uint32_t PROBE_DELAY = 12 * 1000;
+// Várakozás a router bootolására (korábban véget ér, ha a hálózat visszajött).
 constexpr uint32_t RESET_DELAY = 10 * 60 * 1000;
 constexpr uint32_t RESET_PULSE = 90 * 1000;
 constexpr uint32_t firstStartDelay = 10 * 60 * 1000;
 
+// A reset-számláló a reset ELŐTT nő: 5 -> 4 tényleges reset, aztán 1 óra alvás.
 constexpr uint8_t maxfailureEvents = 5;
 
+// Egy sikertelen reset-kör (alvás) után ébredésenként már csak 1 reset.
 constexpr uint8_t maxfailureEventsAfterSleep = 2;
 
+// Wi-Fi újracsatlakozás: 3 próba, köztük 30 mp.
 constexpr uint8_t wifi_maxRetries = 3;
 constexpr uint32_t wifiInterval = 30 * 1000;
 
+// Ennyi alvás-kör után (~46 óra) Wi-Fi nélkül AP beállító mód.
 constexpr uint32_t MAX_RETRY_ROUNDS = 33;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 50;
-
 constexpr uint32_t BUTTON_POLL_MS = 10;
 
+// LED-jelzések: végzetes hiba 5 Hz, beragadt gomb felváltva, AP 1 Hz, reset 2 Hz.
 constexpr uint32_t FATAL_BLINK_MS = 100;
-
 constexpr uint32_t FATAL_SLEEP_AFTER_MS = 5 * 60 * 1000;
-
 constexpr uint32_t STUCK_BLINK_MS = 3000;
-
 constexpr uint32_t AP_BLINK_MS = 500;
-
 constexpr uint32_t RESET_BLINK_MS = 250;
 
+// A leghosszabb etetés nélküli blokkolás (halott DNS melletti http.GET) ~33 mp.
 constexpr uint32_t WDT_TIMEOUT_MS = 90 * 1000;
 
+// Ennyi rendellenes újraindulás után végzetes hiba; 1 óra hibátlan futás nulláz.
 constexpr uint32_t MAX_WDT_RESETS = 3;
-
 constexpr uint32_t WDT_COUNTER_CLEAR_MS = 60 * 60 * 1000;
 
+// Alvások hossza.
 constexpr uint64_t SLEEP_DURATION_US = 3600ULL * 1000000ULL;
 constexpr uint64_t STUCK_BUTTON_SLEEP_US = 60ULL * 1000000ULL;
 
+// Ébresztő gombnyomásnál a gomb még lent van: ennyit várunk az elengedésre.
 constexpr uint32_t STUCK_BUTTON_CONFIRM_MS = 3000;
 
+// Heap-felügyelet: figyelmeztetés, majd tartósan kritikus szintnél önkéntes újraindulás.
 constexpr uint32_t HEAP_CHECK_INTERVAL_MS = 10 * 1000;
 constexpr uint32_t HEAP_LOG_INTERVAL_MS   = 30 * 60 * 1000;
-
 constexpr uint32_t HEAP_WARN_BYTES  = 25000;
 constexpr uint32_t HEAP_CRIT_BYTES  = 12000;
-
 constexpr uint32_t HEAP_CRIT_BLOCK_BYTES = 6000;
-
 constexpr uint8_t HEAP_CRIT_SAMPLES = 3;
-
 constexpr uint32_t MAX_HEAP_RESTARTS = 3;
 
+// A hosszú várakozások alatt ilyen sűrűn nézzük, visszajött-e a hálózat (Wi-Fi + ping).
 constexpr uint32_t ONLINE_PROBE_INTERVAL_MS = 60 * 1000;
-
 constexpr uint8_t PROBE_PING_IP[4] = { 1, 1, 1, 1 };
 
+// Öt független üzemeltető végpontja; mind az ötnek buknia kell a diagnózis előtt.
 constexpr uint8_t MAX_CYCLE_INDEX = 4;
 
 struct TestEndpoint {
@@ -107,6 +107,7 @@ constexpr TestEndpoint TEST_ENDPOINTS[] = {
 static_assert(sizeof(TEST_ENDPOINTS) / sizeof(TEST_ENDPOINTS[0]) == MAX_CYCLE_INDEX + 1,
               "minden ciklus-indexhez PONTOSAN egy vegpont tartozzon");
 
+// Az index ezen túllépve: mind az öt teszt bukott.
 constexpr uint8_t RESET_TRIGGER_CYCLE = 3;
 
 struct TestState {
@@ -153,42 +154,48 @@ enum DeviceMode : uint8_t {
 State currentState = TESTING_STATE;
 DeviceMode deviceMode = MODE_MONITOR;
 
+// Igaz, ha a WiFi.config() statikus IP-t állított be.
 bool staticConfigActive = false;
 
+// Gomb-reteszek: az ISR a lenyomás hosszát méri, így blokkoló hívás alatt sem vész el nyomás.
 volatile bool btnResetLatched = false;
 volatile bool btnWifiResetLatched = false;
 volatile uint32_t btnResetDownAt = 0;
 volatile uint32_t btnWifiResetDownAt = 0;
 
+// A korai kilépés próbáinak órái.
 uint32_t resetDelayProbeLast = 0;
 uint32_t firstStartProbeLast = 0;
 
+// Heap-felügyelet állapota.
 uint32_t heapCheckLast = 0;
 uint32_t heapLogLast = 0;
 uint8_t  heapCritStreak = 0;
 bool     heapWarnActive = false;
-
 bool watchdogEnabled = false;
 
+// RTC_NOINIT: a watchdog-resetet is túléli; a magic szűri a bekapcsoláskori szemetet.
 constexpr uint32_t WDT_COUNTER_MAGIC = 0x42415A53UL;
 RTC_NOINIT_ATTR uint32_t rtcWdtMagic;
 RTC_NOINIT_ATTR uint32_t rtcWdtResets;
 
+// RTC_DATA: a deep sleepet túléli, bekapcsoláskor és szoftveres resetnél nullázódik.
 RTC_DATA_ATTR uint32_t rtcRetryRounds = 0;
-
 RTC_DATA_ATTR uint32_t rtcRouterFailRounds = 0;
 
+// A reset előtti diagnózis eredménye (a NET DIAG esemény paramétere).
 enum NetDiag : uint8_t {
   DIAG_ROUTER = 1,
   DIAG_WAN = 2,
   DIAG_HTTP = 3
 };
 
+// Kihagyott reset után ennyi múlva tesztelünk újra; szolgáltatói hibánál előtte megerősítő kör.
 constexpr uint32_t HOLD_OFF_MS = 10 * 60 * 1000;
 constexpr uint32_t CONFIRM_DELAY_MS = 3 * 60 * 1000;
 constexpr uint32_t GW_LEARN_INTERVAL_MS = 60 * 60 * 1000;
-
 RTC_DATA_ATTR bool gwAnswersPing = false;  // a router pingelhetősége: a deep sleepet túléli
+// A router-ping tanulásának órája; a többi a diagnózis állapota.
 uint32_t gwLearnLast = 0;
 bool wanResetDone = false;
 bool confirmPending = false;
@@ -200,6 +207,7 @@ DiagCounters diagCounters() {
   return DiagCounters{ rtcWdtResets, MAX_WDT_RESETS, rtcRetryRounds, MAX_RETRY_ROUNDS };
 }
 
+// Heap miatti újraindulásnál átvitt állapot (RTC_NOINIT, egyszer használjuk fel).
 constexpr uint32_t HEAP_MAGIC = 0x42415A48UL;
 constexpr uint8_t  CARRY_NONE = 0xFF;
 RTC_NOINIT_ATTR uint32_t rtcHeapMagic;
@@ -212,6 +220,7 @@ RTC_NOINIT_ATTR uint32_t rtcCarryRouterFailRounds;
 
 RTC_NOINIT_ATTR uint32_t rtcCarryDiagState;
 
+// Előre deklarációk.
 void printUptime();
 void resetbutton();
 void wifiresetbutton();
@@ -262,6 +271,7 @@ void enterFatal(const char* reason) {
   Serial.println(" perc mulva az eszkoz elalszik (magatol nem ebred fel).");
 }
 
+// A heap-átvitel RTC blokkjának inicializálása bekapcsolás után.
 void initHeapState() {
   if (rtcHeapMagic != HEAP_MAGIC) {
     rtcHeapMagic = HEAP_MAGIC;
@@ -273,6 +283,7 @@ void initHeapState() {
   }
 }
 
+// Az átvitt állapot visszaállítása - pontosan egyszer.
 void applyHeapCarry() {
   if (rtcCarryResetEvents == CARRY_NONE) {
     return;
@@ -296,6 +307,7 @@ void applyHeapCarry() {
   Serial.println(MAX_RETRY_ROUNDS);
 }
 
+// Heap mérése, ritkított kiírás, tartósan kritikus szintnél önkéntes újraindulás.
 void checkHeap(uint32_t now) {
   if (now - heapCheckLast < HEAP_CHECK_INTERVAL_MS) {
     return;
@@ -380,6 +392,7 @@ static uint8_t cmdLen = 0;
 
 static bool cmdOverflow = false;
 
+// Soros parancsok: LOG (a teljes napló), HELP.
 static void runSerialCommand(const char* cmd) {
   if (cmd[0] == '/') {
     cmd++;
@@ -399,6 +412,7 @@ static void runSerialCommand(const char* cmd) {
   }
 }
 
+// Nem blokkol: csak a már beérkezett bájtokat dolgozza fel; túl hosszú sort egészben eldob.
 void serialCommands() {
   while (Serial.available() > 0) {
     const int c = Serial.read();
@@ -423,6 +437,7 @@ void serialCommands() {
   }
 }
 
+// Rendellenes újraindulások számlálása; tápellátási ok nulláz, USB/JTAG nem.
 void checkWatchdogResets() {
   const esp_reset_reason_t reason = esp_reset_reason();
 
@@ -453,6 +468,7 @@ void checkWatchdogResets() {
   }
 }
 
+// Task watchdog a loop taskra: előbb feliratkozás, aztán konfigurálás; hibánál nem állít védelmet.
 void initWatchdog() {
   esp_task_wdt_config_t cfg = {};
   cfg.timeout_ms = WDT_TIMEOUT_MS;
@@ -489,6 +505,7 @@ void initWatchdog() {
   Serial.println(" s");
 }
 
+// Gomb-ISR-ek: csak a lenyomás hosszát mérik és reteszelnek, semmi mást.
 void IRAM_ATTR onResetButtonEdge() {
   if (digitalRead(resetPin) == LOW) {
     const uint32_t now = millis();
@@ -547,6 +564,7 @@ void waitWithButtons(uint32_t duration) {
   }
 }
 
+// Van-e Wi-Fi és internet (ping)? Wi-Fi nélkül csak aszinkron újracsatlakozást kezdeményez.
 bool onlineProbe() {
   if (WiFi.status() != WL_CONNECTED) {
     if (ssid[0] != '\0') {
@@ -569,6 +587,7 @@ bool onlineProbeDue(uint32_t& lastProbe, uint32_t now) {
   return onlineProbe();
 }
 
+// Várakozás, ami korán véget ér, ha a hálózat és az internet visszajött.
 bool waitWithButtonsUntilOnline(uint32_t duration) {
   const uint32_t start = millis();
   uint32_t lastProbe = start;
@@ -586,8 +605,10 @@ bool waitWithButtonsUntilOnline(uint32_t duration) {
   return false;
 }
 
+// Alvás/újraindulás előtt ennyit várunk egy folyamatban lévő mentésre.
 constexpr uint32_t SAVE_WAIT_MAX_MS = 5000;
 
+// Megvárja a mentést ÉS megszerzi a zárat, hogy leállás előtt ne indulhasson új.
 void lockConfigBeforeShutdown() {
   if (beginConfigWrite()) {
     return;
@@ -613,6 +634,7 @@ void lockConfigBeforeShutdown() {
   }
 }
 
+// A relé lábának LOW-n tartása deep sleep alatt.
 void holdRelayForSleep() {
   if (gpio_hold_en((gpio_num_t)relayPin) == ESP_OK) {
     gpio_deep_sleep_hold_en();
@@ -627,6 +649,7 @@ int pressedButtonNow() {
   return -1;
 }
 
+// Beragadt gomb: jelzés, majd 60 mp alvás gombébresztés nélkül (különben boot loop).
 void handleStuckButton(const char* message, uint16_t which, bool logIt) {
   Serial.println(message);
   Serial.print("Alvas ");
@@ -639,7 +662,7 @@ void handleStuckButton(const char* message, uint16_t which, bool logIt) {
 
   const uint32_t start = millis();
   bool on = false;
-  // WDT-OK: korlatos es rovid. A ciklus pontosan STUCK_BLINK_MS-ig (3000 ms)
+  // WDT-OK: korlátos, STUCK_BLINK_MS (3 mp) hosszú.
 
   while (millis() - start < STUCK_BLINK_MS) {
     on = !on;
@@ -677,6 +700,7 @@ void printUptime() {
   Serial.println(buf);
 }
 
+// Csatlakozás (statikus IP-vel vagy DHCP-vel), legfeljebb WIFI_CONNECT_TIMEOUT_MS-ig.
 bool initWiFi() {
   printUptime();
   if (ssid[0] == '\0') {
@@ -760,6 +784,7 @@ bool initWiFi() {
   return true;
 }
 
+// A router áramtalanítása RESET_PULSE-ig; igazat ad, amikor a pulzus véget ért.
 bool reset_device() {
   if (testState.resetStep == 0) {
     testState.resetEvents++;
@@ -809,6 +834,7 @@ bool reset_device() {
   return false;
 }
 
+// Közös elalvás: napló mentése, zár, relé LOW-n rögzítve; timerUs = 0 -> csak a reset gomb ébreszt.
 void enterDeepSleep(uint64_t timerUs) {
   saveEventLog("alvas elott");
 
@@ -867,6 +893,7 @@ void routerFailSleep() {
   enterDeepSleep(SLEEP_DURATION_US);
 }
 
+// Wi-Fi nélkül indulva: router reset, várakozás, újracsatlakozás.
 bool routerResetAndRetry() {
   printUptime();
   Serial.println("A halozat nem latszik - router ujrainditas kovetkezik.");
@@ -904,6 +931,7 @@ void retrySleep() {
   enterDeepSleep(SLEEP_DURATION_US);
 }
 
+// A Wi-Fi próbák után: rossz jelszó -> AP mód, különben alvás, 33 kör után AP mód.
 void wifiGiveUp() {
   const wl_status_t st = WiFi.status();
   printUptime();
@@ -945,6 +973,7 @@ void fatalSleep() {
   enterDeepSleep(0);
 }
 
+// Végzetes hiba blokkoló környezetből: helyben jelez, 5 perc után alszik, nem tér vissza.
 void fatalHalt(const char* reason) {
   enterFatal(reason);
 
@@ -966,6 +995,7 @@ void fatalHalt(const char* reason) {
   fatalSleep();
 }
 
+// Gombos újraindítás: csak a konfigzár megszerzése után (mentés nem szakadhat félbe).
 void restartFromButton(const char* reason) {
   if (!beginConfigWrite()) {
     return;
@@ -1003,6 +1033,7 @@ void resetbutton() {
   }
 }
 
+// A mentett Wi-Fi adatok törlése (SSID először), majd újraindítás.
 void doWifiReset() {
   if (!beginConfigWrite()) {
     return;
@@ -1051,6 +1082,7 @@ void wifiresetbutton() {
   }
 }
 
+// 3 csatlakozási próba 30 mp szünetekkel.
 bool reconnectWifi() {
   printUptime();
   Serial.println("Starting reconnectWifi loop");
@@ -1137,6 +1169,7 @@ void learnGatewayPing(uint32_t now) {
   }
 }
 
+// DHCP mellett tartalék DNS (1.1.1.1) a fallback helyen; a router DNS-e marad az első.
 void ensureFallbackDns() {
   if (staticConfigActive) {
     return;
@@ -1144,6 +1177,7 @@ void ensureFallbackDns() {
   WiFi.STA.dnsIP(2, IPAddress(1, 1, 1, 1));
 }
 
+// Indulás utáni türelmi idő: a router lassabban bootol, mint az ESP.
 void handleFirstStart(uint32_t currentMillis) {
   const bool online = onlineProbeDue(firstStartProbeLast, currentMillis);
 
@@ -1223,7 +1257,7 @@ void setup() {
 
   Serial.begin(115200);
   const uint32_t serialTimeout = millis();
-  // WDT-OK: itt a watchdog MEG NEM EL - az initWatchdog() csak nehany sorral
+  // WDT-OK: a watchdog itt még nem él, a ciklus 3 mp-re korlátos.
 
   while (!Serial && millis() - serialTimeout < 3000) { delay(BUTTON_POLL_MS); }
   blockingDelay(500);
@@ -1330,6 +1364,7 @@ void setup() {
   }
 }
 
+// 1 óra hibátlan futás után a watchdog- és heap-számlálók nullázódnak.
 void clearHealthyRunCounters(uint32_t currentMillis) {
   if (rtcWdtResets != 0 && currentMillis - timing.startMillis >= WDT_COUNTER_CLEAR_MS) {
     rtcWdtResets = 0;
@@ -1380,6 +1415,7 @@ void handleConfigMode(uint32_t currentMillis) {
   delay(BUTTON_POLL_MS);
 }
 
+// Egy végpont HTTP tesztje; Wi-Fi nélkül előbb újracsatlakozás.
 void runTestingState() {
   if (WiFi.status() != WL_CONNECTED) {
     const bool ismetles = lastEventWas((uint8_t)EV_WIFI_LOST);
@@ -1456,6 +1492,7 @@ void runTestingState() {
   return;
 }
 
+// Bukás után: következő végpont, vagy (mind az öt bukott) diagnózis és szükség esetén router reset.
 void runFailureState(uint32_t currentMillis) {
   if (holdOffActive) {
     if (currentMillis - timing.stateStart >= holdOffMs) {

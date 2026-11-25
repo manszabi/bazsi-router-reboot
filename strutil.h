@@ -1,3 +1,4 @@
+// Szöveg-segédfüggvények.
 #pragma once
 
 #include <stddef.h>

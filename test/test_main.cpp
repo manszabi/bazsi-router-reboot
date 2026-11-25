@@ -1,3 +1,4 @@
+// Host tesztek: a valódi sketch forgatókönyvei stub API-k felett, forgatókönyvenként külön processzben.
 #include <Arduino.h>
 #include <set>
 #include <algorithm>

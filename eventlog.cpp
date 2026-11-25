@@ -43,6 +43,7 @@ static void startNtp() {
   Serial.println(NTP_SERVER);
 }
 
+// Az SNTP indítása minden új kapcsolaton (a loop()-ból, minden kapcsolati útra).
 void ensureNtp() {
   if (WiFi.status() != WL_CONNECTED) {
     ntpStarted = false;
@@ -67,6 +68,7 @@ bool formatEpoch(uint32_t epoch, char* out, size_t outSize) {
   return true;
 }
 
+// Két task is hív: a slot írása kritikus szakaszban.
 void logEvent(EventCode code, uint16_t param) {
   const uint32_t uptimeSec = (uint32_t)(esp_timer_get_time() / 1000000);
 
@@ -251,6 +253,7 @@ void printEventLogs() {
   Serial.println();
 }
 
+// A fájlhoz csak az új bejegyzéseket fűzi; flash-kímélés: új esemény nélkül nem ír.
 bool saveEventLog(const char* reason) {
   if (!filesystemReady()) {
     return false;

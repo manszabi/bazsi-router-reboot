@@ -1,3 +1,4 @@
+// A konfigurációs mezők méretkorlátai (IEEE 802.11 SSID, WPA2 jelszó, IPv4 szöveg).
 #pragma once
 
 #include <stddef.h>

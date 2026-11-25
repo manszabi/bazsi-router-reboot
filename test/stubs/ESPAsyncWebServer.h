@@ -1,3 +1,4 @@
+// ESPAsyncWebServer modell: a kezelők közvetlenül hívhatók.
 #pragma once
 #include <Arduino.h>
 #include <LittleFS.h>

@@ -16,6 +16,7 @@
 
 static constexpr uint32_t RESTART_GRACE_MS = 2000;
 
+// A POST két fázisa: előbb minden mező validálása ide, csak utána írás.
 struct ConfigDraft {
   char ssid[SSID_MAX_LEN + 1]      = { 0 };
   char pass[PASS_MAX_LEN + 1]      = { 0 };
@@ -64,6 +65,7 @@ const char FORM_TAIL[] =
   KEEPALIVE_JS_LIT
   "</body></html>";
 
+// Eszközönként egyedi AP jelszó: 12 karakter, 32 elemű, összetéveszthető jelek nélküli ábécé.
 constexpr size_t AP_PASS_LEN = 12;
 static_assert(AP_PASS_LEN >= 8 && AP_PASS_LEN <= 63, "AP jelszo: 8-63 karakter (WPA2)");
 static const char kApPassAlphabet[] = "abcdefghjkmnpqrstuvwxyz23456789A";
@@ -99,6 +101,7 @@ void announceApPassword() {
   }
 }
 
+// Betölti, vagy generál és ment egyet; csak WiFi.mode(WIFI_AP) után (az esp_random() így valódi véletlen).
 static void ensureApPassword() {
   if (loadApPassword()) {
     return;
@@ -120,6 +123,7 @@ static void ensureApPassword() {
   }
 }
 
+// Az előkitöltött értékek escape-elése (az SSID tetszőleges bájt lehet).
 static void printHtmlEscaped(AsyncResponseStream* r, const char* s) {
   for (const char* p = s; *p != '\0'; p++) {
     switch (*p) {
@@ -133,6 +137,7 @@ static void printHtmlEscaped(AsyncResponseStream* r, const char* s) {
   }
 }
 
+// A jelszót soha nem töltjük elő.
 static void sendConfigForm(AsyncWebServerRequest* request) {
   AsyncResponseStream* r = request->beginResponseStream("text/html", 1536);
   r->print(FORM_HEAD);
@@ -316,6 +321,7 @@ static bool commitConfigDraft(const ConfigDraft& d) {
   return saveOk;
 }
 
+// Validálás, majd a konfigzár alatt írás és halasztott újraindítás.
 static void handleConfigPost(AsyncWebServerRequest* request) {
   touchApDeadline();
   if (!filesystemReady()) {
@@ -389,6 +395,7 @@ static void printLogRow(AsyncResponseStream* r, const EventEntry& e,
             forras);
 }
 
+// A /log oldal: állapot, napló (fájl + RTC), jelmagyarázat.
 static void sendDiagnosticLog(AsyncWebServerRequest* request) {
   touchApDeadline();
 
@@ -527,6 +534,7 @@ static void sendDiagnosticLog(AsyncWebServerRequest* request) {
   request->send(r);
 }
 
+// A LittleFS-ről semmit nem szolgálunk ki (a /pass.txt-t is kiadná).
 void startWebPortal() {
   Serial.println("Setting AP (Access Point)");
 

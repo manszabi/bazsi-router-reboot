@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+// Eszközfüggő mag: a MAC-ből; a kódolt fájl más lapkán nem dekódolható.
 static uint32_t secretSeed() {
   const uint64_t mac = ESP.getEfuseMac();
   const uint32_t seed = SECRET_SALT ^ (uint32_t)mac ^ (uint32_t)(mac >> 32);

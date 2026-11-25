@@ -1,3 +1,4 @@
+// Az Arduino/ESP32 API host-modellje: szimulált idő, lábak, soros port, heap.
 #pragma once
 #include <cstdint>
 #include <cstdio>

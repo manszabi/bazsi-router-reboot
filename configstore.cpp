@@ -23,6 +23,7 @@ bool isUsableIPv4(const IPAddress& addr) {
   return (uint32_t)addr != 0;
 }
 
+// Az operator[] az oktetteket hálózati sorrendben adja.
 bool staticPairValid(const IPAddress& ip, const IPAddress& gateway) {
   if (!isUsableIPv4(ip) || !isUsableIPv4(gateway)) {
     return false;
@@ -165,6 +166,7 @@ bool writeConfigValue(fs::FS& fs, const char* path, const char* message) {
   return true;
 }
 
+// Üresre írás; ha az nem megy, törlés.
 bool clearConfigValue(fs::FS& fs, const char* path) {
   Serial.printf("Clearing file: %s\r\n", path);
   if (writeConfigValue(fs, path, "")) {

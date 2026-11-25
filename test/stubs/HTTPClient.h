@@ -1,3 +1,4 @@
+// HTTPClient modell: szkriptelhető válasz, chunked keretezés, blokkolási idő.
 #pragma once
 #include <Arduino.h>
 #include <WiFi.h>

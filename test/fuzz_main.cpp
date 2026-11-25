@@ -1,3 +1,4 @@
+// libFuzzer célpontok (FUZZ_TARGET 1-4): POST, titok-dekódolás, naplófájl, konfig olvasás.
 #include <Arduino.h>
 #include <WiFi.h>
 #include <LittleFS.h>

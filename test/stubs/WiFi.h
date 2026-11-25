@@ -1,3 +1,4 @@
+// A WiFi és a kliens-stream modellje (core 3.3.11 viselkedés szerint).
 #pragma once
 #include <Arduino.h>
 #define WL_CONNECTED 3

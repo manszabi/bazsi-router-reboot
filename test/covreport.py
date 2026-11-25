@@ -1,27 +1,15 @@
 #!/usr/bin/env python3
-"""Osszesitett sorlefedettseg a sketch-re ES minden modulra.
-
-MIERT KELL SAJAT SCRIPT? Amig a program egyetlen forditasi egyseg volt, eleg
-volt a gcov egy sorat kiolvasni. Tobb modul mellett a gcov fajlonkent szamol,
-es a "legelso szazalek" mar nem a program lefedettsege - hanem veletlenul
-kivalasztott egyetlen fajle. Egy ilyen mereshatar-hiba csendben hazudna: a
-kapu vagy feleslegesen bukna, vagy - ami rosszabb - atengedne egy valodi
-visszaesest.
-
-Hasznalat:  covreport.py <build-konyvtar> <objektum-elotag> [kuszob]
-"""
+"""Osszesitett sorlefedettseg a sketch-re ES minden modulra."""
 import re, subprocess, sys, pathlib, glob, os
 
 build = pathlib.Path(sys.argv[1])
-prefix = sys.argv[2]                      # pl. build/run-cov
+prefix = sys.argv[2]
 kuszob = float(sys.argv[3]) if len(sys.argv) > 3 else None
 
-# A .gcno fajlok mellol tudjuk, mely forrasokat forditottuk le.
 for gcno in sorted(glob.glob(f"{prefix}-*.gcno")):
     subprocess.run(["gcov", "-o", gcno[:-5], gcno[:-5] + ".gcda"],
                    capture_output=True)
 
-# Csak a SAJAT forrasaink erdekelnek: a stubok es a rendszer-headerek nem.
 sajat = re.compile(r'^(sketch|secret|strutil|netprobe|sync|eventlog|configstore|webportal)\.(cpp|h)\.gcov$')
 osszes_vegrehajtott = osszes_sor = 0
 sorok = []

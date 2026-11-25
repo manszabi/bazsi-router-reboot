@@ -25,6 +25,7 @@ uint16_t httpCodeLogParam(int code) {
 
 static_assert(PROBE_POLL_MS == 10, "a gomb-pollozas uteme a fomodullal egyezzen");
 
+// Egy bájt legfeljebb timeoutMs várakozással; -1 = lejárt vagy megszakadt (FIN-t a core nem jelez).
 static int readByteBounded(WiFiClient& stream, uint32_t timeoutMs) {
   const uint32_t start = millis();
   while ((millis() - start) < timeoutMs) {
@@ -63,6 +64,7 @@ static int hexDigitAnyCase(int c) {
   return -1;
 }
 
+// Mint a readBounded(), de lebontja a chunked keretezést (a nyers streamben ott maradnak).
 static size_t readChunked(WiFiClient& stream, char* buf, size_t maxLen, uint32_t timeoutMs) {
   size_t n = 0;
   // Véges: minden nem záró darab legalább egy bájttal növeli n-t, és n <= maxLen.
@@ -161,6 +163,7 @@ bool testInternetHTTP(const char* url, const char* expectedResponse) {
   return result;
 }
 
+// Az ESPping 1.0.5 el sem küldött csomagra is igazat adhat: ezt az averageTime() > 0 szűri.
 bool testInternetPing(const IPAddress& target, const char* targetName) {
   Serial.print("Ping teszt futtatása (");
   Serial.print(targetName);
