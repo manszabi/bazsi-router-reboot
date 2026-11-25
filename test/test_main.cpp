@@ -7134,6 +7134,10 @@ static void scDN1() {
   CHECK(evCount(EVC_NET_DIAG, 3) == 1, "NET DIAG 3 (a router DNS-e)");
   CHECK(dnsState.lastResetAt - dnsState.suspectSince >= 15u * 60 * 1000,
         "a reset legalabb 15 perccel a gyanu kezdete utan jott");
+  const int routerKerdes = (int)std::count(dnsSim.servers.begin(), dnsSim.servers.end(),
+                                           std::string("192.168.1.1"));
+  printf("     [info] %d kerdes a router DNS-ehez\n", routerKerdes);
+  CHECK(routerKerdes >= 20, "a gyanu alatt percenkent kerdez (15 perc x 2 proba)");
   CHECK(serialHas("a kulso DNS valaszol"), "a soros porton kimondja");
 }
 
