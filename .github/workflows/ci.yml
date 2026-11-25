@@ -49,7 +49,7 @@ jobs:
 
   # Időre fut: 40 mp célpontonként.
   fuzz:
-    name: Fuzzing (libFuzzer, negy bemenet-elemzo celpont)
+    name: Fuzzing (libFuzzer, ot bemenet-elemzo celpont)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

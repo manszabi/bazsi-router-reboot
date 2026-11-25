@@ -81,14 +81,14 @@ $(BUILD):
 clean:
 	@rm -rf $(BUILD) *.gcov
 
-# libFuzzer a négy bemenet-elemzőre (POST, titok, naplófájl, konfig).
+# libFuzzer az öt bemenet-elemzőre (POST, titok, naplófájl, konfig, DNS-válasz).
 FUZZCXX  ?= clang++
 FUZZSEC  ?= 30
 FUZZFLAGS = -std=gnu++17 -g -O1 -Istubs -I.. -DESP_IDF_VERSION_MAJOR=6 \
             -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer \
             -Wno-unused-parameter -Wno-overloaded-virtual
 FUZZSRC   = $(BUILD)/sketch.cpp $(MODULES) stubs/main_stub.cpp fuzz_main.cpp
-FUZZBINS  = $(BUILD)/fuzz-post $(BUILD)/fuzz-secret $(BUILD)/fuzz-evlog $(BUILD)/fuzz-config
+FUZZBINS  = $(BUILD)/fuzz-post $(BUILD)/fuzz-secret $(BUILD)/fuzz-evlog $(BUILD)/fuzz-config $(BUILD)/fuzz-dns
 
 $(BUILD)/fuzz-post:   $(DEPS) fuzz_main.cpp
 	$(FUZZCXX) $(FUZZFLAGS) -DFUZZ_TARGET=1 -o $@ $(FUZZSRC)
@@ -98,6 +98,8 @@ $(BUILD)/fuzz-evlog:  $(DEPS) fuzz_main.cpp
 	$(FUZZCXX) $(FUZZFLAGS) -DFUZZ_TARGET=3 -o $@ $(FUZZSRC)
 $(BUILD)/fuzz-config: $(DEPS) fuzz_main.cpp
 	$(FUZZCXX) $(FUZZFLAGS) -DFUZZ_TARGET=4 -o $@ $(FUZZSRC)
+$(BUILD)/fuzz-dns:    $(DEPS) fuzz_main.cpp
+	$(FUZZCXX) $(FUZZFLAGS) -DFUZZ_TARGET=5 -o $@ $(FUZZSRC)
 
 .PHONY: fuzz
 fuzz: $(FUZZBINS)
@@ -109,7 +111,7 @@ fuzz: $(FUZZBINS)
 	    2>&1 | grep -E "^#|Done|stat::|ERROR|SUMMARY|crash" | tail -8 || rc=1; \
 	done; \
 	if [ $$rc -ne 0 ]; then echo "FUZZING: TALALAT - lasd a crash-* fajlokat"; exit 1; fi; \
-	echo "Fuzzing: mind a negy celpont tisztan futott."
+	echo "Fuzzing: mind az ot celpont tisztan futott."
 
 # A stubok igazolása a valódi könyvtárak ellen: STUBROOTS="<gyökerek>" make stubcheck.
 .PHONY: stubcheck

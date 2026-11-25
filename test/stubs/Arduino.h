@@ -286,6 +286,8 @@ public:
   bool isZero() const { return !o[0] && !o[1] && !o[2] && !o[3]; }
 
   uint8_t operator[](int i) const { return o[i]; }
+  bool operator==(const IPAddress& b) const { return t_ == b.t_ && o[0]==b.o[0] && o[1]==b.o[1] && o[2]==b.o[2] && o[3]==b.o[3]; }
+  bool operator!=(const IPAddress& b) const { return !(*this == b); }
   uint8_t o[4];
 private:
   IPType t_ = IPv4;

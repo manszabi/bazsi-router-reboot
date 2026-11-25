@@ -1,4 +1,4 @@
-// libFuzzer célpontok (FUZZ_TARGET 1-4): POST, titok-dekódolás, naplófájl, konfig olvasás.
+// libFuzzer célpontok (FUZZ_TARGET 1-5): POST, titok-dekódolás, naplófájl, konfig olvasás, DNS-válasz.
 #include <Arduino.h>
 #include <WiFi.h>
 #include <LittleFS.h>
@@ -15,6 +15,7 @@
 #include "../eventlog.h"
 #include "../webportal.h"
 #include "../sync.h"
+#include "../netprobe.h"
 
 extern char ssid[]; extern char pass[]; extern char ipStr[]; extern char gatewayStr[];
 enum DeviceMode : uint8_t;
@@ -129,6 +130,20 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   fileMatches(LittleFS, "/ssid.txt", s, strlen(s));
   return 0;
 }
+#elif FUZZ_TARGET == 5
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+  const uint16_t id = size >= 2 ? (uint16_t)((data[0] << 8) | data[1]) : 0;
+  (void)dnsResponseOk(data, size, id);
+  char nev[80];
+  const size_t n = size < sizeof(nev) - 1 ? size : sizeof(nev) - 1;
+  memcpy(nev, data, n);
+  nev[n] = '\0';
+  uint8_t kerdes[DNS_MAX_PACKET];
+  (void)buildDnsQuery(id, nev, kerdes, (size >= 1 ? data[0] : 0) % sizeof(kerdes));
+  return 0;
+}
+
 #else
-#error "FUZZ_TARGET 1..4 kozul valassz"
+#error "FUZZ_TARGET 1..5 kozul valassz"
 #endif

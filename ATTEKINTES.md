@@ -46,7 +46,9 @@ Alvás ezen az ágon nincs: az eszköz végig figyel.
 Ha a router pingre sosem válaszol, a szolgáltatói kiesés is 2 perc után kap
 resetet; reset-hurok ebből sem lesz, mert a lépcső ritkítja.
 
-Ismert korlát: ha a routernek csak a DNS-e fagy le, a ping megy, és nincs reset.
+**A router DNS-e:** ha a ping megy, 15 percenként egy névfeloldás közvetlenül a
+routernél. Ha a router DNS-e 15 percig hallgat, miközben egy külső DNS
+(`1.1.1.1`) válaszol, reset. Ha a külső sem válaszol, nincs reset.
 
 ## Ha nincs Wi-Fi
 
@@ -60,7 +62,8 @@ Ismert korlát: ha a routernek csak a DNS-e fagy le, a ping megy, és nincs rese
 - Soros porton: `LOG` (vagy `/log`) – a teljes eseménynapló.
 - Beállító módban: a `192.168.4.1/log` oldal.
 - A legfontosabb bejegyzések: `TEST FAIL` + `HTTP ERROR` (a kiesés kezdete),
-  `NET DIAG` (1 = a router sem válaszolt, 2 = szolgáltatói hiba),
+  `NET DIAG` (1 = a router sem válaszolt, 2 = szolgáltatói hiba,
+  3 = a router DNS-e hallgatott),
   `ROUTER RESET` (hányadik ebben a kiesésben).
 
 ## Tovább

@@ -199,7 +199,7 @@ helyes eszköz – egy rossz globális küszöb csak zajt adna.
 | `WDT14`–`WDT15` | **Az „1 óra hibátlan működés” mihez képest mér**: a mostani indulás kezdetéhez, nem abszolút `millis()` értékhez – nagy kezdő `millis()` mellett és a **körbefordulás** átlépésekor is (mindkét mérés elbukik, ha valaki visszanézi abszolút alakra) |
 | `HP1`–`HP9` | **Heap felügyelet**: az állapotsor félóránként megy ki (nem körönként), a figyelmeztetés csak a küszöb átlépésekor; egyetlen mélypont **nem** indít újra, tartós kritikus szint igen; a router reset számláló **túléli** az újraindulást és pontosan egyszer használódik fel; AP módban, relé-impulzus és fájlírás közben nincs újraindulás; három sikertelen kör után `MODE_FATAL`, nem boot loop; és egy valódi lassú szivárgás végponttól végpontig |
 | `GWH1`–`GWH5` | **Mi marad meg egy heap-újraindulás után**: a router reset utáni **ellenőrző ablakban** nincs önkéntes újraindulás (a gateway-eszkaláció kétfázisú, és a fázisokat összekötő állapot nem vinne át) – mutációval ellenőrizve; az ablak végén a döntés rendesen megszületik (AP mód a helyes indoklással); a teljes leltár arról, mi vész el, és miért olcsó újraszámolni; és a **2 napos ablak** számlálója (`RTC_DATA_ATTR`, tehát szoftveres resetre nullázódna) szintén átmegy – de csak a saját újraindulásunkon, gombnyomásnál marad a tiszta lap |
-| `NV1`–`NV11` | **A napló mentése a fájlrendszerre**: kimegy a három fontos pillanatban (és a relé kapcsolása **előtt**); az írás sikerességét visszaolvasás ellenőrzi, a néma írási hibát is elkapva; a mentés atomikusan szerzi meg a zárat és fel is oldja, foglalt zárnál kimarad; mentés közben nincs gombos újraindulás és másik írás; a lap a **frissebbet** tölti be (élő RTC → RTC, áramszünet után → fájl); hiányzó, üres, csonka, rossz magic-ű és hazudós fejlécű fájl **egyike sem okoz gondot**, mindkettő üresnél nincs napló a lapon; NTP időbélyeg; a félúton bukó betöltés nem hagy kevert puffert; **mind a négy alvás** menti a naplót (nem csak a két időzített), és csatolatlan fájlrendszernél magától kimarad; végül az **óraszinkron minden kapcsolati úton elindul** – a korai kilépéseken is, ahol az `initWiFi()` nem fut le; és **sikertelen NTP mellett** a teljes eszkaláció végigfut, a `/log` a darabszám-alapú szabályra esik vissza, `-` áll az Idő oszlopban, és sehol nincs hamis 1970-es dátum |
+| `NV1`–`NV11` | **A napló mentése a fájlrendszerre**: kimegy a három fontos pillanatban (és a relé kapcsolása **előtt**); az írás sikerességét visszaolvasás ellenőrzi, a néma írási hibát is elkapva; a mentés atomikusan szerzi meg a zárat és fel is oldja, foglalt zárnál kimarad; mentés közben nincs gombos újraindulás és másik írás; a lap a **frissebbet** tölti be (élő RTC → RTC, áramszünet után → fájl); hiányzó, üres, csonka, rossz magic-ű és hazudós fejlécű fájl **egyike sem okoz gondot**, mindkettő üresnél nincs napló a lapon; NTP időbélyeg; a félúton bukó betöltés nem hagy kevert puffert; **minden alvás** menti a naplót (nem csak az időzített), és csatolatlan fájlrendszernél magától kimarad; végül az **óraszinkron minden kapcsolati úton elindul** – a korai kilépéseken is, ahol az `initWiFi()` nem fut le; és **sikertelen NTP mellett** a teljes eszkaláció végigfut, a `/log` a darabszám-alapú szabályra esik vissza, `-` áll az Idő oszlopban, és sehol nincs hamis 1970-es dátum |
 | `NV12`–`NV16` | **A naplómentés hibaútjai**: megtelt fájlrendszer (rövid írás), a **flash kímélése** (változás nélkül nem írunk újra), a „mentve: …" időbélyeg, és az olvashatatlan fájlrendszer három ága – írás után lehetetlen visszaolvasás, megnyithatatlan naplófájl a lapon, félbeszakadó fejléc-átugrás |
 | `NV15`, `AP5`–`AP7`, `WF11` | **A lefedettség-mérésből előkerült vakfoltok**: mind a **10 indulási ok** emberi neve a `/log` oldalon (plusz a nem nevesített `ESP_RST_USB`); **aposztróf** és társai az SSID-ben (a HTML-escape ezen ága sosem futott le); mentés csatolatlan fájlrendszerrel → tiszta 500; a „router reset után sem jött vissza a WiFi" hibaág; és hogy **mind a négy mező egyformán tűri** a beillesztett szóközöket (a határértékes érték záró szóközzel is mentődik, a túlméretes viszont továbbra is hiba) |
 | `LOG7`–`LOG9` | **A naplózás változásainak utóhatásai**: a megnőtt `/log` oldal (Idő oszlop, Forrás sor, két új eseménykód) a legrosszabb esetben – tele körpuffer, valós időbélyegekkel – is **4546 bájt**, tehát belefér a stream 6144 bájtos kezdő pufferébe; egy soros porton keresztüli firmware frissítés után a **régi elrendezésű** RTC napló érvénytelen (a magic egyben verziójelző); és a `wifireset` a naplófájlt szándékosan **nem** törli |
@@ -219,6 +219,7 @@ helyes eszköz – egy rossz globális küszöb csak zajt adna.
 | `WDT8b` | **A LittleFS formázása** is belefér a watchdog ablakába: 7,5 mp tipikus és 51,5 mp rossz eset, mindkettő a 90 mp alatt |
 | `RR3` | egyetlen sikeres ellenőrzés nullázza a reset-számlálót és a kiesést |
 | `RD1`–`RD14` | **A reset-döntés** (funkcióteszt, percre bontott menetrenddel): router hiba → reset kb. 2 perc után; 5–14 perces szolgáltatói kiesés → nincs reset; 6 órás kiesés → 4 reset a 15 perc / 30 perc / 1 óra / 2 óra lépcsőn; **a 2026-11-22-i terepi nap → 0 reset**; pingre nem válaszoló router → router hibának látszik; szűrt ping, működő HTTP → nincs reset, az öt végpont sorra kerül; gyógyulás után a lépcső elölről; egy napig halott router → 9 reset, alvás nélkül; heap-átvitel; gateway-cím nélkül nincs vak ping; Wi-Fi-vesztés a kiesésen belül a lépcsőt követi; reset után rossz jelszó → AP mód; az 1.1.1.1 hallgat, a 8.8.8.8 válaszol → nincs reset; percenként pontosan egy ellenőrzés |
+| `DN1`–`DN12` | **A router DNS-ének ellenőrzése**: a router DNS-e hallgat, a ping és az `1.1.1.1` DNS megy → reset legkésőbb ~31 perc; a külső DNS is hallgat → nincs reset; 9 perces zavar → nincs reset; a 11-22-i nap DNS-zavarral → 0 reset; tartós hiba → saját lépcső (a ping nem nullázza); ha a DNS nem a router → kimarad; a válasz ellenőrzése (azonosító, forrás, SERVFAIL, NXDOMAIN, csonka, hallgatás: pontosan 2 × 3 mp); a kérdés formátuma az lwIP szerint; gyógyulás után elölről; statikus IP; 15 percenként egy kérdés; ping nélkül szünetel |
 | `HC1`–`HC2` | A **HTTP hibakód** naplózható alakja (1000 + \|kód\|) és az első bukáskor a naplóba kerül |
 | `FB1`, `SL1` | DHCP mellett **tartalék DNS** (1.1.1.1 a fallback helyen, a router DNS-ét nem írja felül); a Wi-Fi **modem-alvás kikapcsolva** a csatlakozás előtt |
 | `WL1`–`WL2` | Wi-Fi-vesztés **rossz jelszóval** → AP mód, router reset nélkül; jelszóhiba nélkül marad a reset |
@@ -321,12 +322,13 @@ lefedettség alapján tanulja meg, merre érdemes menni.
 | `fuzz-secret` | `decodeSecretInPlace()` / `encodeSecret()` | a `/pass.txt` (sérült vagy átírt) |
 | `fuzz-evlog` | az `/evlog.bin` betöltő | a naplófájl (félbeszakadt írás) |
 | `fuzz-config` | `readConfigValue()`, `fileMatches()` | a négy konfigfájl |
+| `fuzz-dns` | `dnsResponseOk()`, `buildDnsQuery()` | **a hálózat**: a router (vagy bárki, aki UDP-t küld az eszköznek) |
 
-A **`fuzz-post` a lényeg**: ez az egyetlen felület, aminek a túloldalán
-tényleges támadó ülhet. A másik három olyan adatot olvas, amit maga az eszköz
-írt ki – ott a sérült flash a reális fenyegetés, nem a rosszindulat.
+A **`fuzz-post` és a `fuzz-dns` a lényeg**: ezek túloldalán ülhet idegen fél.
+A másik három olyan adatot olvas, amit maga az eszköz írt ki – ott a sérült
+flash a reális fenyegetés, nem a rosszindulat.
 
-Mind a négy **ASan + UBSan alatt** fut: a fuzzer önmagában csak az összeomlást
+Mind az öt **ASan + UBSan alatt** fut: a fuzzer önmagában csak az összeomlást
 látná, a csendes puffertúlcsordulást nem.
 
 ```
@@ -420,7 +422,7 @@ száma valaha megváltozik, a sketch továbbra is lefordul, minden teszt zöld m
 (a teszt is a saját konstansát használja), és az eszköz **egy másik lábat**
 kapcsolgatna.
 
-Amit összevet (50 állítás):
+Amit összevet (65 állítás):
 
 | | |
 |---|---|
@@ -438,6 +440,8 @@ Amit összevet (50 állítás):
 | `IPAddress` | `operator[](int) const` (a statikus IP pár ellenőrzése) |
 | ESPping | `averageTime()` típusa, és az 1.0.5 fantom-sikerének oka (`_success = _expected_count - _errors`) |
 | `esp_random()` | szignatúra, és a dokumentált feltétel: bekapcsolt Wi-Fi mellett valódi véletlen |
+| `NetworkUDP` | `begin(uint16_t)`, `beginPacket(IPAddress, uint16_t)`, `endPacket()`, `parsePacket()`, `flush()`, `remoteIP()`, `remotePort()`; és a **viselkedés**: a `parsePacket()` nem blokkol (`MSG_DONTWAIT`), beolvasatlan csomag mellett 0-t ad, a `flush()` eldobja a maradékot |
+| DNS-cím | `WiFi.dnsIP(uint8_t dns_no = 0)`, netif nélkül 0.0.0.0; `IPAddress::operator==` / `!=` |
 
 A **viselkedési** állítások azért vannak benne, mert a program döntései és a
 dokumentáció indoklása ezekre épül. Ha azok elmozdulnak, a rájuk épülő

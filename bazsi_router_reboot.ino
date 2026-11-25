@@ -43,6 +43,11 @@ constexpr uint32_t WAN_DOWN_WINDOW_MS = 15 * 60 * 1000;
 constexpr uint32_t RETRY_BACKOFF_MS[] = { 30 * 60 * 1000, 60 * 60 * 1000,
                                           120 * 60 * 1000, 240 * 60 * 1000 };
 constexpr uint8_t RETRY_BACKOFF_STEPS = sizeof(RETRY_BACKOFF_MS) / sizeof(RETRY_BACKOFF_MS[0]);
+
+// A router DNS-e: 15 percenként, gyanúnál percenként; 15 perc folyamatos hiba után reset.
+constexpr uint32_t DNS_CHECK_INTERVAL_MS = 15 * 60 * 1000;
+constexpr uint32_t DNS_FAIL_WINDOW_MS = 15 * 60 * 1000;
+constexpr char DNS_PROBE_NAME[] = "connectivitycheck.gstatic.com";
 // Várakozás a router bootolására (korábban véget ér, ha a hálózat visszajött).
 constexpr uint32_t RESET_DELAY = 10 * 60 * 1000;
 constexpr uint32_t RESET_PULSE = 90 * 1000;
@@ -131,7 +136,19 @@ struct UIFlags {
   bool blinkOn = false;
 };
 
+// A router DNS-ének állapota; saját reset-lépcső, mert a ping közben végig sikeres.
+struct DnsState {
+  bool checked = false;
+  uint32_t lastCheck = 0;
+  bool suspect = false;
+  uint32_t suspectSince = 0;
+  uint8_t resetEvents = 0;
+  uint32_t lastResetAt = 0;
+  bool skipLogged = false;
+};
+
 TestState testState;
+DnsState dnsState;
 TimingState timing;
 UIFlags uiFlags;
 
@@ -181,7 +198,8 @@ RTC_DATA_ATTR uint32_t rtcRetryRounds = 0;
 // A reset oka (a NET DIAG esemény paramétere).
 enum NetDiag : uint8_t {
   DIAG_ROUTER = 1,
-  DIAG_WAN = 2
+  DIAG_WAN = 2,
+  DIAG_DNS = 3
 };
 
 DiagCounters diagCounters() {
@@ -1364,15 +1382,82 @@ void startRouterReset(uint8_t diag) {
   resetDelayProbeLast = timing.stateStart;
 }
 
+// A lépcső: az n. sikertelen reset után ennyit várunk a következővel (n >= 1).
+uint32_t backoffMs(uint8_t resetek) {
+  const uint8_t lepcso = (resetek <= RETRY_BACKOFF_STEPS) ? (uint8_t)(resetek - 1)
+                                                          : (uint8_t)(RETRY_BACKOFF_STEPS - 1);
+  return RETRY_BACKOFF_MS[lepcso];
+}
+
 // A kiesés kezdete (első reset előtt) vagy az utolsó reset óta ennyit várunk a resettel.
 uint32_t resetWaitMs(bool routerOk) {
   if (testState.resetEvents == 0) {
     return routerOk ? WAN_DOWN_WINDOW_MS : ROUTER_DOWN_WINDOW_MS;
   }
-  const uint8_t lepcso = (testState.resetEvents <= RETRY_BACKOFF_STEPS)
-                           ? (uint8_t)(testState.resetEvents - 1)
-                           : (uint8_t)(RETRY_BACKOFF_STEPS - 1);
-  return RETRY_BACKOFF_MS[lepcso];
+  return backoffMs(testState.resetEvents);
+}
+
+// Él a ping: hallgat-e tartósan a router DNS-e, miközben egy külső DNS válaszol? Igaz, ha reset indult.
+bool routerDnsCheck() {
+  const uint32_t now = millis();
+  const uint32_t utem = dnsState.suspect ? CHECK_INTERVAL_MS : DNS_CHECK_INTERVAL_MS;
+  if (dnsState.checked && now - dnsState.lastCheck < utem) {
+    return false;
+  }
+  dnsState.checked = true;
+  dnsState.lastCheck = now;
+
+  const IPAddress dns = WiFi.dnsIP(0);
+  const IPAddress gw = WiFi.gatewayIP();
+  if ((uint32_t)gw == 0 || dns != gw) {
+    if (!dnsState.skipLogged) {
+      printUptime();
+      Serial.println("A DNS szerver nem a router - a router DNS ellenorzese kimarad.");
+      dnsState.skipLogged = true;
+    }
+    dnsState.suspect = false;
+    return false;
+  }
+  if (testDnsServer(dns, DNS_PROBE_NAME, "router")) {
+    if (dnsState.suspect) {
+      printUptime();
+      Serial.println("A router DNS-e ujra valaszol.");
+    }
+    dnsState.suspect = false;
+    dnsState.resetEvents = 0;
+    return false;
+  }
+  if (!testDnsServer(IPAddress(1, 1, 1, 1), DNS_PROBE_NAME, "kulso")) {
+    printUptime();
+    Serial.println("A kulso DNS sem valaszol - nem a router hibaja, nincs reset.");
+    dnsState.suspect = false;
+    return false;
+  }
+  if (!dnsState.suspect) {
+    dnsState.suspect = true;
+    dnsState.suspectSince = now;
+  }
+  const uint32_t kezdet = (dnsState.resetEvents == 0) ? dnsState.suspectSince
+                                                       : dnsState.lastResetAt;
+  const uint32_t varni = (dnsState.resetEvents == 0) ? DNS_FAIL_WINDOW_MS
+                                                      : backoffMs(dnsState.resetEvents);
+  const uint32_t eltelt = now - kezdet;
+  printUptime();
+  Serial.print("A router DNS-e hallgat ");
+  Serial.print((now - dnsState.suspectSince) / 60000);
+  Serial.println(" perce, a kulso DNS valaszol.");
+  if (eltelt < varni) {
+    Serial.print("Router reset legkorabban ");
+    Serial.print((varni - eltelt + 59999) / 60000);
+    Serial.println(" perc mulva.");
+    return false;
+  }
+  if (dnsState.resetEvents < 255) {
+    dnsState.resetEvents++;
+  }
+  dnsState.lastResetAt = now;
+  startRouterReset(DIAG_DNS);
+  return true;
 }
 
 // Percenkénti ellenőrzés: van-e internet, és ha egy ideje nincs, kell-e reset.
@@ -1428,7 +1513,9 @@ void runCheckState() {
     testState.outage = false;
     testState.resetEvents = 0;
     Serial.println("Successful Test");
-    currentState = WAIT_STATE;
+    if (!routerDnsCheck()) {
+      currentState = WAIT_STATE;
+    }
     return;
   }
 

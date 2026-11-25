@@ -5,6 +5,7 @@
 #include <WiFi.h>
 #include <LittleFS.h>
 #include <ESPping.h>
+#include <WiFiUdp.h>
 #include <esp_task_wdt.h>
 #include <esp_system.h>
 #include <ESPAsyncWebServer.h>
@@ -155,6 +156,7 @@ std::map<std::string, ArRequestHandlerFunction> g_handlers;
 PingClass Ping;
 WifiSim wifiSim;
 PingSim pingSim;
+DnsSim dnsSim;
 
 void simLog(const std::string& s) { g_log.push_back(s); }
 

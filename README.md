@@ -8,6 +8,7 @@ ESP32-C3 alapú automatikus router újraindító rendszer. Az eszköz folyamatos
 
 - **Internetfigyelés percenként** – ping az `1.1.1.1`-re és a `8.8.8.8`-ra, tartalékként HTTP teszt öt üzemeltető felé
 - **Automatikus router újraindítás** – relével áramtalanítja a routert, ha 2 percig (a router sem válaszol) vagy 15 percig (szolgáltatói hiba) nincs internet; sikertelen reset után egyre ritkábban
+- **A router DNS-ének figyelése** – 15 percenként egy közvetlen DNS-kérdés; ha a router DNS-e 15 percig hallgat, miközben egy külső DNS válaszol, reset
 - **Wi-Fi Manager** – böngészőből konfigurálható SSID, jelszó, IP-cím és gateway
 - **Beépített beállító weboldal** – a programba fordítva, nincs feltöltendő fájlrendszer-tartalom
 - **LittleFS** – a beállítások áramszünet után is megmaradnak
@@ -206,6 +207,33 @@ resetet ad, mert a ping válaszolt (`RD4`; a régi firmware négyet adott).
 > szolgáltatói kiesést is, és 15 helyett 2 perc után resetel. Reset-hurok ebből
 > sem lesz, mert a következő resetek a lépcső szerint ritkulnak.
 
+#### A router DNS-e
+
+Ha a routernek csak a DNS-e (a névfeloldása) fagy le, a ping megy, a gépeken
+viszont nem nyílik meg semmi. Ezt egy külön, ritka ellenőrzés fogja meg:
+
+| Lépés | Mit csinál |
+|---|---|
+| 15 percenként, ha a ping megy | egy DNS-kérdés (`connectivitycheck.gstatic.com`) **közvetlenül a router 53-as portjára** – 2 próba, 3 mp várakozással |
+| a router DNS-e nem válaszol | kontrollkérdés az `1.1.1.1` DNS-ének |
+| a router hallgat, az `1.1.1.1` válaszol | gyanú: innentől percenként újra kérdez |
+| a gyanú **15 percig** megszakítás nélkül tart | router reset (`NET DIAG` 3); ha nem segít, 30 perc → 1 óra → 2 óra → 4 óra |
+
+Nincs reset, ha az `1.1.1.1` sem válaszol (valószínűleg a szolgáltató szűri a
+DNS-t), ha a DHCP nem a routert adja DNS-nek, vagy ha a zavar 15 percnél
+rövidebb (a 11-22-i nap leghosszabb zavara 9 perc volt). Mérve: a reset
+legkésőbb ~30 perccel a hiba után jön (`DN1`).
+
+> **Miért saját DNS-kérdés?** A szokásos névfeloldás (lwIP) hiba esetén
+> átvált a tartalék DNS-re, és gyorsítótáraz – a router hibáját így elfedné. A
+> válaszból csak a fejlécet nézzük: a mi azonosítónk, válaszbit, hibakód 0
+> (rendben) vagy 3 (nincs ilyen név, pl. egy DNS-szűrő tiltása). Ami a router
+> gyorsítótárából még válaszol, de továbbítani már nem tud, azt nem mindig
+> veszi észre.
+
+A DNS-ágnak **saját reset-számlálója** van: a ping közben végig sikeres, és a
+fő lépcsőt minden sikeres ping nullázza.
+
 #### A reset menete
 
 1. relé be → **90 mp** áramtalanítás (`RESET_PULSE`) → relé ki;
@@ -313,7 +341,7 @@ bazsi-router-reboot/
 ├── sync.h/.cpp               # a két task közti osztott állapot
 ├── configstore.h/.cpp        # a négy mentett érték + LittleFS
 ├── eventlog.h/.cpp           # diagnosztikai napló + valós idő (NTP)
-├── netprobe.h/.cpp           # HTTP végpont-tesztek és ICMP ping
+├── netprobe.h/.cpp           # HTTP végpont-tesztek, ICMP ping, DNS-kérdés
 ├── webportal.h/.cpp          # az AP beállító portál HTTP felülete
 │
 ├── partitions_custom.csv     # Egyedi partíciós tábla: OTA nélkül, 512 KiB LittleFS
@@ -346,7 +374,7 @@ lentebb állóktól függ:
 | Modul | Mit birtokol | Mit exportál |
 |---|---|---|
 | `webportal` | az AP portál HTTP felülete és az eszközönkénti AP jelszó – ez a **biztonságkritikus** felület | **4 függvény** (a POST-kezelő, a `/log` oldal, az űrlap és a `server` mind belső) |
-| `netprobe` | HTTP és ICMP mérés – csak **mér**, nem dönt | `testInternetHTTP()`, `lastHttpCode()`, `testInternetPing()` |
+| `netprobe` | HTTP, ICMP és DNS mérés – csak **mér**, nem dönt | `testInternetHTTP()`, `lastHttpCode()`, `testInternetPing()`, `testDnsServer()` |
 | `eventlog` | a diagnosztikai napló és a valós idő | `logEvent()`, `saveEventLog()`, `ensureNtp()`, … |
 | `configstore` | a négy mentett érték, a fájljaik, a LittleFS | a négy puffer + az olvasó/író függvények |
 | `sync` | a két task közti osztott állapot | 7 függvény – a jelzők maguk **belsők** |
@@ -355,7 +383,8 @@ lentebb állóktól függ:
 
 A főmodulban a **döntéshozatal** maradt: `setup()`, `loop()`, az állapotgép
 (`runCheckState()` / `runResetState()`), az internet- és routerellenőrzés
-(`internetOk()`, `gatewayPingOk()`), a reset időzítése (`resetWaitMs()`), a
+(`internetOk()`, `gatewayPingOk()`, `routerDnsCheck()`), a reset időzítése
+(`resetWaitMs()`, `backoffMs()`), a
 Wi-Fi, a relé, az alvások, a gombok, a watchdog és a heap-felügyelet.
 
 Teljes függvénylistával és a határhúzás indoklásával:
@@ -470,6 +499,8 @@ Amit ez hoz:
 | `ROUTER_DOWN_WINDOW_MS` | 2 perc | Ennyi internet nélküli idő után reset, ha a router sem válaszol |
 | `WAN_DOWN_WINDOW_MS` | 15 perc | Ennyi után reset, ha a router válaszol (szolgáltatói hiba) |
 | `RETRY_BACKOFF_MS` | 30 / 60 / 120 / 240 perc | Ha a reset nem segített, ennyivel az előző után jön a következő (az utolsó ismétlődik) |
+| `DNS_CHECK_INTERVAL_MS` | 15 perc | Ilyen sűrűn kérdezi a router DNS-ét (gyanúnál percenként) |
+| `DNS_FAIL_WINDOW_MS` | 15 perc | Ennyi folyamatos router-DNS-hiba után reset |
 | `RESET_PULSE` | 90s | Router áramtalanítás időtartama |
 | `RESET_DELAY` | **max.** 10 perc | Várakozás a router reset után (bootolási idő) – korábban véget ér, ha a hálózat és az internet is visszajött |
 | `firstStartDelay` | **max.** 10 perc | Első indítás utáni várakozás – ugyanígy korábban is véget érhet |
@@ -819,11 +850,8 @@ Ugyanez a próba fut a router reset utáni `RESET_DELAY` alatt is – ott ráad�
 az újracsatlakozási kört is megspórolja, hiszen a kapcsolatot épp az imént
 mértük.
 
-> **Ismert korlát: a befagyott router-DNS.** Ha a routernek csak a DNS-e áll
-> le, a ping megy, tehát az eszköz élő internetet lát, és nem resetel. Az ESP
-> maga ilyenkor is működik (tartalék DNS: `1.1.1.1`), a hálózat többi eszköze
-> viszont nem. Ezt a döntést tudatosan vállaltuk: a HTTP-alapú döntés a
-> 2026-11-22-i terepi napon négy téves resetet okozott.
+> **A befagyott router-DNS-t** a ping nem látja; ezt a külön DNS-ellenőrzés
+> fogja meg (lásd „A router DNS-e”).
 
 > **Flash kímélés.** A próba semmit nem ír a fájlrendszerre, és a benne lévő
 > `WiFi.begin()` sem ír NVS-be, mert a `setup()` `WiFi.persistent(false)`-t

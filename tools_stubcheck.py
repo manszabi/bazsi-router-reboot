@@ -163,6 +163,35 @@ def main():
     allit("ESPping: _success = _expected_count - _errors (a fantom-siker oka)",
           bool(re.search(r'_success = _expected_count - _errors;', ec)), True)
 
+    stub_udp = szoveg(GYOKER / 'test/stubs/WiFiUdp.h')
+    uh = szoveg(keres(gyokerek, 'libraries/Network/src/NetworkUdp.h'))
+    uc = szoveg(keres(gyokerek, 'libraries/Network/src/NetworkUdp.cpp'))
+    allit("WiFiUdp.h: WiFiUDP = NetworkUDP",
+          bool(re.search(r'typedef NetworkUDP WiFiUDP;', szoveg(keres(gyokerek, 'libraries/WiFi/src/WiFiUdp.h')))), True)
+    for minta, nev in [(r'uint8_t begin\(uint16_t p\);', 'begin(uint16_t)'),
+                       (r'int beginPacket\(IPAddress ip, uint16_t port\);', 'beginPacket(IPAddress, uint16_t)'),
+                       (r'int endPacket\(\);', 'endPacket()'),
+                       (r'int parsePacket\(\);', 'parsePacket()'),
+                       (r'void flush\(\);', 'flush()'),
+                       (r'IPAddress remoteIP\(\);', 'remoteIP()'),
+                       (r'uint16_t remotePort\(\);', 'remotePort()')]:
+        allit(f"NetworkUDP::{nev} letezik", bool(re.search(minta, uh)), True)
+    allit("NetworkUDP::parsePacket() nem blokkol (MSG_DONTWAIT)",
+          bool(re.search(r'recvfrom\(udp_server, buf, 1460, MSG_DONTWAIT', uc)), True)
+    allit("NetworkUDP::flush() eldobja a beolvasatlan maradekot (clear)",
+          bool(re.search(r'void NetworkUDP::flush\(\) \{\s*clear\(\);', uc)), True)
+    allit("NetworkUDP::parsePacket(): amig van beolvasatlan csomag, 0-t ad",
+          bool(re.search(r'int NetworkUDP::parsePacket\(\) \{\s*if \(rx_buffer\) \{\s*return 0;', uc)), True)
+    allit("stub: van WiFiUDP flush() es remoteIP()",
+          bool(re.search(r'void flush\(\)', stub_udp) and re.search(r'IPAddress remoteIP\(\)', stub_udp)), True)
+    allit("WiFiSTAClass::dnsIP(uint8_t dns_no = 0)",
+          bool(re.search(r'IPAddress dnsIP\(uint8_t dns_no = 0\);', szoveg(keres(gyokerek, 'libraries/WiFi/src/WiFiSTA.h')))), True)
+    allit("NetworkInterface::dnsIP(): netif nelkul 0.0.0.0",
+          bool(re.search(r'IPAddress NetworkInterface::dnsIP\(uint8_t dns_no\) const \{\s*if \(_esp_netif == NULL', nic)), True)
+    ia = szoveg(keres(gyokerek, 'cores/esp32/IPAddress.h'))
+    allit("IPAddress::operator== es operator!= letezik",
+          bool(re.search(r'bool operator==\(const IPAddress &addr\) const;', ia) and re.search(r'bool operator!=\(const IPAddress &addr\) const', ia)), True)
+
     if hibak:
         print("\nA STUB-IGAZOLAS MEGBUKOTT:")
         for h in hibak:

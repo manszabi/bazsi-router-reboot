@@ -5,6 +5,7 @@
 #include <WiFi.h>
 #include <LittleFS.h>
 #include <ESPping.h>
+#include <WiFiUdp.h>
 #include <HTTPClient.h>
 #include <esp_system.h>
 
@@ -92,6 +93,13 @@ struct TimingState { uint32_t stateStart = 0; uint32_t resetPulseStart = 0;
                      uint32_t fatalStart = 0; };
 struct UIFlags { bool firstStartPrinted = false; bool firstStart = true;
                  bool blinkOn = false; };
+struct DnsState { bool checked = false; uint32_t lastCheck = 0; bool suspect = false;
+                  uint32_t suspectSince = 0; uint8_t resetEvents = 0; uint32_t lastResetAt = 0;
+                  bool skipLogged = false; };
+extern DnsState dnsState;
+size_t buildDnsQuery(uint16_t id, const char* name, uint8_t* out, size_t outSize);
+bool dnsResponseOk(const uint8_t* buf, size_t len, uint16_t id);
+bool testDnsServer(const IPAddress& server, const char* name, const char* serverName);
 extern TestState testState;
 extern TimingState timing;
 extern UIFlags uiFlags;
@@ -238,6 +246,7 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   clearRestartRequest(); endConfigWrite();
 
   testState = TestState();
+  dnsState = DnsState();
   timing = TimingState();
   uiFlags = UIFlags();
 
@@ -259,7 +268,7 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   g_httpChunked = false; g_httpChunkSize = 0; g_httpRawOverride.clear();
   g_httpAutoOk = false;
   g_httpUrls.clear();
-  wifiSim.reset(); pingSim = PingSim();
+  wifiSim.reset(); pingSim = PingSim(); dnsSim = DnsSim();
   wifiSim.willConnect = willConnect; wifiSim.latencyMs = latency;
   if (s && *s)  g_fs["/ssid.txt"] = s;
   if (p && *p)  g_fs["/pass.txt"] = p;
@@ -6873,7 +6882,7 @@ static void scAPP6() {
 
 
 // Perc szerinti kornyezet: megy-e a HTTP, a router (gateway) pingje es az internet pingje.
-struct FtPerc { bool httpOk; bool gwOk; bool inetOk; };
+struct FtPerc { bool httpOk; bool gwOk; bool inetOk; bool dnsOk = true; bool kulsoDnsOk = true; };
 template <class M>
 static std::vector<double> ftJatszik(uint32_t percek, M menetrend) {
   std::vector<double> resetek;
@@ -6888,6 +6897,8 @@ static std::vector<double> ftJatszik(uint32_t percek, M menetrend) {
       pingSim.perTarget["192.168.1.1"] = a.gwOk;
       pingSim.perTarget["1.1.1.1"] = a.inetOk;
       pingSim.perTarget["8.8.8.8"] = a.inetOk;
+      dnsSim.perServer["192.168.1.1"] = a.dnsOk ? DNS_OK : DNS_SILENT;
+      dnsSim.perServer["1.1.1.1"] = a.kulsoDnsOk ? DNS_OK : DNS_SILENT;
       loop();
       for (size_t i = nezett; i < g_log.size(); i++)
         if (g_log[i] == RELAY_HIGH) resetek.push_back((g_millis - t0) / 60000.0);
@@ -7108,6 +7119,168 @@ static void scRD14() {
   CHECK(n >= 59 && n <= 61, "percenkent egy");
 }
 
+
+static FtPerc dnsPerc(bool router, bool kulso) {
+  FtPerc p{ true, true, true }; p.dnsOk = router; p.kulsoDnsOk = kulso; return p;
+}
+
+static void scDN1() {
+  // A router DNS-e lefagy, a ping es a kulso DNS megy: reset legkesobb ~31 perc mulva.
+  ftIndit();
+  auto r = ftJatszik(45, [](uint32_t) { return dnsPerc(false, true); });
+  ftKiir("a router DNS-e hallgat", r);
+  CHECK(r.size() == 1, "egy reset");
+  CHECK(r.size() == 1 && r[0] >= 15.0 && r[0] <= 32.0, "15 perc folyamatos hiba utan, legkesobb ~31 percnel");
+  CHECK(evCount(EVC_NET_DIAG, 3) == 1, "NET DIAG 3 (a router DNS-e)");
+  CHECK(serialHas("a kulso DNS valaszol"), "a soros porton kimondja");
+}
+
+static void scDN2() {
+  // A router DNS-e es a kulso DNS is hallgat: nem a router hibaja, nincs reset.
+  ftIndit();
+  auto r = ftJatszik(120, [](uint32_t) { return dnsPerc(false, false); });
+  CHECK(r.empty(), "nincs reset");
+  CHECK(serialHas("nem a router hibaja"), "megmondja, miert");
+}
+
+static void scDN3() {
+  // 9 perces DNS-zavar (a 11-22-i leghosszabb zavar hossza): nincs reset.
+  ftIndit();
+  auto r = ftJatszik(90, [](uint32_t p) { return dnsPerc(!(p >= 10 && p < 19), true); });
+  CHECK(r.empty(), "nincs reset");
+  CHECK(serialHas("A router DNS-e ujra valaszol."), "a gyogyulast eszrevette");
+}
+
+static void scDN4() {
+  // A 11-22-i nap ujra, de a zavarok alatt a router DNS-e is hallgat: tovabbra is nulla reset.
+  ftIndit();
+  const struct { uint32_t kezd, hossz; } zavar[] = { { 10, 8 }, { 290, 9 }, { 297, 4 }, { 305, 6 } };
+  auto r = ftJatszik(360, [&zavar](uint32_t p) {
+    bool rossz = false;
+    for (auto& z : zavar) if (p >= z.kezd && p < z.kezd + z.hossz) rossz = true;
+    FtPerc f{ !rossz, true, true }; f.dnsOk = !rossz; return f; });
+  CHECK(r.empty(), "nulla router reset");
+}
+
+static void scDN5() {
+  // Tartos router-DNS hiba, amit a reset sem javit: a sajat lepcso ritkit, a ping nem nullazza.
+  ftIndit();
+  auto r = ftJatszik(24 * 60, [](uint32_t) { return dnsPerc(false, true); });
+  ftKiir("a router DNS-e egy napig hallgat", r);
+  bool ritkul = r.size() >= 2;
+  for (size_t i = 1; i < r.size(); i++) if (r[i] - r[i - 1] < 30.0) ritkul = false;
+  CHECK(ritkul, "ket reset kozott legalabb 30 perc");
+  CHECK(r.size() >= 6 && r.size() <= 10, "egy nap alatt 6-10 reset, nem 15 percenkent");
+  CHECK(deviceMode == (DeviceMode)0, "vegig figyel");
+}
+
+static void scDN6() {
+  // A DHCP nem a routert adja DNS-nek: az ellenorzes kimarad, egyszer szol.
+  ftIndit();
+  wifiSim.dhcpDns = IPAddress(8, 8, 4, 4);
+  dnsSim = DnsSim();
+  auto r = ftJatszik(120, [](uint32_t) { return dnsPerc(false, true); });
+  CHECK(r.empty(), "nincs reset");
+  CHECK(dnsSim.queries == 0, "DNS kerdest sem kuldott");
+  int n = 0;
+  for (auto& l : g_serialLog) if (l.find("nem a router") != std::string::npos) n++;
+  CHECK(n == 1, "egyszer irja ki, nem minden korben");
+}
+
+static void scDN7() {
+  // A valasz ellenorzese: csak a sajat kerdesunkre adott, hibatlan vagy NXDOMAIN valasz siker.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  const IPAddress r(192, 168, 1, 1);
+  const struct { DnsMode m; bool ok; const char* mit; } esetek[] = {
+    { DNS_OK, true, "hibatlan valasz: siker" },
+    { DNS_NXDOMAIN, true, "NXDOMAIN (pl. szuro tiltas): a DNS el" },
+    { DNS_SERVFAIL, false, "SERVFAIL: bukas" },
+    { DNS_BAD_ID, false, "mas azonosito: bukas" },
+    { DNS_WRONG_SRC, false, "mas cimrol jott valasz: bukas" },
+    { DNS_SHORT, false, "csonka valasz: bukas" },
+    { DNS_SILENT, false, "nincs valasz: bukas" },
+  };
+  for (auto& e : esetek) {
+    dnsSim = DnsSim(); dnsSim.defaultMode = e.m;
+    const uint32_t t0 = g_millis;
+    CHECK(testDnsServer(r, "connectivitycheck.gstatic.com", "router") == e.ok, e.mit);
+    if (e.m == DNS_SILENT) {
+      printf("     [info] hallgato szervernel %u ms\n", (unsigned)(g_millis - t0));
+      CHECK(g_millis - t0 >= 6000 && g_millis - t0 < 6200, "2 proba x 3 mp, nem tobb");
+      CHECK(dnsSim.queries == 2, "pontosan 2 kerdes");
+    }
+  }
+  dnsSim = DnsSim(); dnsSim.beginOk = false;
+  CHECK(!testDnsServer(r, "connectivitycheck.gstatic.com", "router"), "nyithatatlan socket: bukas");
+}
+
+static void scDN8() {
+  // A kerdes formatuma (lwIP dns.c szerint) es a hibas nevek.
+  uint8_t b[64];
+  const size_t n = buildDnsQuery(0xABCD, "a.bc", b, sizeof(b));
+  const uint8_t vart[] = { 0xAB, 0xCD, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0,
+                           1, 'a', 2, 'b', 'c', 0, 0, 1, 0, 1 };
+  CHECK(n == sizeof(vart) && memcmp(b, vart, n) == 0, "fejlec, cimkek, A tipus, IN osztaly");
+  CHECK(buildDnsQuery(1, "", b, sizeof(b)) == 0, "ures nev: 0");
+  CHECK(buildDnsQuery(1, "a..b", b, sizeof(b)) == 0, "ures cimke: 0");
+  CHECK(buildDnsQuery(1, "a.", b, sizeof(b)) == 0, "zaro pont: 0");
+  const std::string hosszu(64, 'x');
+  uint8_t nagy[200];
+  CHECK(buildDnsQuery(1, hosszu.c_str(), nagy, sizeof(nagy)) == 0, "64 betus cimke: 0");
+  CHECK(buildDnsQuery(1, std::string(63, 'x').c_str(), nagy, sizeof(nagy)) > 0, "63 betus cimke: jo");
+  CHECK(buildDnsQuery(1, "connectivitycheck.gstatic.com", b, 20) == 0, "nem fer el: 0");
+  uint8_t v[12] = { 0x12, 0x34, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0 };
+  CHECK(dnsResponseOk(v, 12, 0x1234), "jo valasz");
+  CHECK(!dnsResponseOk(v, 11, 0x1234), "12 bajtnal rovidebb: rossz");
+  v[2] = 0x01; CHECK(!dnsResponseOk(v, 12, 0x1234), "nem valasz (QR=0): rossz"); v[2] = 0x81;
+  v[2] = 0x89; CHECK(!dnsResponseOk(v, 12, 0x1234), "nem szabvanyos opcode: rossz"); v[2] = 0x81;
+  v[5] = 2; CHECK(!dnsResponseOk(v, 12, 0x1234), "ket kerdes: rossz"); v[5] = 1;
+  v[3] = 0x85; CHECK(!dnsResponseOk(v, 12, 0x1234), "REFUSED: rossz");
+}
+
+static void scDN9() {
+  // Gyogyulas utan a DNS-lepcso elolrol indul, es a gyanu ideje alatt percenkent kerdez.
+  ftIndit();
+  auto r = ftJatszik(150, [](uint32_t p) { return dnsPerc(!((p < 40) || (p >= 90 && p < 130)), true); });
+  ftKiir("ket kulon DNS-hiba", r);
+  CHECK(r.size() == 2, "ket hiba: ket reset");
+  CHECK(r.size() == 2 && r[1] - 90.0 <= 32.0, "a masodik is az elso ablakkal (nem 30 perces lepcso)");
+}
+
+static void scDN10() {
+  // Statikus IP: a router DNS-e a gateway, a kerdes oda megy, a kontroll az 1.1.1.1-re.
+  coldBoot(true, "TestNet", "pw", "192.168.1.200", "192.168.1.1");
+  setup();
+  monitorUzembe();
+  dnsSim.perServer["192.168.1.1"] = DNS_SILENT;
+  futtat(20u * 60 * 1000, [] { return dnsSim.queries >= 4; });
+  CHECK(dnsSim.servers.size() >= 4 && dnsSim.servers[0] == "192.168.1.1", "a router DNS-et kerdezi");
+  CHECK(std::find(dnsSim.servers.begin(), dnsSim.servers.end(), std::string("1.1.1.1"))
+        != dnsSim.servers.end(), "hiba eseten a kulso DNS a kontroll");
+  bool nev = true;
+  for (auto& n : dnsSim.names) if (n != "connectivitycheck.gstatic.com") nev = false;
+  CHECK(nev, "mindig ugyanazt a valos nevet kerdezi");
+}
+
+static void scDN11() {
+  // Normal uzemben 15 percenkent egy router-DNS kerdes, nem percenkent.
+  ftIndit();
+  dnsSim = DnsSim();
+  ftJatszik(120, [](uint32_t) { return dnsPerc(true, true); });
+  printf("     [info] 2 ora alatt %d DNS kerdes\n", dnsSim.queries);
+  CHECK(dnsSim.queries >= 7 && dnsSim.queries <= 9, "kb. 15 percenkent egy");
+}
+
+static void scDN12() {
+  // Ha a ping sem megy, a DNS-ellenorzes szunetel (az internetkieses szabalya dont).
+  ftIndit();
+  dnsSim = DnsSim();
+  auto r = ftJatszik(60, [](uint32_t) { FtPerc f{ false, true, false }; f.dnsOk = false; return f; });
+  CHECK(dnsSim.queries == 0, "nem kuld DNS kerdest");
+  CHECK(evCount(EVC_NET_DIAG, 3) == 0, "es DNS miatt nem resetel");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -7323,7 +7496,7 @@ static const Scenario kScenarios[] = {
   { "NV6: hianyzo, ures vagy hibas fajl nem okoz gondot", scNV6 },
   { "NV7: NTP idobelyeg a bejegyzeseken", scNV7 },
   { "NV8: feluton buko betoltes nem hagy kevert puffert", scNV8 },
-  { "NV9: mind a NEGY alvas menti a naplot, nem csak az idozitett ketto", scNV9 },
+  { "NV9: minden alvas menti a naplot, nem csak az idozitett", scNV9 },
   { "NV10: az oraszinkron MINDEN kapcsolati uton elindul", scNV10 },
   { "NV11: sikertelen NTP kommunikacio nem okoz gondot", scNV11 },
   { "NV12: megtelt fajlrendszer a naplo mentese kozben", scNV12 },
@@ -7468,6 +7641,18 @@ static const Scenario kScenarios[] = {
   { "RD12: reset utan rossz jelszo: AP mod", scRD12 },
   { "RD13: az 1.1.1.1 hallgat, a 8.8.8.8 valaszol: nincs reset", scRD13 },
   { "RD14: normal uzemben percenkent egy ellenorzes", scRD14 },
+  { "DN1: a router DNS-e hallgat, a ping megy: reset legkesobb ~31 perc", scDN1 },
+  { "DN2: a kulso DNS is hallgat: nincs reset", scDN2 },
+  { "DN3: 9 perces DNS-zavar: nincs reset", scDN3 },
+  { "DN4: a 11-22-i nap DNS-zavarral: nulla reset", scDN4 },
+  { "DN5: tartos DNS-hiba: sajat lepcso, a ping nem nullazza", scDN5 },
+  { "DN6: a DNS nem a router: az ellenorzes kimarad", scDN6 },
+  { "DN7: a valasz ellenorzese (azonosito, forras, hibakod, csonka)", scDN7 },
+  { "DN8: a kerdes formatuma es a hibas nevek", scDN8 },
+  { "DN9: gyogyulas utan a DNS-lepcso elolrol indul", scDN9 },
+  { "DN10: statikus IP: a gateway a router DNS-e, kontroll az 1.1.1.1", scDN10 },
+  { "DN11: normal uzemben 15 percenkent egy kerdes", scDN11 },
+  { "DN12: ping nelkul a DNS-ellenorzes szunetel", scDN12 },
 
   { "APP1: az elso portal-inditas egyedi, eros AP jelszot general", scAPP1 },
   { "APP2: az AP jelszo allando, indulaskor kiirva, normal uzemben nincs iras", scAPP2 },

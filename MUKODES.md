@@ -229,13 +229,42 @@ vár. Rossz jelszónál reset helyett AP mód.
 | Várakozás a bootra | **legfeljebb 10 perc**; percenként megnézi, visszajött-e a hálózat és az internet, és ha igen, azonnal véget ér |
 | Wi-Fi újracsatlakozás (ha a várakozás nem ért véget korán) | 3 próba, köztük 30 mp |
 
+### A router DNS-e
+
+Ha a ping megy, 15 percenként (`DNS_CHECK_INTERVAL_MS`) egy DNS-kérdés megy
+**közvetlenül a router 53-as portjára** (saját UDP-csomag: az lwIP
+névfeloldása átváltana a tartalékra és gyorsítótárazna).
+
+| Router DNS | Kontroll: `1.1.1.1` DNS | Mi történik |
+|---|---|---|
+| válaszol (hibakód 0 vagy 3) | – | rendben; a DNS-számláló nullázódik |
+| hallgat (vagy SERVFAIL, REFUSED) | válaszol | **gyanú**: percenként újra kérdez; **15 perc** (`DNS_FAIL_WINDOW_MS`) után reset, `NET DIAG` 3 |
+| hallgat | hallgat | nincs reset (nem a router hibája) |
+| a DHCP nem a routert adja DNS-nek | – | az ellenőrzés kimarad (egyszer kiírja) |
+
+Egy kérdés: 2 próba, 3 mp várakozás (`DNS_ATTEMPTS`, `DNS_TIMEOUT_MS`), tehát
+legfeljebb 6 mp; a kontrollal együtt 12 mp. Ha a reset nem segít, a következő
+30 perc → 1 óra → 2 óra → 4 óra múlva jön. Ennek **saját számlálója** van
+(`dnsState.resetEvents`), mert a ping közben végig sikeres, és a fő lépcsőt
+minden sikeres ping nullázza.
+
+| Helyzet (mérve) | Eredmény | Teszt |
+|---|---|---|
+| a router DNS-e lefagy | reset ~30 perc múlva (legfeljebb 15 perc a felismerésig + 15 perc kitartás) | `DN1` |
+| a külső DNS is hallgat | 0 reset | `DN2` |
+| 9 perces DNS-zavar | 0 reset | `DN3` |
+| a 11-22-i nap, a zavarok alatt a DNS is hallgat | 0 reset | `DN4` |
+| egy napig rossz router-DNS | 8 reset, köztük legalább 30 perc | `DN5` |
+
+**Nem veszi észre:** ha a router a gyorsítótárából még válaszol, de továbbítani
+már nem tud.
+
 ### A terepi napló (2026-11-22) tanulsága
 
 A régi firmware HTTP alapján döntött. Aznap nappal a HTTP válaszok 10–12 mp
 után időtúllépéssel elmaradtak, miközben az internet működött (a felhasználó
 böngészett): ez négy téves resetet adott. A ping ilyenkor válaszol, ezért az
-új szabállyal nincs reset. **Ismert korlát:** ha a routernek csak a DNS-e
-fagy le, a ping szintén megy, és az eszköz nem resetel.
+új szabállyal nincs reset. A csak DNS-fagyást a fenti DNS-ellenőrzés fogja meg.
 
 ### Statikus IP: ha a saját gateway sem válaszol
 
@@ -743,6 +772,7 @@ Ezért ezt is átvisszük – de csak a *saját* újraindulásunkon. Gombnyomás
 | `rtcRetryRounds` (2 napos ablak) | **átvisszük** | lásd fent – enélkül sosem érné el az AP módot |
 | `testState.outage`, `outageStart`, `lastResetAt` | újraszámolódik | ha volt reset, a kiesés az indulástól folytatódik (`GWH3`) |
 | `testState.endpointIndex` | elvész | csak azt mondja meg, melyik HTTP végpont jön |
+| `dnsState` (DNS-gyanú, DNS-lépcső) | elvész | a DNS-ellenőrzés újraindul; legfeljebb egy korábbi DNS-reset jön |
 | `testState.resetStep` | elvész | **nem lehet** félbehagyott pulzus: a relé impulzusa alatt nincs újraindulás |
 | `currentState`, `timing.stateStart` | elvész | **ezért van az ellenőrző ablak kizárása** – lásd fent |
 | `timing.startMillis` | újraszámolódik | a `setup()` beállítja |
@@ -897,7 +927,7 @@ Minden bejegyzés uptime bélyeget, egy eseménykódot és egy paramétert tarta
 | `WIFI LOST` | `WiFi.status()` a kiesés pillanatában (csak a kiesés-sorozat **első** tagja) |
 | `TEST FAIL` | a kiesés kezdete (kiesésenként **egyszer**); a param a bukott tartalék HTTP teszt sorszáma, 1–5 |
 | `HTTP ERROR` | a tartalék HTTP teszt kódja, közvetlenül a `TEST FAIL` után: 200/204/403/5xx változatlan (200 = jött válasz, de nem a várt szöveg); kliens hibánál 1000 + \|kód\|: **1001** = nem sikerült kapcsolódni vagy a nevet feloldani, **1011** = nem jött válasz időben, **1100** = a kérés el sem indult |
-| `NET DIAG` | a router reset oka, közvetlenül a reset előtt: 1 = a router sem válaszol (vagy nincs Wi-Fi / gateway), 2 = a router válaszol, az internet nem |
+| `NET DIAG` | a router reset oka, közvetlenül a reset előtt: 1 = a router sem válaszol (vagy nincs Wi-Fi / gateway), 2 = a router válaszol, az internet nem, 3 = az internet él, de a router DNS-e 15 perce hallgat |
 | `ROUTER RESET` | hányadik reset ebben a kiesésben |
 | `AP MODE` | 1 = nincs mentett SSID, 2 = hitelesítési hiba, 3 = letelt a 2 nap, 4 = a gateway sem érhető el |
 | `GW UNREACH` | 1 = a router reset előtt, 2 = a reset után is |
@@ -1233,7 +1263,7 @@ Fentről lefelé: minden modul csak a nála lentebb állóktól függ. A `config
 | **`sync`** | 88 | a két task közti osztott állapot | 7 függvény + `evLogMux`, `apDeadline` |
 | **`configstore`** | 230 | a négy mentett érték, a fájljaik, a LittleFS | a négy puffer, `readConfigValue()`, `readSecretValue()`, `writeConfigValue()`, `clearConfigValue()`, `staticPairValid()`, `initLittleFS()`, `filesystemReady()` |
 | **`eventlog`** | 491 | a diagnosztikai napló **és** a valós idő (NTP) | `logEvent()`, `saveEventLog()`, `loadEventLogHeader()`, `loadEventLogRange()`, `printEventLogs()`, `eventName()`, `formatEpoch()`, `ensureNtp()` |
-| **`netprobe`** | 228 | HTTP végpont-tesztek és ICMP ping | `testInternetHTTP()`, `lastHttpCode()`, `httpCodeLogParam()`, `testInternetPing()` |
+| **`netprobe`** | 331 | HTTP végpont-tesztek, ICMP ping, DNS-kérdés | `testInternetHTTP()`, `lastHttpCode()`, `httpCodeLogParam()`, `testInternetPing()`, `buildDnsQuery()`, `dnsResponseOk()`, `testDnsServer()` |
 | **`webportal`** | 594 | az AP beállító portál és az eszközönkénti AP jelszó | `startWebPortal()`, `stopWebPortal()`, `touchApDeadline()`, `announceApPassword()` |
 | **`app_hooks.h`** | 22 | amit a főmodul ad a moduloknak | `feedWatchdog()`, `resetbutton()`, `wifiresetbutton()`, `waitWithButtons()`, `printUptime()`, `diagCounters()` |
 
@@ -1257,7 +1287,7 @@ eldönti, mi következik.
 | A `loop()` ágai | `clearHealthyRunCounters()` · `handleFatalMode()` · `handleConfigMode()` · `runMonitorStateMachine()` |
 | Az állapotgép | `runCheckState()` · `runResetState()` · `handleFirstStart()` |
 | Wi-Fi | `initWiFi()` · `reconnectWifi()` · `wifiAuthFailed()` · `wifiGiveUp()` · `ensureFallbackDns()` |
-| Internet és router | `internetOk()` · `gatewayPingOk()` · `gatewayUnreachable()` · `resetWaitMs()` |
+| Internet és router | `internetOk()` · `gatewayPingOk()` · `routerDnsCheck()` · `gatewayUnreachable()` · `resetWaitMs()` · `backoffMs()` |
 | Relé | `startRouterReset()` · `reset_device()` · `routerResetAndRetry()` · `holdRelayForSleep()` |
 | A három alvás | `enterDeepSleep()` ← `retrySleep()`, `apSleep()`, `fatalSleep()`; külön úton `handleStuckButton()` |
 | Gombok | a két ISR (`onResetButtonEdge()`, `onWifiResetButtonEdge()`) · `armButtonLatches()` · `resetbutton()` · `wifiresetbutton()` · `pressedButtonNow()` · `doWifiReset()` |

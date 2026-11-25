@@ -517,7 +517,8 @@ static void sendDiagnosticLog(AsyncWebServerRequest* request) {
              "kapcsolodni vagy a nevet feloldani, 1011 = nem jott valasz "
              "idoben, 1100 = a kerest nem lehetett inditani</li>"
              "<li>NET DIAG: a router reset oka. 1 = a router sem valaszol "
-             "(vagy nincs Wi-Fi), 2 = a router valaszol, az internet nem</li>"
+             "(vagy nincs Wi-Fi), 2 = a router valaszol, az internet nem, "
+             "3 = az internet el, de a router DNS-e 15 perce hallgat</li>"
              "</ul>"));
   r->print(F("<p><i>Az uptime minden indulaskor nullarol indul, ezert a "
              "BOOT sorok jelzik az ujraindulasokat. A naplo az "

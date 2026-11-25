@@ -146,7 +146,9 @@ flowchart TD
     WDUE -->|igen| WAIT1["WAIT_STATE"] --> L
     WDUE -->|nem| RST["Router reset, NET DIAG 1<br>(5. ábra)"] --> L
     WL -->|igen| NET{"internetOk()<br>ping 1.1.1.1 → ping 8.8.8.8 →<br>HTTP a soron következő végpontra"}
-    NET -->|"bármelyik siker"| SUC["kiesés vége, resetEvents = 0<br>WAIT_STATE"] --> L
+    NET -->|"bármelyik siker"| SUC["kiesés vége, resetEvents = 0"] --> DNSC["routerDnsCheck()<br>(4b. ábra)"]
+    DNSC -->|"nincs reset"| WAIT0["WAIT_STATE"] --> L
+    DNSC -->|"reset indult"| L
     NET -->|"mind hallgat"| FST1["a kiesés első köre:<br>EV_TEST_FAIL + EV_HTTP_ERROR"]
     FST1 --> GWP{"gatewayPingOk()<br>válaszol a router?"}
     GWP --> DUE{"letelt a várakozás?<br>1. reset: 2 perc (router sem) / 15 perc (router él)<br>utána: 30 → 60 → 120 → 240 perc az előző óta"}
@@ -170,13 +172,31 @@ flowchart TD
 | 4 | `http://nmcheck.gnome.org/check_network_status.txt` | `NetworkManager is online` |
 | 5 | `http://connectivitycheck.gstatic.com/generate_204` | 204 No Content |
 
+### 4b. A router DNS-ének ellenőrzése (`routerDnsCheck()`)
+
+```mermaid
+flowchart TD
+    IN([a ping szerint van internet]) --> DUE{"esedékes?<br>15 percenként, gyanúnál percenként"}
+    DUE -->|nem| NO([nincs reset])
+    DUE -->|igen| ISR{"a DNS szerver<br>a router (gateway)?"}
+    ISR -->|nem| SKIP["kimarad (egyszer kiírja)"] --> NO
+    ISR -->|igen| Q1{"testDnsServer(router)<br>2 próba × 3 s, közvetlen UDP"}
+    Q1 -->|"válasz, hibakód 0 vagy 3"| OK["gyanú vége,<br>DNS-lépcső nullázva"] --> NO
+    Q1 -->|"hallgat / hibás válasz"| Q2{"testDnsServer(1.1.1.1)<br>kontroll"}
+    Q2 -->|hallgat| NOTR["nem a router hibája"] --> NO
+    Q2 -->|válaszol| SUS["gyanú (kezdete rögzítve)"]
+    SUS --> WIN{"letelt?<br>1. reset: 15 perc folyamatos gyanú<br>utána: 30 → 60 → 120 → 240 perc"}
+    WIN -->|nem| NO
+    WIN -->|igen| RST["dnsState.resetEvents++<br>startRouterReset(NET DIAG 3)"]
+```
+
 ---
 
 ## 5. Router reset (`startRouterReset()` és `RESET_STATE`)
 
 ```mermaid
 flowchart TD
-    IN([Letelt a várakozás, vagy elveszett a Wi-Fi]) --> D["EV_NET_DIAG<br>1 = a router sem válaszol, 2 = a router él"]
+    IN([Letelt a várakozás, elveszett a Wi-Fi, vagy a router DNS-e hallgat]) --> D["EV_NET_DIAG<br>1 = a router sem válaszol, 2 = a router él,<br>3 = a router DNS-e hallgat"]
     D --> GW1{"NET DIAG 1, statikus IP<br>és Wi-Fi kapcsolat?"}
     GW1 -->|igen| GWL["EV_GW_UNREACHABLE(1)"] --> CNT
     GW1 -->|nem| CNT["resetEvents++, lastResetAt = most<br>EV_ROUTER_RESET<br>saveEventLog() – MÉG a relé előtt"]
