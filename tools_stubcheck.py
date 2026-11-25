@@ -188,12 +188,13 @@ def main():
     allit("WiFiGenericClass::setSleep(bool) visszateresi tipusa",
           egy(wg, r'(\w+) setSleep\(bool enabled\);'),
           egy(stub_wifi, r'(\w+) setSleep\(bool enabled\)'))
-    allit("WiFiGenericClass::hostByName static int",
-          bool(re.search(r'static int hostByName\(const char \*aHostname, IPAddress &aResult\);', wg)),
-          bool(re.search(r'static int hostByName\(const char\* host, IPAddress& out\)', stub_wifi)))
-    nm = szoveg(keres(gyokerek, 'libraries/Network/src/NetworkManager.cpp'))
-    allit("NetworkManager::hostByName hibanal a (pozitiv) lwIP kodot adja",
-          bool(re.search(r'DNS Failed for[^\n]*\n\s*return err;', nm)), True)
+    allit("WiFiSTAClass::gatewayIP() visszateresi tipusa",
+          egy(szoveg(keres(gyokerek, 'libraries/WiFi/src/WiFiSTA.h')), r'(IPAddress) gatewayIP\(\);'),
+          egy(stub_wifi, r'(IPAddress) gatewayIP\(\)'))
+    nic = szoveg(keres(gyokerek, 'libraries/Network/src/NetworkInterface.cpp'))
+    allit("NetworkInterface::gatewayIP(): netif nelkul 0.0.0.0, kulonben a netif gw-je",
+          bool(re.search(r'IPAddress NetworkInterface::gatewayIP\(\) const \{\s*if \(_esp_netif == NULL\) \{\s*return IPAddress\(\);', nic))
+          and 'return IPAddress(ip.gw.addr);' in nic, True)
     ni = szoveg(keres(gyokerek, 'libraries/Network/src/NetworkInterface.h'))
     allit("NetworkInterface::dnsIP(uint8_t, IPAddress) setter",
           egy(ni, r'(\w+) dnsIP\(uint8_t dns_no, IPAddress ip\);'),

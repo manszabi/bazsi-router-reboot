@@ -46,10 +46,7 @@ struct WifiSim {
   bool sleepEnabled = true;
   int setSleepCount = 0;
 
-  bool dnsOk = true;
-  int dnsQueries = 0;
-  uint32_t dnsOkMs = 30;
-  uint32_t dnsFailMs = 14000;
+  IPAddress dhcpGw = IPAddress(192, 168, 1, 1);
 
   IPAddress staDns[3];
   int dnsSetCount = 0;
@@ -78,16 +75,6 @@ public:
     return true;
   }
 
-  static int hostByName(const char* host, IPAddress& out) {
-    wifiSim.dnsQueries++;
-    const bool ok = wifiSim.dnsOk;
-    const uint32_t eltelt = ok ? wifiSim.dnsOkMs : wifiSim.dnsFailMs;
-    g_millis += eltelt;
-    wdtAdvanceTime(eltelt);
-    simLog(std::string("hostByName(") + (host ? host : "") + (ok ? ")=ok" : ")=FAIL"));
-    out = ok ? IPAddress(13, 107, 4, 52) : IPAddress();
-    return ok ? 1 : 202;
-  }
   void mode(int m) {
     wifiSim.mode = m;
     simLog(m == WIFI_AP ? "WiFi.mode(AP)" : "WiFi.mode(STA)");
@@ -114,6 +101,11 @@ public:
     const uint32_t from = wifiSim.beginAt > wifiSim.availableFrom
                           ? wifiSim.beginAt : wifiSim.availableFrom;
     return (g_millis - from) >= wifiSim.latencyMs ? WL_CONNECTED : failNow();
+  }
+  // NetworkInterface::gatewayIP(): a netif atjaroja, kapcsolat nelkul 0.0.0.0.
+  IPAddress gatewayIP() {
+    if (status() != WL_CONNECTED) return IPAddress();
+    return wifiSim.staticApplied ? wifiSim.cfgGw : wifiSim.dhcpGw;
   }
   String SSID() { return String("TestNet"); }
   IPAddress localIP() { return wifiSim.staticApplied ? wifiSim.cfgIp : IPAddress(192,168,1,77); }

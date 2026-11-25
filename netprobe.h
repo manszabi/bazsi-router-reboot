@@ -27,6 +27,4 @@ int lastHttpCode();
 
 uint16_t httpCodeLogParam(int code);
 
-bool testDnsResolve(const char* host);
-
 bool testInternetPing(const IPAddress& target, const char* targetName);

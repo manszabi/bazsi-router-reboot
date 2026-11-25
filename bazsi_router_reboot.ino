@@ -176,31 +176,25 @@ RTC_NOINIT_ATTR uint32_t rtcWdtResets;
 
 RTC_DATA_ATTR uint32_t rtcRetryRounds = 0;
 
-RTC_DATA_ATTR uint32_t rtcInternetFailRounds = 0;
+RTC_DATA_ATTR uint32_t rtcRouterFailRounds = 0;
 
 enum NetDiag : uint8_t {
-  DIAG_NO_PATH = 1,
-  DIAG_DNS = 2,
+  DIAG_ROUTER = 1,
+  DIAG_WAN = 2,
   DIAG_HTTP = 3
 };
 
-constexpr const char* DIAG_DNS_HOSTS[] = { "www.google.com", "www.cloudflare.com" };
-
 constexpr uint32_t HOLD_OFF_MS = 10 * 60 * 1000;
-
 constexpr uint32_t CONFIRM_DELAY_MS = 3 * 60 * 1000;
+constexpr uint32_t GW_LEARN_INTERVAL_MS = 60 * 60 * 1000;
 
-constexpr uint32_t PING_OK_RESET_MIN_GAP_MS = 6UL * 60 * 60 * 1000;
-
-bool pingOkResetUsed = false;
-uint32_t pingOkResetAt = 0;
-
+RTC_DATA_ATTR bool gwAnswersPing = false;  // a router pingelhetősége: a deep sleepet túléli
+uint32_t gwLearnLast = 0;
+bool wanResetDone = false;
 bool confirmPending = false;
-
 bool holdOffActive = false;
 uint32_t holdOffMs = HOLD_OFF_MS;
-
-uint8_t lastSkipDiag = 0;
+uint8_t lastHoldDiag = 0;
 
 DiagCounters diagCounters() {
   return DiagCounters{ rtcWdtResets, MAX_WDT_RESETS, rtcRetryRounds, MAX_RETRY_ROUNDS };
@@ -214,7 +208,7 @@ RTC_NOINIT_ATTR uint8_t  rtcCarryResetEvents;
 
 RTC_NOINIT_ATTR uint32_t rtcCarryRetryRounds;
 
-RTC_NOINIT_ATTR uint32_t rtcCarryInternetFailRounds;
+RTC_NOINIT_ATTR uint32_t rtcCarryRouterFailRounds;
 
 RTC_NOINIT_ATTR uint32_t rtcCarryDiagState;
 
@@ -230,7 +224,7 @@ bool waitWithButtonsUntilOnline(uint32_t duration);
 bool onlineProbe();
 bool onlineProbeDue(uint32_t& lastProbe, uint32_t now);
 void lockConfigBeforeShutdown();
-void internetFailSleep();
+void routerFailSleep();
 void fatalSleep();
 void apSleep();
 void feedWatchdog();
@@ -251,6 +245,7 @@ bool initWiFi();
 bool reconnectWifi();
 bool gatewayUnreachable();
 uint8_t diagnoseNetwork();
+void learnGatewayPing(uint32_t now);
 void ensureFallbackDns();
 
 void enterFatal(const char* reason) {
@@ -273,7 +268,7 @@ void initHeapState() {
     rtcHeapRestarts = 0;
     rtcCarryResetEvents = CARRY_NONE;
     rtcCarryRetryRounds = 0;
-    rtcCarryInternetFailRounds = 0;
+    rtcCarryRouterFailRounds = 0;
     rtcCarryDiagState = 0;
   }
 }
@@ -285,11 +280,10 @@ void applyHeapCarry() {
   testState.resetEvents = rtcCarryResetEvents;
 
   rtcRetryRounds = rtcCarryRetryRounds;
-  rtcInternetFailRounds = rtcCarryInternetFailRounds;
-  pingOkResetUsed = (rtcCarryDiagState & 1u) != 0;
-
-  pingOkResetAt = millis() - ((rtcCarryDiagState >> 16) & 0xFFFFu) * 60000UL;
-  lastSkipDiag = (uint8_t)((rtcCarryDiagState >> 8) & 0xFFu);
+  rtcRouterFailRounds = rtcCarryRouterFailRounds;
+  wanResetDone = (rtcCarryDiagState & 1u) != 0;
+  gwAnswersPing = (rtcCarryDiagState & 2u) != 0;
+  lastHoldDiag = (uint8_t)((rtcCarryDiagState >> 8) & 0xFFu);
   rtcCarryResetEvents = CARRY_NONE;
   printUptime();
   Serial.print("Heap miatti ujraindulas utan folytatjuk: router reset szamlalo = ");
@@ -359,12 +353,9 @@ void checkHeap(uint32_t now) {
 
   rtcCarryResetEvents = testState.resetEvents;
   rtcCarryRetryRounds = rtcRetryRounds;
-  rtcCarryInternetFailRounds = rtcInternetFailRounds;
-  {
-    const uint32_t elteltPerc = pingOkResetUsed ? (millis() - pingOkResetAt) / 60000UL : 0;
-    rtcCarryDiagState = (pingOkResetUsed ? 1u : 0u) | ((uint32_t)lastSkipDiag << 8)
-                        | ((elteltPerc > 0xFFFFu ? 0xFFFFu : elteltPerc) << 16);
-  }
+  rtcCarryRouterFailRounds = rtcRouterFailRounds;
+  rtcCarryDiagState = (wanResetDone ? 1u : 0u) | (gwAnswersPing ? 2u : 0u)
+                      | ((uint32_t)lastHoldDiag << 8);
   rtcHeapRestarts++;
   logEvent(EV_HEAP_RESTART, (uint16_t)(szabad / 1024));
 
@@ -773,10 +764,10 @@ bool reset_device() {
   if (testState.resetStep == 0) {
     testState.resetEvents++;
 
-    const uint8_t korlat = (rtcInternetFailRounds == 0) ? maxfailureEvents
+    const uint8_t korlat = (rtcRouterFailRounds == 0) ? maxfailureEvents
                                                         : maxfailureEventsAfterSleep;
     if (testState.resetEvents >= korlat) {
-      internetFailSleep();
+      routerFailSleep();
     }
     logEvent(EV_ROUTER_RESET, (uint16_t)testState.resetEvents);
 
@@ -856,18 +847,16 @@ void enterDeepSleep(uint64_t timerUs) {
   esp_deep_sleep_start();
 }
 
-void internetFailSleep() {
+void routerFailSleep() {
   printUptime();
   Serial.print("A router ujrainditasa ");
-
   Serial.print(testState.resetEvents - 1);
-  Serial.println(" alkalommal sem hozta vissza az internetet.");
-
-  if (rtcInternetFailRounds < 0xFFFFFFFFUL) {
-    rtcInternetFailRounds++;
+  Serial.println(" alkalommal sem segitett.");
+  if (rtcRouterFailRounds < 0xFFFFFFFFUL) {
+    rtcRouterFailRounds++;
   }
-  Serial.print("Tartos internetkieses kor: ");
-  Serial.print(rtcInternetFailRounds);
+  Serial.print("Sikertelen reset-kor: ");
+  Serial.print(rtcRouterFailRounds);
   Serial.print(" - a kovetkezo korben ");
   Serial.print(maxfailureEventsAfterSleep - 1);
   Serial.println(" router reset jar, aztan ujra alvas.");
@@ -1098,46 +1087,54 @@ bool reconnectWifi() {
   return false;
 }
 
+// Csak statikus IP-nél: a beállított gateway pingelhetősége (rossz cím -> AP mód).
 bool gatewayUnreachable() {
-  if (!staticConfigActive || gatewayStr[0] == '\0') {
+  if (!staticConfigActive) {
     return false;
   }
-  IPAddress gw;
-
-  if (!gw.fromString(gatewayStr) || !isUsableIPv4(gw)) {
-    return false;
-  }
-  return !testInternetPing(gw, "sajat gateway");
+  const IPAddress gw = WiFi.gatewayIP();
+  return (uint32_t)gw == 0 || !testInternetPing(gw, "sajat gateway");
 }
 
+// Hol a hiba: a routerben, a szolgáltatónál, vagy csak a HTTP tesztekben?
 uint8_t diagnoseNetwork() {
   printUptime();
-  Serial.println("Diagnozis a router reset elott...");
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("Diagnozis: nincs Wi-Fi kapcsolat.");
-    return DIAG_NO_PATH;
+    Serial.println("Diagnozis: nincs Wi-Fi kapcsolat - router hiba.");
+    return DIAG_ROUTER;
   }
-  const IPAddress target(PROBE_PING_IP[0], PROBE_PING_IP[1],
-                         PROBE_PING_IP[2], PROBE_PING_IP[3]);
-  if (!testInternetPing(target, "internet, diagnozis")) {
-    Serial.println("Diagnozis: az internet IP-n sem erheto el - valodi kieses.");
-    return DIAG_NO_PATH;
+  const IPAddress gw = WiFi.gatewayIP();
+  if ((uint32_t)gw == 0) {
+    Serial.println("Diagnozis: nincs gateway cim - router hiba.");
+    return DIAG_ROUTER;
   }
-  bool dnsOk = false;
-  for (const char* host : DIAG_DNS_HOSTS) {
-    feedWatchdog();
-    if (testDnsResolve(host)) {
-      dnsOk = true;
-      break;
-    }
+  if (testInternetPing(gw, "router")) {
+    gwAnswersPing = true;
+  } else if (gwAnswersPing || staticConfigActive) {
+    Serial.println("Diagnozis: a router nem valaszol - router hiba.");
+    return DIAG_ROUTER;
+  } else {
+    Serial.println("Diagnozis: a router pingre nem valaszol, ezt a jelet nem hasznaljuk.");
   }
-  if (!dnsOk) {
-    Serial.println("Diagnozis: a ping megy, de a nevfeloldas (DNS) nem mukodik.");
-    return DIAG_DNS;
+  const IPAddress inet(PROBE_PING_IP[0], PROBE_PING_IP[1], PROBE_PING_IP[2], PROBE_PING_IP[3]);
+  if (!testInternetPing(inet, "internet")) {
+    Serial.println("Diagnozis: a router el, az internet nem - szolgaltatoi hiba.");
+    return DIAG_WAN;
   }
-
-  Serial.println("Diagnozis: ping es DNS rendben - csak a HTTP tesztek buknak (szuro?).");
+  Serial.println("Diagnozis: router es internet rendben - csak a HTTP tesztek buknak.");
   return DIAG_HTTP;
+}
+
+// A router pingelhetőségének megtanulása működő hálózatnál (óránként legfeljebb egyszer).
+void learnGatewayPing(uint32_t now) {
+  if (gwAnswersPing || now - gwLearnLast < GW_LEARN_INTERVAL_MS) {
+    return;
+  }
+  gwLearnLast = now;
+  const IPAddress gw = WiFi.gatewayIP();
+  if ((uint32_t)gw != 0 && testInternetPing(gw, "router")) {
+    gwAnswersPing = true;
+  }
 }
 
 void ensureFallbackDns() {
@@ -1208,6 +1205,7 @@ void setup() {
   timing.startMillis = millis();
 
   firstStartProbeLast = timing.startMillis - ONLINE_PROBE_INTERVAL_MS;
+  gwLearnLast = timing.startMillis - GW_LEARN_INTERVAL_MS;
 
   heapLogLast = timing.startMillis - HEAP_LOG_INTERVAL_MS;
 
@@ -1333,10 +1331,6 @@ void setup() {
 }
 
 void clearHealthyRunCounters(uint32_t currentMillis) {
-  if (pingOkResetUsed && currentMillis - pingOkResetAt >= PING_OK_RESET_MIN_GAP_MS) {
-    pingOkResetUsed = false;
-  }
-
   if (rtcWdtResets != 0 && currentMillis - timing.startMillis >= WDT_COUNTER_CLEAR_MS) {
     rtcWdtResets = 0;
     printUptime();
@@ -1436,17 +1430,17 @@ void runTestingState() {
     testState.cycleIndex = 0;
     testState.failedCount = 0;
     testState.resetEvents = 0;
-
-    rtcInternetFailRounds = 0;
+    rtcRouterFailRounds = 0;
+    wanResetDone = false;
     confirmPending = false;
-    lastSkipDiag = 0;
+    lastHoldDiag = 0;
     currentState = SUCCESS_STATE;
+    learnGatewayPing(millis());
   } else {
     testState.failedCount++;
 
-    if (testState.failedCount == 1 && lastSkipDiag == 0 && !confirmPending) {
+    if (testState.failedCount == 1 && lastHoldDiag == 0 && !confirmPending) {
       logEvent(EV_TEST_FAIL, (uint16_t)(testState.cycleIndex + 1));
-
       logEvent(EV_HTTP_ERROR, httpCodeLogParam(lastHttpCode()));
     }
     printUptime();
@@ -1479,55 +1473,44 @@ void runFailureState(uint32_t currentMillis) {
   if (testState.cycleIndex > RESET_TRIGGER_CYCLE) {
     if (!uiFlags.resetPrinted) {
       const uint8_t diag = diagnoseNetwork();
-      if (diag != DIAG_NO_PATH) {
-        if (!confirmPending) {
-          confirmPending = true;
-          printUptime();
-          Serial.print("Az internet IP-n elerheto - megerosito kor: ");
-          Serial.print(CONFIRM_DELAY_MS / 60000);
-          Serial.println(" perc mulva ujra tesztelunk, csak utana jon reset.");
-          if (diag != lastSkipDiag) {
-            logEvent(EV_NET_DIAG, diag);
-          }
-          holdOffActive = true;
-          holdOffMs = CONFIRM_DELAY_MS;
-          timing.stateStart = millis();
-          return;
-        }
+      // A router él: csak HTTP hiba, vagy a szolgáltatói kiesés már kapott egy resetet.
+      if (diag == DIAG_HTTP || (diag == DIAG_WAN && wanResetDone)) {
         confirmPending = false;
-
-        const bool engedett = !pingOkResetUsed
-                              || millis() - pingOkResetAt >= PING_OK_RESET_MIN_GAP_MS;
-        if (!engedett) {
-          printUptime();
-          Serial.println("A router reset ELMARAD: az internet IP-n elerheto, es");
-          Serial.print(PING_OK_RESET_MIN_GAP_MS / 3600000UL);
-          Serial.println(" oran belul mar volt ilyen ujrainditas. A hiba nem a routerben van.");
-          Serial.print(HOLD_OFF_MS / 60000);
-          Serial.println(" perc mulva ujra tesztelunk.");
-          if (diag != lastSkipDiag) {
-            logEvent(EV_RESET_SKIPPED, diag);
-            lastSkipDiag = diag;
-          }
-          holdOffActive = true;
-          holdOffMs = HOLD_OFF_MS;
-          timing.stateStart = millis();
-          return;
+        printUptime();
+        Serial.print("A router reset ELMARAD (a router el). Ujra teszt ");
+        Serial.print(HOLD_OFF_MS / 60000);
+        Serial.println(" perc mulva.");
+        if (diag != lastHoldDiag) {
+          logEvent(EV_NET_DIAG, diag);
+          logEvent(EV_RESET_SKIPPED, diag);
+          lastHoldDiag = diag;
         }
-
-        pingOkResetUsed = true;
-        pingOkResetAt = millis();
-        Serial.println("A megerosito kor is bukott - router reset.");
-      } else {
-        confirmPending = false;
-        lastSkipDiag = 0;
-        logEvent(EV_NET_DIAG, diag);
+        holdOffActive = true;
+        holdOffMs = HOLD_OFF_MS;
+        timing.stateStart = millis();
+        return;
       }
-
-      if (gatewayUnreachable()) {
+      // Szolgáltatói kiesés: csak akkor reset, ha a megerősítő kör után is tart.
+      if (diag == DIAG_WAN && !confirmPending) {
+        confirmPending = true;
+        printUptime();
+        Serial.print("Szolgaltatoi kieses - megerosito kor: ujra teszt ");
+        Serial.print(CONFIRM_DELAY_MS / 60000);
+        Serial.println(" perc mulva.");
+        holdOffActive = true;
+        holdOffMs = CONFIRM_DELAY_MS;
+        timing.stateStart = millis();
+        return;
+      }
+      confirmPending = false;
+      lastHoldDiag = 0;
+      if (diag == DIAG_WAN) {
+        wanResetDone = true;
+      }
+      logEvent(EV_NET_DIAG, diag);
+      if (diag == DIAG_ROUTER && staticConfigActive && WiFi.status() == WL_CONNECTED) {
         printUptime();
         Serial.println("A sajat gateway sem elerheto - lehet, hogy rossz a statikus IP.");
-        Serial.println("Kap a router egy esélyt: ujrainditas, aztan ujra ellenorizzuk.");
         logEvent(EV_GW_UNREACHABLE, 1);
       }
       printUptime();

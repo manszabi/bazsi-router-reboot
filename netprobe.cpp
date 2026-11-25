@@ -23,19 +23,6 @@ uint16_t httpCodeLogParam(int code) {
   return (abszolut > 64535) ? (uint16_t)65535 : (uint16_t)(1000 + abszolut);
 }
 
-bool testDnsResolve(const char* host) {
-  IPAddress cim;
-  const int eredmeny = WiFi.hostByName(host, cim);
-  const bool ok = (eredmeny == 1) && ((uint32_t)cim != 0);
-  if (!ok) {
-    Serial.print("DNS hiba: ");
-    Serial.print(host);
-    Serial.print(" nem oldhato fel (kod ");
-    Serial.print(eredmeny);
-    Serial.println(")");
-  }
-  return ok;
-}
 static_assert(PROBE_POLL_MS == 10, "a gomb-pollozas uteme a fomodullal egyezzen");
 
 static int readByteBounded(WiFiClient& stream, uint32_t timeoutMs) {
