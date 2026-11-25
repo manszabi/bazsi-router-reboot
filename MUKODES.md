@@ -278,8 +278,8 @@ A 2-es és 3-as esetben két további fék van:
 
 1. **Megerősítő kör** (`CONFIRM_DELAY_MS`, 3 perc): az első teljesen bukott
    sorozat után nincs reset, hanem 3 perc múlva még egyszer lefut mind az öt
-   teszt. Csak ha az is mind bukik, jön a reset. Mérve (`FT-R1a`
-   – a határ-teszt a következő commitban –, 10 mp-es válasz-időtúllépésekkel, mint a terepi naplóban):
+   teszt. Csak ha az is mind bukik, jön a reset. Mérve (`FT-R1a`, `FT-HATAR`
+   – 10 mp-es válasz-időtúllépésekkel, mint a terepi naplóban):
    **legfeljebb 4 perces zavar nem okoz resetet, 5 perces már igen** – ekkor a
    reset a megerősítő kör kezdetétől ~4,6 perccel jön (`FT-R1b`).
 2. **Legfeljebb 6 óránként egy** ilyen reset (`PING_OK_RESET_MIN_GAP_MS`).

@@ -9406,6 +9406,20 @@ static void scFT_R3b() {
   CHECK(!serialHas("A router reset ELMARAD"), "a 6 oras korlat nem tiltotta");
 }
 
+static void scFT_HATAR() {
+  // A ZAVARHOSSZ HATARA (ping megy, 10 mp-es valasz-idotullepesek, mint a
+  // terepi naplo 2026-11-22-i napjan): legfeljebb 4 perc -> nincs reset,
+  // 5 perctol van. Ket kezdopont, hogy a SUCCESS_DELAY fazisa ne szamitson.
+  for (uint32_t kezd : { 10u, 11u }) {
+    ftIndit();
+    auto r4 = ftJatszik(40, [kezd](uint32_t p) { return FtPerc{ !(p >= kezd && p < kezd + 4), true }; });
+    CHECK(r4.empty(), kezd == 10 ? "4 perces zavar: nincs reset (a)" : "4 perces zavar: nincs reset (b)");
+    ftIndit();
+    auto r5 = ftJatszik(40, [kezd](uint32_t p) { return FtPerc{ !(p >= kezd && p < kezd + 5), true }; });
+    CHECK(r5.size() == 1, kezd == 10 ? "5 perces zavar: egy reset (a)" : "5 perces zavar: egy reset (b)");
+  }
+}
+
 static void scFT_EXP() {
   // A 6 ORAS JELZO LEJARATA - az atfordulas ellen.
   ftIndit();
@@ -9800,6 +9814,7 @@ static const Scenario kScenarios[] = {
   { "FT-R2: 2. szabaly - 6 oranként egy, siker sem nullazza", scFT_R2 },
   { "FT-R3: 3. szabaly - valodi kieses: azonnal, a 6 oras ablakban is", scFT_R3 },
   { "FT-R3b: 3. szabaly - a megerosito kor kozben eltuno ping", scFT_R3b },
+  { "FT-HATAR: 4 perces zavar nem, 5 perces igen", scFT_HATAR },
   { "FT-EXP: a 6 oras jelzo lejar (atfordulas ellen)", scFT_EXP },
   { "FT-CARRY: heap-ujraindulas utan a 6 oras ablak folytatodik", scFT_CARRY },
   { "ND5: a DNS-diagnozis ket fuggetlen nevvel", scND5 },
