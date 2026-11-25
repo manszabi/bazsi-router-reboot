@@ -37,7 +37,7 @@ stateDiagram-v2
     Setup --> StuckSleep: beragadt gomb
     MODE_MONITOR --> MODE_CONFIG: rossz jelszó / 33 kör letelt / rossz statikus IP
     MODE_MONITOR --> RetrySleep: hálózat nincs (1 óra, max 33 kör)
-    MODE_MONITOR --> NetFailSleep: 4 (később 1) router reset után sincs internet (1 óra)
+    MODE_MONITOR --> NetFailSleep: 4 (később 1) router reset sem segített (1 óra)
     MODE_MONITOR --> Restart: tartósan kritikus heap (önkéntes újraindulás)
     MODE_MONITOR --> MODE_FATAL: 3x heap-újraindulás sem segített
     MODE_CONFIG --> ApSleep: 5 perc tétlenség (csak gombbal ébred)
@@ -143,20 +143,24 @@ flowchart TD
     SM -->|TESTING_STATE| WL{"WiFi.status()<br>== WL_CONNECTED?"}
     WL -->|nem| RC{"EV_WIFI_LOST (csak a sorozat 1.)<br>reconnectWifi()"}
     RC -->|siker| L
-    RC -->|sikertelen| FRC["cycleIndex = 4<br>FAILURE_STATE<br>(azonnali reset ág)"] --> L
-    WL -->|igen| TEST["HTTP teszt a cycleIndex szerinti<br>végponton (lásd táblázat)<br>rtcRetryRounds = 0"]
-    TEST -->|siker| SUC["SUCCESS_STATE<br>cycleIndex, failedCount,<br>resetEvents = 0"] --> L
-    TEST -->|sikertelen| FAI["failedCount++<br>EV_TEST_FAIL (csak az 1.)<br>FAILURE_STATE"] --> L
+    RC -->|"rossz jelszó"| GUP["wifiGiveUp() → AP mód"] --> L
+    RC -->|"egyéb sikertelen"| FRC["cycleIndex = 4<br>FAILURE_STATE<br>(diagnózis: router hiba)"] --> L
+    WL -->|igen| TEST["ensureFallbackDns()<br>HTTP teszt a cycleIndex szerinti<br>végponton (lásd táblázat)<br>rtcRetryRounds = 0"]
+    TEST -->|siker| SUC["SUCCESS_STATE<br>számlálók és diagnózis-jelzők nullázva<br>learnGatewayPing() (óránként max 1x)"] --> L
+    TEST -->|sikertelen| FAI["failedCount++<br>EV_TEST_FAIL + EV_HTTP_ERROR (csak az 1.)<br>FAILURE_STATE"] --> L
 
     SM -->|SUCCESS_STATE| SD{"60 s letelt?<br>(SUCCESS_DELAY)"}
     SD -->|igen| BT["TESTING_STATE"] --> L
     SD -->|nem| L
 
-    SM -->|FAILURE_STATE| CI{"cycleIndex > 3?<br>(mind az 5 végpont elbukott)"}
+    SM -->|FAILURE_STATE| HO{"várakozás fut?<br>(holdOffActive)"}
+    HO -->|"igen, letelt"| BT2["cycleIndex = 0<br>TESTING_STATE"] --> L
+    HO -->|"igen, még nem"| L
+    HO -->|nem| CI{"cycleIndex > 3?<br>(mind az 5 végpont elbukott)"}
     CI -->|nem| PD{"12 s letelt?<br>(PROBE_DELAY)"}
     PD -->|igen| NEXT["cycleIndex++<br>TESTING_STATE"] --> L
     PD -->|nem| L
-    CI -->|igen| RESET["Router reset szekvencia<br>(5. ábra)"] --> L
+    CI -->|igen| RESET["Diagnózis és router reset<br>(5. ábra)"] --> L
 ```
 
 ### Teszt végpontok (ciklikus eszkaláció)
@@ -170,29 +174,34 @@ flowchart TD
 | 5 | 4 | `http://connectivitycheck.gstatic.com/generate_204` | 204 No Content |
 
 A soros port és a `/log` oldal **1-től** számol, a `cycleIndex` változó viszont
-0-alapú marad – ahhoz kötődik a végpontválasztó `if`-lánc és a
-`RESET_TRIGGER_CYCLE` küszöb is.
+0-alapú marad (a `TEST_ENDPOINTS[]` indexe és a `RESET_TRIGGER_CYCLE` küszöb).
 
-Router reset csak akkor indul, ha **mind az öt** üzemeltető végpontja elbukott
+A diagnózis csak akkor indul, ha **mind az öt** üzemeltető végpontja elbukott
 – egyetlen szolgáltató kiesése így sosem látszik internetkimaradásnak.
 
 ---
 
-## 5. Router reset szekvencia (FAILURE, `cycleIndex > 3`)
+## 5. Diagnózis és router reset (FAILURE, `cycleIndex > 3`)
 
 ```mermaid
 flowchart TD
-    IN([Mind az 5 végpont elbukott]) --> DG{"diagnoseNetwork()<br>Wi-Fi? ping 1.1.1.1? DNS?<br>EV_NET_DIAG(1/2/3)"}
-    DG -->|"1: nincs út (valódi kiesés)"| GW1
-    DG -->|"2/3: IP-n elérhető,<br>első bukott sorozat"| CONF["MEGERŐSÍTŐ KÖR<br>3 perc múlva még egyszer<br>mind az 5 teszt (CONFIRM_DELAY_MS)"]
-    DG -->|"2/3: a megerősítő kör is bukott,<br>6 órán belül nem volt ilyen reset"| GW1
-    DG -->|"2/3: a megerősítő kör is bukott,<br>de 6 órán belül már volt ilyen reset"| SKIP["EV_RESET_SKIPPED<br>NINCS reset, 10 perc múlva<br>újra teszt (HOLD_OFF_MS)"]
-    GW1{"Statikus IP aktív ÉS<br>a saját gateway sem pingelhető?"}
-    GW1 -->|igen| GWL["EV_GW_UNREACHABLE(1)<br>a router kap még egy esélyt"]
-    GW1 -->|nem| CNT
-    GWL --> CNT["resetEvents++"]
-    CNT --> MX{"resetEvents >= 5?<br>(az első alvás után: >= 2)"}
-    MX -->|"igen (már 4, ill. 1 reset volt)"| NFS["internetFailSleep()<br>EV_SLEEP(2)<br>deep sleep 1 óra"]
+    IN([Mind az 5 végpont elbukott]) --> W{"Van Wi-Fi és<br>gateway-cím?"}
+    W -->|nem| R1["NET DIAG 1: router hiba"]
+    W -->|igen| GP{"A router (gateway)<br>válaszol pingre?"}
+    GP -->|igen| GWOK["gwAnswersPing = true"] --> IP
+    GP -->|"nem, és ismert, hogy szokott<br>(vagy statikus IP)"| R1
+    GP -->|"nem, és sosem válaszolt"| IP{"Az internet (1.1.1.1)<br>válaszol pingre?"}
+    IP -->|igen| H3["NET DIAG 3: csak a HTTP bukik"] --> SKIP
+    IP -->|nem| WAN{"A kiesés kapott már resetet?<br>(wanResetDone)"}
+    WAN -->|igen| SKIP["EV_RESET_SKIPPED (a sorozat 1.)<br>NINCS reset, 10 perc múlva<br>újra teszt (HOLD_OFF_MS)"]
+    WAN -->|nem| CF{"Megerősítő kör<br>lefutott már?"}
+    CF -->|nem| CONF["3 perc múlva még egyszer<br>mind az 5 teszt (CONFIRM_DELAY_MS)"]
+    CF -->|"igen, és újra bukott"| R2["NET DIAG 2: szolgáltatói hiba<br>wanResetDone = true"] --> GW1
+    R1 --> GW1{"Statikus IP és<br>Wi-Fi kapcsolat?"}
+    GW1 -->|igen| GWL["EV_GW_UNREACHABLE(1)"] --> CNT
+    GW1 -->|nem| CNT["resetEvents++"]
+    CNT --> MX{"resetEvents >= 5?<br>(egy sikertelen kör után: >= 2)"}
+    MX -->|"igen (már 4, ill. 1 reset volt)"| NFS["routerFailSleep()<br>EV_SLEEP(2)<br>deep sleep 1 óra"]
     MX -->|nem| LOGSV["EV_ROUTER_RESET<br>saveEventLog() – a napló kiírása<br>a fájlrendszerre, MÉG a relé előtt"]
     LOGSV --> P1["Relé = HIGH: router áram nélkül<br>90 s (RESET_PULSE)<br>státusz LED VILLOG 2 Hz, Wi-Fi LED sötét"]
     P1 --> P2["Relé = LOW: router bootol<br>max 10 perc várakozás (RESET_DELAY)<br>gombok + watchdog élnek"]
@@ -295,7 +304,7 @@ flowchart TD
 | Alvás | Kiváltó ok | Napló | Timer | Reset gomb ébreszt? |
 |---|---|---|:---:|:---:|
 | `retrySleep()` | a hálózat nem látszik, kör < 33 | `EV_SLEEP(1)` | 1 óra | igen |
-| `internetFailSleep()` | 4 router reset után sincs internet (az első ilyen alvás után körönként már 1 reset után) | `EV_SLEEP(2)` | 1 óra | igen |
+| `routerFailSleep()` | 4 router reset sem segített (egy ilyen alvás után ébredésenként már 1 reset után) | `EV_SLEEP(2)` | 1 óra | igen |
 | `apSleep()` | AP portál 5 perc tétlenség | `EV_SLEEP(3)` | – | igen |
 | `fatalSleep()` | végzetes hiba, 5 perc villogás után | `EV_SLEEP(4)` | – | igen |
 | beragadt gomb\* | reset/wifireset LOW induláskor **és 3 s után is** | `EV_STUCK_BUTTON` | 60 s | **nem** (szándékosan) |
@@ -314,8 +323,10 @@ memóriában túléli:
 | diagnosztikai napló (`rtcEvMagic`, `rtcEvNext`, `rtcEvents`) | `RTC_NOINIT` | deep sleep, watchdog reset, reset gomb – csak az áramtalanítás törli |
 | `rtcSavedEvNext` (a legutóbbi fájlmentés pozíciója) | `RTC_NOINIT` | ugyanaz |
 | watchdog számláló (`rtcWdtMagic`, `rtcWdtResets`) | `RTC_NOINIT` | ugyanaz |
-| heap-újraindulások és az átvitel (`rtcHeapMagic`, `rtcHeapRestarts`, `rtcCarryResetEvents`, `rtcCarryRetryRounds`) | `RTC_NOINIT` | ugyanaz |
+| heap-újraindulások és az átvitel (`rtcHeapMagic`, `rtcHeapRestarts`, `rtcCarryResetEvents`, `rtcCarryRetryRounds`, `rtcCarryRouterFailRounds`, `rtcCarryDiagState`) | `RTC_NOINIT` | ugyanaz |
 | `rtcRetryRounds` (a 2 napos ablak) | **`RTC_DATA`** | csak a deep sleepet – bekapcsolásra és **szoftveres resetre nullázódik** |
+| `rtcRouterFailRounds` (sikertelen reset-körök) | **`RTC_DATA`** | ugyanaz |
+| `gwAnswersPing` (a router pingelhetősége) | **`RTC_DATA`** | ugyanaz |
 
 > A `rtcRetryRounds` eltérő tárolása szándékos: a **felhasználói** beavatkozás
 > (reset gomb) tiszta 2 napos ablakot ad. A heap miatti **önkéntes**
