@@ -1,4 +1,4 @@
-// A WiFi és a kliens-stream modellje (core 3.3.11 viselkedés szerint).
+// A WiFi és a kliens-stream modellje (core 4.0.0 viselkedés szerint; a stubcheck igazolja).
 #pragma once
 #include <Arduino.h>
 #define WL_CONNECTED 3
@@ -47,6 +47,8 @@ struct WifiSim {
   bool sleepEnabled = true;
 
   IPAddress dhcpGw = IPAddress(192, 168, 1, 1);
+  // A DHCP által adott első DNS (alapból a router).
+  IPAddress dhcpDns = IPAddress(192, 168, 1, 1);
 
   IPAddress staDns[3];
   int dnsSetCount = 0;
@@ -106,6 +108,13 @@ public:
   IPAddress gatewayIP() {
     if (status() != WL_CONNECTED) return IPAddress();
     return wifiSim.staticApplied ? wifiSim.cfgGw : wifiSim.dhcpGw;
+  }
+  // NetworkInterface::dnsIP(): a netif DNS-e, kapcsolat nélkül 0.0.0.0.
+  IPAddress dnsIP(uint8_t n = 0) {
+    if (status() != WL_CONNECTED || n > 2) return IPAddress();
+    if (n == 0) return wifiSim.staticApplied ? wifiSim.cfgDns1 : wifiSim.dhcpDns;
+    if (n == 1) return wifiSim.staticApplied ? wifiSim.cfgDns2 : IPAddress();
+    return wifiSim.staDns[2];
   }
   String SSID() { return String("TestNet"); }
   IPAddress localIP() { return wifiSim.staticApplied ? wifiSim.cfgIp : IPAddress(192,168,1,77); }

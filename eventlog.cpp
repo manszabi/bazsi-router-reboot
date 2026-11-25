@@ -1,5 +1,6 @@
 #include "eventlog.h"
 
+#include <esp_attr.h>
 #include <LittleFS.h>
 #include <WiFi.h>
 #include <string.h>
@@ -131,7 +132,6 @@ const char* eventName(uint8_t code) {
     case EV_HEAP_RESTART: return "HEAP RESTART";
     case EV_HTTP_ERROR: return "HTTP ERROR";
     case EV_NET_DIAG: return "NET DIAG";
-    case EV_RESET_SKIPPED: return "RESET SKIPPED";
     default: return "?";
   }
 }

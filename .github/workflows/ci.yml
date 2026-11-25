@@ -13,12 +13,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Viselkedés (IDF 5 + 6), ASan/UBSan, lefedettség, lint, figyelmeztetések, verem.
+  # Viselkedés (IDF 6 + 5), ASan/UBSan, lefedettség, lint, figyelmeztetések, verem.
   host-tests:
-    name: Host tesztek (IDF 5 + IDF 6, ASan/UBSan, lefedettseg)
+    name: Host tesztek (IDF 6 + IDF 5, ASan/UBSan, lefedettseg)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Fordito es gcov verzio
         run: g++ --version && gcov --version | head -1
@@ -49,10 +49,10 @@ jobs:
 
   # Időre fut: 40 mp célpontonként.
   fuzz:
-    name: Fuzzing (libFuzzer, negy bemenet-elemzo celpont)
+    name: Fuzzing (libFuzzer, ot bemenet-elemzo celpont)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: A clang sanitizer/fuzzer futtatokornyezete
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends clang libclang-rt-dev
@@ -66,23 +66,23 @@ jobs:
     name: ESP32-C3 firmware forditas (XIAO)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: arduino/setup-arduino-cli@v2
 
-      - name: ESP32 core telepitese (3.3.11)
+      - name: ESP32 core telepitese (4.0.0)
         run: |
           arduino-cli config init
           arduino-cli config add board_manager.additional_urls \
             https://espressif.github.io/arduino-esp32/package_esp32_index.json
           arduino-cli core update-index
-          arduino-cli core install esp32:esp32@3.3.11
+          arduino-cli core install esp32:esp32@4.0.0
 
       - name: Konyvtarak telepitese (pinelt verziok)
         run: |
           arduino-cli config set library.enable_unsafe_install true
-          arduino-cli lib install --git-url https://github.com/ESP32Async/AsyncTCP.git#v3.5.0
-          arduino-cli lib install --git-url https://github.com/ESP32Async/ESPAsyncWebServer.git#v3.12.0
+          arduino-cli lib install --git-url https://github.com/ESP32Async/AsyncTCP.git#v3.6.1
+          arduino-cli lib install --git-url https://github.com/ESP32Async/ESPAsyncWebServer.git#v3.12.1
           arduino-cli lib install ESPping@1.0.5
 
       - name: A sketch mappa osszeallitasa
@@ -96,9 +96,11 @@ jobs:
 
       - name: Forditas
         run: |
+          # A méretkorlát a saját partíciós tábla app partíciója (0x370000), nem a menüé.
           arduino-cli compile \
             --fqbn esp32:esp32:XIAO_ESP32C3 \
             --warnings all \
+            --build-property upload.maximum_size=3604480 \
             sketchdir/bazsi_router_reboot
 
       - name: A stubok igazolasa a valodi konyvtarak ellen

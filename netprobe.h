@@ -28,3 +28,17 @@ int lastHttpCode();
 uint16_t httpCodeLogParam(int code);
 
 bool testInternetPing(const IPAddress& target, const char* targetName);
+
+// DNS: egyetlen A-kérdés közvetlenül egy szerverre (tartalék és gyorsítótár nélkül).
+constexpr uint16_t DNS_PORT        = 53;
+constexpr uint8_t  DNS_ATTEMPTS    = 2;
+constexpr uint32_t DNS_TIMEOUT_MS  = 3000;
+constexpr size_t   DNS_MAX_PACKET  = 512;
+
+// A kérdés a bufferbe; 0 = nem fér el vagy hibás a név.
+size_t buildDnsQuery(uint16_t id, const char* name, uint8_t* out, size_t outSize);
+
+// Él-e a szerver: válasz a kérdésünkre, hibakód 0 (rendben) vagy 3 (nincs ilyen név).
+bool dnsResponseOk(const uint8_t* buf, size_t len, uint16_t id);
+
+bool testDnsServer(const IPAddress& server, const char* name, const char* serverName);

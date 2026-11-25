@@ -5,6 +5,7 @@
 #include <WiFi.h>
 #include <LittleFS.h>
 #include <ESPping.h>
+#include <WiFiUdp.h>
 #include <esp_task_wdt.h>
 #include <esp_system.h>
 #include <ESPAsyncWebServer.h>
@@ -65,6 +66,7 @@ std::vector<std::string> g_httpUrls;
 bool g_httpChunked = false;
 size_t g_httpChunkSize = 0;
 std::string g_httpRawOverride;
+bool g_httpAutoOk = false;
 uint32_t g_httpOkMs = 200;
 uint32_t g_httpFailMs = 15000;
 bool     g_wdtEnabled = false;
@@ -154,6 +156,7 @@ std::map<std::string, ArRequestHandlerFunction> g_handlers;
 PingClass Ping;
 WifiSim wifiSim;
 PingSim pingSim;
+DnsSim dnsSim;
 
 void simLog(const std::string& s) { g_log.push_back(s); }
 
