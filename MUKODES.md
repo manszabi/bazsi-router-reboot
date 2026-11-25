@@ -973,10 +973,9 @@ végzetes**: az RTC naplóban minden ott marad, a program dolga fontosabb – cs
 szólunk róla. (Mérve: `NV2`.)
 
 > A flasht nem koptatjuk feleslegesen: ha a legutóbbi mentés óta nem történt
-> esemény, nem írunk újra. **Mérve**: működő internet mellett 66,9 perc alatt
-> **nulla** flash-írás; halott internetnél egy újrapróbálkozási kör 10 írás
-> (5 mentés × 2: 4 router reset + 1 alvás előtt), tehát a 33 körös felső
-> korlát ~330 írás. (`WEAR`.) A LittleFS a tényleges törlési ciklusszámot nem
+> esemény, nem írunk újra. **Mérve**: működő internet mellett 67,9 perc alatt
+> **nulla** flash-írás; egy napig halott internetnél 18 írás (9 reset, resetenként
+> egy mentés × 2 írás). (`WEAR`.) A LittleFS a tényleges törlési ciklusszámot nem
 > adja vissza az Arduino API-n, tehát a kopás közvetlenül nem olvasható ki –
 > az írások száma az egyetlen mérhető közelítés. A `wifireset` gomb a négy konfigurációs fájlt törli,
 > a naplófájlt **szándékosan nem**: nem tartalmaz konfigurációs értéket, és épp

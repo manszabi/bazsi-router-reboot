@@ -71,7 +71,6 @@ extern uint32_t rtcCarryRetryRounds;
 extern int g_randomCalls;
 extern uint32_t g_randomState;
 extern uint64_t g_efuseMac;
-bool internetOk();
 bool gatewayPingOk();
 void ensureFallbackDns();
 int lastHttpCode();
@@ -270,8 +269,7 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   deviceMode = (DeviceMode)0; currentState = (State)0;
 }
 
-static const uint8_t EVC_TEST_FAIL = 4, EVC_ROUTER_RESET = 5, EVC_AP_MODE = 6,
-                     EVC_HTTP_ERROR = 15, EVC_NET_DIAG = 16;
+static const uint8_t EVC_TEST_FAIL = 4, EVC_HTTP_ERROR = 15, EVC_NET_DIAG = 16;
 
 static int evCount(uint8_t code, int param = -1) {
   const uint32_t db = (rtcEvNext < 32) ? rtcEvNext : 32;
@@ -6607,20 +6605,20 @@ static void scWEAR() {
   g_httpCode = 503; g_httpBody = "nincs net"; pingSim.ok = false;
   g_wearWrites = 0; g_onFsWrite = wearHook;
   try { setup(); } catch (...) {}
+  const uint32_t t0 = g_millis;
   guard = 0;
-  int alvasok = 0;
-  try { while (++guard < 400000) loop(); }
-  catch (DeepSleepSignal&) { alvasok++; }
-  catch (RestartSignal&) {}
+  int resetek = 0; size_t nezett = 0;
+  try {
+    while (++guard < 20000000 && g_millis - t0 < 24u * 3600 * 1000) {
+      loop();
+      for (size_t i = nezett; i < g_log.size(); i++) if (g_log[i] == RELAY_HIGH) resetek++;
+      nezett = g_log.size();
+    }
+  } catch (...) {}
   g_onFsWrite = nullptr;
-  printf("     [info] halott internet: egy korben %d flash-iras (%d alvas)\n",
-         g_wearWrites, alvasok);
-  CHECK(g_wearWrites > 0, "a hibauton viszont menti a naplot");
-
-  CHECK(g_wearWrites <= 12,
-        "korlatosan: 5 mentes x 2 iras (4 router reset + 1 alvas)");
-  printf("     [info] ez 33 ujraprobalkozasi korre (2 nap) legfeljebb %d iras\n",
-         g_wearWrites * 33);
+  printf("     [info] halott internet egy napig: %d flash-iras, %d reset\n", g_wearWrites, resetek);
+  CHECK(resetek > 0 && g_wearWrites > 0, "a hibauton viszont menti a naplot");
+  CHECK(g_wearWrites <= 2 * resetek + 2, "korlatosan: resetenkent egy mentes (2 iras)");
 }
 
 

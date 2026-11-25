@@ -1124,8 +1124,8 @@ fájlrendszer csatolása bukott meg. Flashre csak a **négy mentési ponton**
 íródik ki (router reset, AP mód, alvás, heap-újraindulás előtt).
 
 Ennek a következménye mérve: **működő internet mellett az eszköz 67,9 perc
-alatt nulla flash-írást végez.** Wi-Fi nélkül egy újrapróbálkozási kör
-6 írás (3 mentés × 2), tehát a 33 körös felső korlát ~200 írás – egy 512 KB-os
+alatt nulla flash-írást végez.** Egy napig halott internetnél 18 írás (9 reset
+× 1 mentés × 2 írás) – egy 512 KB-os
 partíción, ahol a LittleFS másolás-írással szórja a blokkokat, ez nem éri el a
 NOR flash élettartamát. (A `WEAR` teszt ezt méri; a LittleFS a tényleges
 törlési ciklusszámot nem adja vissza, tehát a kopás közvetlenül nem olvasható.)
