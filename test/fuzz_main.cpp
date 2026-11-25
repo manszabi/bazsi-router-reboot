@@ -93,7 +93,8 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   if (loadEventLogHeader(fej)) {
     EventEntry puffer[EVLOG_SIZE];
     memset(puffer, 0, sizeof(puffer));
-    loadEventLogEntries(fej, puffer);
+    const uint16_t db = fej.count < EVLOG_SIZE ? fej.count : EVLOG_SIZE;
+    loadEventLogRange(fej, 0, db, puffer);
   }
 
   EvFileHeader hamis;
@@ -101,7 +102,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   if (size >= 2) { hamis.count = (uint8_t)data[0]; hamis.version = data[1]; }
   EventEntry puffer2[EVLOG_SIZE];
   memset(puffer2, 0, sizeof(puffer2));
-  loadEventLogEntries(hamis, puffer2);
+  loadEventLogRange(hamis, 0, hamis.count < EVLOG_SIZE ? hamis.count : EVLOG_SIZE, puffer2);
   return 0;
 }
 

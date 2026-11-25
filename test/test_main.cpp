@@ -155,7 +155,6 @@ static_assert(sizeof(EvFileHeader) == 20, "az EvFileHeader merete a fajlformatum
 const char* eventName(uint8_t code);
 bool saveEventLog(const char* reason);
 bool loadEventLogHeader(EvFileHeader& fej);
-bool loadEventLogEntries(const EvFileHeader& fej, EventEntry* ki);
 bool loadEventLogRange(const EvFileHeader& fej, uint32_t tol, uint16_t db, EventEntry* ki);
 void printEventLogs();
 void checkWatchdogResets();
@@ -2207,6 +2206,9 @@ static void scL6() {
   logEvent((EventCode)12, 1);
   logEvent((EventCode)13, 24);
   logEvent((EventCode)14, 11);
+  logEvent((EventCode)15, 1011);
+  logEvent((EventCode)16, 2);
+  logEvent((EventCode)17, 3);
 
   AsyncWebServerRequest req;
   g_handlers["/log#1"](&req);
@@ -2214,10 +2216,11 @@ static void scL6() {
   const char* want[] = { ">BOOT<", ">WIFI OK<", ">WIFI LOST<", ">TEST FAIL<",
                          ">ROUTER RESET<", ">AP MODE<", ">CONFIG SAVED<",
                          ">SLEEP<", ">FATAL<", ">WDT RESET<", ">STUCK BUTTON<",
-                         ">GW UNREACH<", ">LOW HEAP<", ">HEAP RESTART<" };
+                         ">GW UNREACH<", ">LOW HEAP<", ">HEAP RESTART<",
+                         ">HTTP ERROR<", ">NET DIAG<", ">RESET SKIPPED<" };
   bool all = true;
   for (const char* w : want) if (b.find(w) == std::string::npos) { all = false; printf("     [info] hianyzik: %s\n", w); }
-  CHECK(all, "MIND a 14 esemenykod olvashato cimket kap");
+  CHECK(all, "MIND a 17 esemenykod olvashato cimket kap");
   CHECK(b.find(">?<") == std::string::npos, "nincs ismeretlen kod a naplóban");
 }
 
@@ -5767,16 +5770,16 @@ static void scCOV2() {
   };
 
   fej.count = 0;
-  CHECK(!loadEventLogEntries(fej, puffer), "count = 0 -> elutasitva");
+  CHECK(!loadEventLogRange(fej, 0, fej.count, puffer), "count = 0 -> elutasitva");
   fej.count = 0xFFFF;
-  CHECK(!loadEventLogEntries(fej, puffer), "count = 65535 -> elutasitva");
+  CHECK(!loadEventLogRange(fej, 0, fej.count, puffer), "count = 65535 -> elutasitva");
   CHECK(orszemEp(), "es NEM irt tul: a puffer mogotti orszemek epek (65535)");
   fej.count = EVFILE_SIZE_C + 1;
-  CHECK(!loadEventLogEntries(fej, puffer), "count = fajlgyuru+1 -> elutasitva");
+  CHECK(!loadEventLogRange(fej, 0, fej.count, puffer), "count = fajlgyuru+1 -> elutasitva");
   CHECK(orszemEp(), "es NEM irt tul (fajlgyuru+1) - EGY elemmel sem");
 
   fej.count = EVFILE_SIZE_C;
-  loadEventLogEntries(fej, puffer);
+  loadEventLogRange(fej, 0, fej.count, puffer);
   CHECK(orszemEp(), "a megengedett maximumnal sem lep at a hataron");
 }
 
@@ -5795,7 +5798,7 @@ static void scCOV3() {
   g_fs.erase("/evlog.bin");
   EventEntry puffer[EVLOG_SIZE_C];
   memset(puffer, 0, sizeof(puffer));
-  CHECK(!loadEventLogEntries(fej, puffer),
+  CHECK(!loadEventLogRange(fej, 0, fej.count, puffer),
         "a ket olvasas kozott eltunt fajl nem omlik ossze, csak hamisat ad");
 }
 
@@ -6330,7 +6333,7 @@ static void scNV20() {
   CHECK(loadEventLogHeader(f1), "a mentett fajl olvashato");
   CHECK(f1.count == EVLOG_SIZE_C, "32 bejegyzes van benne (a gyuru tele volt)");
   EventEntry regi[EVLOG_SIZE_C];
-  CHECK(loadEventLogEntries(f1, regi), "es a bejegyzesek beolvashatok");
+  CHECK(loadEventLogRange(f1, 0, f1.count, regi), "es a bejegyzesek beolvashatok");
 
   const std::string flash = g_fs["/evlog.bin"];
   coldBoot(false, "", "", "", "");
@@ -6352,7 +6355,7 @@ static void scNV20() {
         "a fajl EGGYEL nott - a tortenet megmaradt, az uj hozzafuzodott");
 
   EventEntry most[EVFILE_SIZE_C];
-  CHECK(loadEventLogEntries(f2, most), "az uj fajl beolvashato");
+  CHECK(loadEventLogRange(f2, 0, f2.count, most), "az uj fajl beolvashato");
   bool egyezik = true;
   for (uint16_t i = 0; i < f1.count; i++) {
     if (memcmp(&most[i], &regi[i], sizeof(EventEntry)) != 0) egyezik = false;
@@ -6380,7 +6383,7 @@ static void scNV21() {
          (unsigned)fej.count);
   CHECK(fej.count == EVFILE_SIZE_C, "a fajl a gyuru meretenel megall (128)");
   EventEntry e[EVFILE_SIZE_C];
-  CHECK(loadEventLogEntries(fej, e), "beolvashato");
+  CHECK(loadEventLogRange(fej, 0, fej.count, e), "beolvashato");
 
   CHECK(e[EVFILE_SIZE_C - 1].param == 5 * 100 + (EVLOG_SIZE_C - 1),
         "a legvegen a LEGFRISSEBB esemeny all");
@@ -6532,7 +6535,7 @@ static void scCOV7() {
   setFilesystemReady(true);
   g_fsReadable = false;
   CHECK(!loadEventLogRange(fej, 0, 1, ki), "nem nyithato fajl -> hamis");
-  CHECK(!loadEventLogEntries(fej, ki), "a teljes betoltes is hamisat ad");
+  CHECK(!loadEventLogRange(fej, 0, fej.count, ki), "a teljes betoltes is hamisat ad");
   g_fsReadable = true;
 
   g_fsShortRead = true; g_fsShortReadSkip = 1;
@@ -6541,7 +6544,7 @@ static void scCOV7() {
   g_fsShortRead = false; g_fsShortReadSkip = 0;
 
   g_fsShortRead = true; g_fsShortReadSkip = 0;
-  CHECK(!loadEventLogEntries(fej, ki), "a fejlec olvasasa elbukik -> hamis");
+  CHECK(!loadEventLogRange(fej, 0, fej.count, ki), "a fejlec olvasasa elbukik -> hamis");
   g_fsShortRead = false;
 }
 
@@ -7251,6 +7254,16 @@ static void scRD8() {
   CHECK(evCount(EVC_NET_DIAG, 1) >= 1, "router hibakent (NET DIAG 1)");
 }
 
+static void scRD10() {
+  // Wi-Fi van, de a DHCP nem adott gateway-t (0.0.0.0): router hiba, nem pingel vakon.
+  ftIndit();
+  wifiSim.dhcpGw = IPAddress();
+  pingSim.targets.clear();
+  CHECK(diagnoseNetwork() == 1, "gateway nelkul: router hiba");
+  CHECK(serialHas("nincs gateway cim"), "kimondja, miert");
+  CHECK(pingSim.targets.empty(), "0.0.0.0-t nem pingel");
+}
+
 static void scRD9() {
   // Heap-ujraindulas: a szolgaltatoi reset jelzo, a router-pingelhetoseg es a hold sorozat atjon.
   coldBoot(true, "TestNet", "pw", "", "");
@@ -7642,6 +7655,7 @@ static const Scenario kScenarios[] = {
   { "RD7: kulon szolgaltatoi kiesesek kulon resetet kapnak", scRD7 },
   { "RD8: a megerosito kor alatt elhalo router: azonnali reset", scRD8 },
   { "RD9: heap-ujraindulas: a diagnozis allapota atjon", scRD9 },
+  { "RD10: Wi-Fi van, gateway nincs: router hiba", scRD10 },
 
   { "APP1: az elso portal-inditas egyedi, eros AP jelszot general", scAPP1 },
   { "APP2: az AP jelszo allando, indulaskor kiirva, normal uzemben nincs iras", scAPP2 },

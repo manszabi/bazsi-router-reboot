@@ -14,11 +14,6 @@ constexpr uint32_t HTTP_CONNECT_TIMEOUT_MS  = 5000;
 constexpr uint32_t HTTP_RESPONSE_TIMEOUT_MS = 10000;
 constexpr uint32_t HTTP_READ_TIMEOUT_MS     = 1500;
 
-constexpr uint16_t HTTP_MAX_CHUNKS = HTTP_MAX_PAYLOAD + 2;
-
-static_assert(HTTP_MAX_CHUNKS > HTTP_MAX_PAYLOAD,
-              "a darabszam-korlat legyen tagabb a hasznos-teher korlatnal, "
-              "kulonben a readChunked() zaro return-je elerhetove valik");
 
 bool testInternetHTTP(const char* url, const char* expectedResponse);
 

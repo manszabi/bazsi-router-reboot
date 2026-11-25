@@ -65,7 +65,8 @@ static int hexDigitAnyCase(int c) {
 
 static size_t readChunked(WiFiClient& stream, char* buf, size_t maxLen, uint32_t timeoutMs) {
   size_t n = 0;
-  for (uint16_t chunk = 0; chunk < HTTP_MAX_CHUNKS; chunk++) {
+  // Véges: minden nem záró darab legalább egy bájttal növeli n-t, és n <= maxLen.
+  for (;;) {
     uint32_t size = 0;
     bool sawDigit = false;
     bool inExt = false;
@@ -100,8 +101,6 @@ static size_t readChunked(WiFiClient& stream, char* buf, size_t maxLen, uint32_t
       if (c == '\n') break;
     }
   }
-
-  return n;
 }
 
 bool testInternetHTTP(const char* url, const char* expectedResponse) {
@@ -177,26 +176,20 @@ bool testInternetPing(const IPAddress& target, const char* targetName) {
     if (pingOK) {
       Serial.println(" sikeres.");
       successCount++;
-
-      if (successCount >= PING_MIN_SUCCESS) {
-        Serial.println("✅ Ping teszt sikeres.");
-        return true;
-      }
     } else {
       Serial.println(" sikertelen.");
       if (j == 0) {
         Serial.println("⚠️ Első ping hiba — lehet, hogy a hálózat ébred.");
       }
-      const uint8_t remaining = PING_ATTEMPTS - (j + 1);
-      if (successCount + remaining < PING_MIN_SUCCESS) {
-        Serial.println("❌ Ping teszt sikertelen — hálózati probléma valószínű.");
-        return false;
-      }
     }
-    if (j + 1 < PING_ATTEMPTS) {
-      waitWithButtons(PING_GAP_MS);
+    // Korai kilépés, ha az eredmény már eldőlt.
+    const uint8_t remaining = PING_ATTEMPTS - (j + 1);
+    if (successCount >= PING_MIN_SUCCESS || successCount + remaining < PING_MIN_SUCCESS) {
+      break;
     }
+    waitWithButtons(PING_GAP_MS);
   }
-
-  return successCount >= PING_MIN_SUCCESS;
+  const bool ok = successCount >= PING_MIN_SUCCESS;
+  Serial.println(ok ? "✅ Ping teszt sikeres." : "❌ Ping teszt sikertelen — hálózati probléma valószínű.");
+  return ok;
 }

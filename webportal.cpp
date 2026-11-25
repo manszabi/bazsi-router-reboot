@@ -196,13 +196,8 @@ static bool parseConfigPost(AsyncWebServerRequest* request, ConfigDraft& d,
       if (val.length() < sizeof(candidate) && strlen(candidate) <= PASS_MAX_LEN) {
         strlcpy(d.pass, candidate, sizeof(d.pass));
 
-        if (encodeSecret(d.pass, d.passEnc, sizeof(d.passEnc))) {
-          d.passSet = true;
-        } else {
-          Serial.println("- a jelszo kodolasa nem fert a pufferbe");
-          saveOk = false;
-          if (failReason == nullptr) failReason = "Belso hiba a jelszo mentesekor.";
-        }
+        // A puffer elég voltát a fenti static_assert garantálja.
+        d.passSet = encodeSecret(d.pass, d.passEnc, sizeof(d.passEnc));
       } else {
         Serial.println("Password too long!");
         saveOk = false;

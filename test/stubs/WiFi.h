@@ -44,7 +44,6 @@ struct WifiSim {
   std::string lastPass, lastSsid;
 
   bool sleepEnabled = true;
-  int setSleepCount = 0;
 
   IPAddress dhcpGw = IPAddress(192, 168, 1, 1);
 
@@ -70,7 +69,7 @@ public:
   STAClassStub STA;
 
   bool setSleep(bool enabled) {
-    wifiSim.sleepEnabled = enabled; wifiSim.setSleepCount++;
+    wifiSim.sleepEnabled = enabled;
     simLog(enabled ? "WiFi.setSleep(true)" : "WiFi.setSleep(false)");
     return true;
   }

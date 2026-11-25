@@ -87,7 +87,6 @@ bool saveEventLog(const char* reason);
 
 bool loadEventLogHeader(EvFileHeader& fej);
 
-bool loadEventLogEntries(const EvFileHeader& fej, EventEntry* ki);
 
 bool loadEventLogRange(const EvFileHeader& fej, uint32_t tol, uint16_t db,
                        EventEntry* ki);

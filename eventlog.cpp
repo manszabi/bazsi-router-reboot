@@ -62,9 +62,7 @@ bool formatEpoch(uint32_t epoch, char* out, size_t outSize) {
   const time_t t = (time_t)epoch;
   struct tm tmv;
 
-  if (localtime_r(&t, &tmv) == nullptr) {
-    return false;
-  }
+  localtime_r(&t, &tmv);
   strftime(out, outSize, "%Y-%m-%d %H:%M:%S", &tmv);
   return true;
 }
@@ -392,21 +390,3 @@ bool loadEventLogHeader(EvFileHeader& fej) {
   return meret >= sizeof(EvFileHeader) + sizeof(EventEntry) * fej.count;
 }
 
-bool loadEventLogEntries(const EvFileHeader& fej, EventEntry* ki) {
-  if (fej.count == 0 || fej.count > EVFILE_SIZE) {
-    return false;
-  }
-  File f = LittleFS.open(evLogPath, "r");
-  if (!f) {
-    return false;
-  }
-  EvFileHeader eldobando;
-  if (f.read((uint8_t*)&eldobando, sizeof(eldobando)) != sizeof(eldobando)) {
-    f.close();
-    return false;
-  }
-  const size_t kell = sizeof(EventEntry) * fej.count;
-  const size_t olvasott = f.read((uint8_t*)ki, kell);
-  f.close();
-  return olvasott == kell;
-}

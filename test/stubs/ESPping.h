@@ -7,7 +7,6 @@
 struct PingSim {
   bool ok = true;
   int calls = 0;
-  std::string lastTarget;
   std::vector<std::string> targets;
   std::map<std::string, bool> perTarget;
 
@@ -24,9 +23,9 @@ public:
   bool ping(IPAddress t, int16_t n = 5) {
     (void)n;
     pingSim.calls++;
-    pingSim.lastTarget = t.str();
-    pingSim.targets.push_back(pingSim.lastTarget);
-    auto it = pingSim.perTarget.find(pingSim.lastTarget);
+    const std::string cel = t.str();
+    pingSim.targets.push_back(cel);
+    auto it = pingSim.perTarget.find(cel);
     const bool ok = it != pingSim.perTarget.end() ? it->second : pingSim.ok;
     const uint32_t eltelt = ok ? pingSim.okMs : pingSim.failMs;
     g_millis += eltelt;
