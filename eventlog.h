@@ -2,7 +2,6 @@
 #pragma once
 
 #include <Arduino.h>
-#include <esp_attr.h>
 #include <esp_system.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -40,9 +39,9 @@ struct EventEntry {
 constexpr uint8_t EVLOG_SIZE = 32;
 
 constexpr uint32_t EVLOG_MAGIC = 0x42415A4DUL;
-extern RTC_NOINIT_ATTR uint32_t rtcEvMagic;
-extern RTC_NOINIT_ATTR uint32_t rtcEvNext;
-extern RTC_NOINIT_ATTR EventEntry rtcEvents[EVLOG_SIZE];
+extern uint32_t rtcEvMagic;
+extern uint32_t rtcEvNext;
+extern EventEntry rtcEvents[EVLOG_SIZE];
 
 // A fájl gyűrűje: a legrégebbieket ejti.
 constexpr uint16_t EVFILE_SIZE = 128;
@@ -60,7 +59,7 @@ struct EvFileHeader {
   uint32_t savedUptime;
 };
 
-extern RTC_NOINIT_ATTR uint32_t rtcSavedEvNext;
+extern uint32_t rtcSavedEvNext;
 
 // Valós idő a naplóhoz; a deep sleepet túléli (RTC óra).
 constexpr char NTP_SERVER[] = "hu.pool.ntp.org";

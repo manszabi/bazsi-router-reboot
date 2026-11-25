@@ -96,9 +96,11 @@ jobs:
 
       - name: Forditas
         run: |
+          # A méretkorlát a saját partíciós tábla app partíciója (0x370000), nem a menüé.
           arduino-cli compile \
             --fqbn esp32:esp32:XIAO_ESP32C3 \
             --warnings all \
+            --build-property upload.maximum_size=3604480 \
             sketchdir/bazsi_router_reboot
 
       - name: A stubok igazolasa a valodi konyvtarak ellen

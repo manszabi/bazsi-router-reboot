@@ -405,6 +405,10 @@ Teljes függvénylistával és a határhúzás indoklásával:
    > A CI ugyanezt teszi a fordítás előtt.
 5. Másold a `partitions_custom.csv`-t a sketch mappájába **`partitions.csv`**
    néven – a core a sketch melletti `partitions.csv`-t automatikusan használja.
+   A fordítás végén kiírt méretkorlát viszont a `Partition Scheme` menüé
+   (alapból 1,25 MB); a program ~1,2 MB. Ha egyszer fölé nőne, válaszd a
+   **Huge APP** sémát: az csak a korlátot emeli, a partíciós tábla a sketch
+   melletti `partitions.csv` marad (a core azt másolja utoljára).
    (Ha inkább gyári sémát választanál a `Tools` → `Partition Scheme` menüből,
    olyat válassz, amiben van SPIFFS/LittleFS partíció.)
 6. Töltsd fel a sketch-et az ESP-re

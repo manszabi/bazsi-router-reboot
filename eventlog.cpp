@@ -1,5 +1,6 @@
 #include "eventlog.h"
 
+#include <esp_attr.h>
 #include <LittleFS.h>
 #include <WiFi.h>
 #include <string.h>
