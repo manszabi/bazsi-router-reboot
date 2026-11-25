@@ -7132,6 +7132,8 @@ static void scDN1() {
   CHECK(r.size() == 1, "egy reset");
   CHECK(r.size() == 1 && r[0] >= 15.0 && r[0] <= 32.0, "15 perc folyamatos hiba utan, legkesobb ~31 percnel");
   CHECK(evCount(EVC_NET_DIAG, 3) == 1, "NET DIAG 3 (a router DNS-e)");
+  CHECK(dnsState.lastResetAt - dnsState.suspectSince >= 15u * 60 * 1000,
+        "a reset legalabb 15 perccel a gyanu kezdete utan jott");
   CHECK(serialHas("a kulso DNS valaszol"), "a soros porton kimondja");
 }
 
@@ -7246,6 +7248,8 @@ static void scDN9() {
   ftKiir("ket kulon DNS-hiba", r);
   CHECK(r.size() == 2, "ket hiba: ket reset");
   CHECK(r.size() == 2 && r[1] - 90.0 <= 32.0, "a masodik is az elso ablakkal (nem 30 perces lepcso)");
+  CHECK(dnsState.lastResetAt - dnsState.suspectSince >= 15u * 60 * 1000,
+        "a gyogyulas nullazta a lepcsot: ujra kivarja a 15 percet");
 }
 
 static void scDN10() {
