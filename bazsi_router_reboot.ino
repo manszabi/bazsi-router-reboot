@@ -520,7 +520,9 @@ RTC_NOINIT_ATTR uint32_t rtcCarryInternetFailRounds;
 // ...es a reset elotti diagnozis emleke (pingOkResetUsed, lastSkipDiag). A
 // kihagyott-reset varakozas alatt a checkHeap() ujraindithat (ott nincs
 // kizaras); enelkul a router egy FELESLEGES ujabb resetet kapna, holott mar
-// kiderult, hogy nem segit. 0. bit: pingOkResetUsed, 8-15. bit: lastSkipDiag.
+// kiderult, hogy nem segit. 0. bit: pingOkResetUsed, 8-15. bit: lastSkipDiag,
+// 16-31. bit: a ping melletti reset OTA eltelt PERCEK (a 6 oras ablak
+// folytatasahoz - a millis() az ujraindulassal nullarol indul).
 RTC_NOINIT_ATTR uint32_t rtcCarryDiagState;
 
 // ---------------------------------------------------------------------------
@@ -653,9 +655,11 @@ void applyHeapCarry() {
   rtcRetryRounds = rtcCarryRetryRounds;
   rtcInternetFailRounds = rtcCarryInternetFailRounds;
   pingOkResetUsed = (rtcCarryDiagState & 1u) != 0;
-  // A millis() az újraindulással nulláról indul: a 6 órás ablakot
-  // óvatosan, az újraindulástól számítjuk újra.
-  pingOkResetAt = millis();
+  // A 6 órás ablak FOLYTATÓDIK, nem kezdődik elölről: az időbélyeget az
+  // átvitt eltelt időből számoljuk vissza. Az előjel nélküli kivonás
+  // körbefordulása itt szándékos - a különbség (millis() - pingOkResetAt)
+  // így pontosan az eltelt idő lesz.
+  pingOkResetAt = millis() - ((rtcCarryDiagState >> 16) & 0xFFFFu) * 60000UL;
   lastSkipDiag = (uint8_t)((rtcCarryDiagState >> 8) & 0xFFu);
   rtcCarryResetEvents = CARRY_NONE;
   printUptime();
@@ -800,7 +804,12 @@ void checkHeap(uint32_t now) {
   rtcCarryResetEvents = testState.resetEvents;
   rtcCarryRetryRounds = rtcRetryRounds;
   rtcCarryInternetFailRounds = rtcInternetFailRounds;
-  rtcCarryDiagState = (pingOkResetUsed ? 1u : 0u) | ((uint32_t)lastSkipDiag << 8);
+  {
+    // Az eltelt percek: a 6 órás ablakban legfeljebb 360, belefér 16 bitbe.
+    const uint32_t elteltPerc = pingOkResetUsed ? (millis() - pingOkResetAt) / 60000UL : 0;
+    rtcCarryDiagState = (pingOkResetUsed ? 1u : 0u) | ((uint32_t)lastSkipDiag << 8)
+                        | ((elteltPerc > 0xFFFFu ? 0xFFFFu : elteltPerc) << 16);
+  }
   rtcHeapRestarts++;
   logEvent(EV_HEAP_RESTART, (uint16_t)(szabad / 1024));
 
@@ -2310,6 +2319,14 @@ void setup() {
 // Egy ora hibatlan futas utan a korabbi hibasorozatok mar nem szamitanak.
 // MINDEN uzemmodban fut, a mod-elagazas ELOTT - lasd a benti indoklast.
 void clearHealthyRunCounters(uint32_t currentMillis) {
+  // A "ping mellett mar volt reset" jelzo LEJARATA. Minden korben nezzuk,
+  // nem csak a dontesnel: a millis() 49,7 naponta korbefordul, es egy hetekig
+  // erintetlen idobelyeggel a kulonbseg ujra kicsinek latszana - egy regi
+  // reset hamisan letiltana egy jogos ujat. Igy a jelzo legkesobb a 6 ora
+  // leteltekor (egy loop() koron belul) torlodik, atfordulas elott.
+  if (pingOkResetUsed && currentMillis - pingOkResetAt >= PING_OK_RESET_MIN_GAP_MS) {
+    pingOkResetUsed = false;
+  }
   // Hibátlanul lefutott egy óra: a watchdog számláló nullázható.
   //
   // MIÉRT ITT, a mód-elágazás ELŐTT? Mert a "hibátlan működés" nem üzemmód

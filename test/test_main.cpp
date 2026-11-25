@@ -9282,6 +9282,166 @@ static void scSLP4() {
   CHECK(!pingOkResetUsed && lastSkipDiag == 0, "felhasznalas utan nem el tovabb");
 }
 
+
+// ===========================================================================
+// FUNKCIOTESZT: A HAROM RESET-SZABALY, VALOS SZIMULALT IDOBEN
+//   1. megerosito kor  2. 6 oras korlat  3. valodi kiesesnel azonnal
+// ===========================================================================
+
+// A kornyezet percre bontott menetrendje: minden percre megmondja, megy-e a
+// HTTP es a ping. A forgatokonyv a menetrend szerint jatssza le az eszkozt, es
+// feljegyzi a rele-impulzusok idopontjat (perc).
+struct FtPerc { bool httpOk; bool pingOk; };
+template <class M>
+static std::vector<double> ftJatszik(uint32_t percek, M menetrend) {
+  std::vector<double> resetek;
+  const uint32_t t0 = g_millis;
+  size_t nezett = g_log.size();
+  int guard = 0;
+  try {
+    while (g_millis - t0 < percek * 60000u && ++guard < 6000000) {
+      const FtPerc a = menetrend((g_millis - t0) / 60000u);
+      g_httpCode = a.httpOk ? 200 : -11;
+      g_httpBody = "Microsoft Connect Test";
+      pingSim.ok = a.pingOk;
+      loop();
+      for (size_t i = nezett; i < g_log.size(); i++)
+        if (g_log[i] == RELAY_HIGH) resetek.push_back((g_millis - t0) / 60000.0);
+      nezett = g_log.size();
+    }
+  } catch (DeepSleepSignal&) {}
+  return resetek;
+}
+
+static void ftIndit() {
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  monitorUzembe();
+  g_log.clear(); g_serialLog.clear();
+  g_httpFailMs = 10000;   // a terepi naplo: valasz-idotullepes, 10 mp
+}
+
+static void scFT_R1a() {
+  // 1. SZABALY: 1 es 2 perces zavar (a ping kozben megy) - NINCS reset.
+  for (uint32_t hossz : { 1u, 2u }) {
+    ftIndit();
+    auto r = ftJatszik(40, [hossz](uint32_t p) {
+      return FtPerc{ !(p >= 10 && p < 10 + hossz), true }; });
+    printf("     [info] %u perces zavar: %zu reset\n", hossz, r.size());
+    CHECK(r.empty(), hossz == 1 ? "1 perces zavar: nincs reset" : "2 perces zavar: nincs reset");
+  }
+  // A 2 perceshez a megerosito kor tenylegesen el is indult (nem csak "szerencse").
+  CHECK(serialHas("megerosito kor"), "a 2 perces zavarnal a megerosito kor futott le");
+}
+
+static void scFT_R1b() {
+  // 1. SZABALY, a masik oldal: TARTOS hiba (ping megy) - a reset a
+  // megerosito kor UTAN jon, ket teljes sorozattal.
+  ftIndit();
+  g_httpUrls.clear();
+  auto r = ftJatszik(30, [](uint32_t p) { return FtPerc{ p < 5, true }; });
+  CHECK(r.size() == 1, "tartos hibanal egy reset");
+  const int kor = serialIndex("megerosito kor");
+  const int bukott = serialIndex("A megerosito kor is bukott - router reset.");
+  CHECK(kor >= 0 && bukott > kor, "sorrend: megerosito kor, majd a masodik bukas, majd reset");
+  const int korSec = uptimeSecAt((size_t)kor), resetSec = uptimeSecAt((size_t)bukott);
+  printf("     [info] megerosito kor kezdete -> reset: %d mp; elso reset a %.1f. percben\n",
+         resetSec - korSec, r.empty() ? -1.0 : r[0]);
+  CHECK(resetSec - korSec >= 180, "a megerosito kor legalabb 3 percet var");
+  CHECK(resetSec - korSec <= 180 + 5 * 12 + 5 * 11 + 10, "es utana csak egy sorozatnyi ido");
+  int tesztek = 0;
+  for (auto& u : g_httpUrls) (void)u, tesztek++;
+  CHECK(tesztek >= 10, "a reset elott ket teljes (5+5) sorozat futott");
+}
+
+static void scFT_R2() {
+  // 2. SZABALY: ping mellett legfeljebb 6 oranként egy reset, es egy sikeres
+  // teszt NEM nullazza. Harom tartos zavar: 0., 60. (siker utan!) es 400.
+  // perctol, mindegyik 30 percig.
+  ftIndit();
+  auto r = ftJatszik(480, [](uint32_t p) {
+    const bool rossz = (p >= 5 && p < 35) || (p >= 60 && p < 90) || (p >= 400 && p < 430);
+    return FtPerc{ !rossz, true }; });
+  printf("     [info] resetek (perc):");
+  for (double x : r) printf(" %.1f", x);
+  printf("\n");
+  CHECK(r.size() == 2, "harom zavarbol ketto kap resetet");
+  CHECK(r.size() >= 1 && r[0] >= 5 && r[0] < 35, "az elso zavar kap egyet");
+  CHECK(r.size() >= 2 && r[1] >= 400, "a masodik (60. perc, siker utan) NEM kap - csak a 6 ora utani harmadik");
+  CHECK(serialHas("A router reset ELMARAD"), "a kimaradast kimondja");
+}
+
+static void scFT_R3() {
+  // 3. SZABALY: VALODI KIESES (a ping sem megy) - azonnal, megerosito kor
+  // nelkul. Akkor is, ha 6 oran belul volt mar ping melletti reset.
+  ftIndit();
+  ujNaplo();
+  auto r = ftJatszik(20, [](uint32_t p) { return FtPerc{ p < 3, p < 3 }; });
+  CHECK(!r.empty(), "volt reset");
+  CHECK(!serialHas("megerosito kor"), "megerosito kor nelkul");
+  const int fail = serialIndex("Test failed. | Hibák száma = 1 / 5");
+  const int reset = serialIndex("Beginning Reset in FAILURE_STATE.");
+  const int dt = uptimeSecAt((size_t)reset) - uptimeSecAt((size_t)fail);
+  printf("     [info] elso bukas -> reset: %d mp (a regi szabaly: 4 x 12 mp + 4 teszt)\n", dt);
+  CHECK(dt > 0 && dt <= 4 * 12 + 4 * 11 + 10, "azonnal: csak az ot teszt ideje");
+  // A kieses a 20 percen at tart: a 10 perces bootvarakozas utan jogosan jon
+  // a masodik reset is - mindketto NET DIAG = 1-gyel, megerosito kor nelkul.
+  CHECK(evCount(EVC_NET_DIAG, 1) == (int)r.size() && evCount(EVC_NET_DIAG) == (int)r.size(),
+        "minden resetet NET DIAG = 1 elozott meg (es mas diagnozis nem volt)");
+
+  // ...es egy friss ping-melletti reset sem tiltja.
+  ftIndit();
+  pingOkResetUsed = true; pingOkResetAt = g_millis;   // 0 perce volt ilyen
+  r = ftJatszik(20, [](uint32_t p) { return FtPerc{ p < 3, p < 3 }; });
+  CHECK(!r.empty(), "a 6 oras ablakon belul is van reset, ha a ping sem megy");
+}
+
+static void scFT_R3b() {
+  // 3. SZABALY a megerosito kor KOZBEN: az elso sorozatnal meg megy a ping,
+  // a masodiknal mar nem - akkor nem a 6 oras korlat dont, hanem azonnal reset.
+  ftIndit();
+  pingOkResetUsed = true; pingOkResetAt = g_millis;   // a korlat elvileg tiltana
+  auto r = ftJatszik(30, [](uint32_t p) { return FtPerc{ p < 3, p < 5 }; });
+  CHECK(r.size() >= 1, "reset volt");
+  CHECK(!serialHas("A router reset ELMARAD"), "a 6 oras korlat nem tiltotta");
+}
+
+static void scFT_EXP() {
+  // A 6 ORAS JELZO LEJARATA - az atfordulas ellen.
+  ftIndit();
+  pingOkResetUsed = true;
+  pingOkResetAt = g_millis - (6u * 3600 * 1000 - 60000);   // 5 ora 59 perce
+  loop();
+  CHECK(pingOkResetUsed, "5:59-nel meg el");
+  pingOkResetAt = g_millis - 6u * 3600 * 1000;
+  loop();
+  CHECK(!pingOkResetUsed, "6:00-nal a loop() torli (nem var a dontesig)");
+}
+
+static void scFT_CARRY() {
+  // Heap-ujraindulas: a 6 oras ablak FOLYTATODIK, nem kezdodik elolrol.
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcHeapMagic = 0;
+  setup();
+  pingOkResetUsed = true;
+  pingOkResetAt = g_millis - 5u * 3600 * 1000;    // 5 oraja volt
+  g_freeHeap = 5000; g_maxAllocHeap = 4000;
+  bool restarted = false; int guard = 0;
+  try { while (!restarted && ++guard < 200000) { checkHeap(g_millis); g_millis += 1000; } }
+  catch (RestartSignal&) { restarted = true; }
+  CHECK(restarted, "a heap miatt ujraindult");
+  const uint32_t hm = rtcHeapMagic, hr = rtcHeapRestarts, cd = rtcCarryDiagState;
+  const uint8_t ce = rtcCarryResetEvents;
+  coldBoot(true, "TestNet", "pw", "", "");
+  rtcHeapMagic = hm; rtcHeapRestarts = hr; rtcCarryResetEvents = ce; rtcCarryDiagState = cd;
+  setup();
+  const uint32_t eltelt = g_millis - pingOkResetAt;
+  printf("     [info] ujraindulas utan az ablakbol eltelt: %.1f perc\n", eltelt / 60000.0);
+  CHECK(pingOkResetUsed, "a jelzo atjott");
+  CHECK(eltelt >= 5u * 3600 * 1000 - 60000 && eltelt <= 5u * 3600 * 1000 + 120000,
+        "az eltelt ido (~5 ora) is atjott - nem kezdi elolrol a 6 orat");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -9635,6 +9795,13 @@ static const Scenario kScenarios[] = {
   { "CONF1: rovid zavar - a megerosito kor alatt helyreall, nincs reset", scCONF1 },
   { "CONF2: a 2026-11-22-i terepi nap visszajatszasa - 4 reset helyett legfeljebb 1", scCONF2 },
   { "SERL: a soros /log parancs is mukodik", scSERlog },
+  { "FT-R1a: 1. szabaly - 1 es 2 perces zavar: nincs reset", scFT_R1a },
+  { "FT-R1b: 1. szabaly - tartos hiba: reset a megerosito kor utan", scFT_R1b },
+  { "FT-R2: 2. szabaly - 6 oranként egy, siker sem nullazza", scFT_R2 },
+  { "FT-R3: 3. szabaly - valodi kieses: azonnal, a 6 oras ablakban is", scFT_R3 },
+  { "FT-R3b: 3. szabaly - a megerosito kor kozben eltuno ping", scFT_R3b },
+  { "FT-EXP: a 6 oras jelzo lejar (atfordulas ellen)", scFT_EXP },
+  { "FT-CARRY: heap-ujraindulas utan a 6 oras ablak folytatodik", scFT_CARRY },
   { "ND5: a DNS-diagnozis ket fuggetlen nevvel", scND5 },
   { "SLP1: a tartos kieses kore veges - az elso alvas utan 1 reset/kor", scSLP1 },
   { "SLP2: bekapcsolaskor a tartos-kieses szamlalo nullazodik", scSLP2 },

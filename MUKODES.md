@@ -278,12 +278,21 @@ A 2-es és 3-as esetben két további fék van:
 
 1. **Megerősítő kör** (`CONFIRM_DELAY_MS`, 3 perc): az első teljesen bukott
    sorozat után nincs reset, hanem 3 perc múlva még egyszer lefut mind az öt
-   teszt. Csak ha az is mind bukik, jön a reset. Egy 1–2 perces zavar így nem
-   kapcsolja le a routert (`CONF1`).
+   teszt. Csak ha az is mind bukik, jön a reset. Mérve (`FT-R1a`
+   – a határ-teszt a következő commitban –, 10 mp-es válasz-időtúllépésekkel, mint a terepi naplóban):
+   **legfeljebb 4 perces zavar nem okoz resetet, 5 perces már igen** – ekkor a
+   reset a megerősítő kör kezdetétől ~4,6 perccel jön (`FT-R1b`).
 2. **Legfeljebb 6 óránként egy** ilyen reset (`PING_OK_RESET_MIN_GAP_MS`).
    Ezt egy sikeres teszt **nem** nullázza: a terepi napló napján a sorozatok
    között mindig volt egy-egy sikeres teszt, és egy sikerre nullázódó jelző
-   minden sorozatnak új resetet adott volna (`ND3`). Ha a korlát miatt marad el
+   minden sorozatnak új resetet adott volna (`ND3`, `FT-R2`). A jelzőt a
+   `loop()` minden körben lejárathatja, nem csak a döntésnél – különben a
+   `millis()` 49,7 napos körbefordulása után egy régi reset hamisan tiltana
+   (`FT-EXP`). Heap miatti újraindulás után az ablak folytatódik, nem
+   kezdődik elölről (`FT-CARRY`).
+3. **Valódi kiesésnél** (a ping sem megy) egyik fék sem érvényes: a reset az
+   öt bukott teszt után azonnal jön, a 6 órás ablakon belül is, és akkor is,
+   ha a ping épp a megerősítő kör alatt tűnik el (`FT-R3`, `FT-R3b`). Ha a korlát miatt marad el
    a reset (`RESET SKIPPED`), 10 perc múlva (`HOLD_OFF_MS`) újra tesztelünk.
 
 Az ismétlődő kör a naplót nem söpri ki: csak a változás kerül bele.
