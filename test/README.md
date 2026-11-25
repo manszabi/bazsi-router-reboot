@@ -90,7 +90,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 
 ## Lefedett esetek
 
-**356 forgatókönyv, 2105 ellenőrzés. Sorlefedettség: 99,56%.**
+**368 forgatókönyv, 2178 ellenőrzés. Sorlefedettség: 99,54%.**
 
 ### A watchdog-etetés globális invariánsa
 
@@ -119,6 +119,11 @@ Felmentés egyetlen helyen van (`g_wdtGapWaiver`), **indoklással**, és a harne
 ki is írja: a `WDT8b` szándékosan modellez kórosan lassú flash-formázást
 (51,5 s). A helyes válasz ilyenkor nem a küszöb lazítása – az az összes többi
 forgatókönyv védelmét gyengítené.
+
+A DNS-ág 11 mutánsa (kitartás, kontrollkérdés, nullázás, saját lépcső, nem
+router DNS, gyorsítás gyanúnál, NXDOMAIN, azonosító, forrás, válaszbit, próbák
+száma) mind legalább egy tesztet buktat; kettőt csak a `DN1` és a `DN9`
+megerősítése után.
 
 Mutációval igazolva: a `startRouterReset()` pulzus-ciklusából kivett
 `feedWatchdog()` **44**, a `routerResetAndRetry()`-ből kivett **11**
@@ -413,7 +418,7 @@ réteget rögzíti, és külön ellenőrzi, hogy az ablak tényleg **nyitva volt
 
 ## A stubok igazolása: `make stubcheck`
 
-**A teljes host-tesztkészlet érvényessége ezen áll.** Mind a 2105 ellenőrzés a
+**A teljes host-tesztkészlet érvényessége ezen áll.** Mind a 2178 ellenőrzés a
 `test/stubs/` alatti modelleken keresztül lát: ha egy stub téved, a teszt
 **zöld**, az eszköz meg hibázik – és semmi nem szólna.
 
