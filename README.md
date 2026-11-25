@@ -429,7 +429,7 @@ bazsi-router-reboot/
 ├── webportal.h/.cpp          # az AP beállító portál HTTP felülete
 │
 ├── partitions_custom.csv     # Egyedi partíciós tábla: OTA nélkül, 512 KiB LittleFS
-├── test/                     # host tesztkészlet (328 forgatókönyv)
+├── test/                     # host tesztkészlet (361 forgatókönyv)
 └── LICENSE                   # MIT License
 ```
 
