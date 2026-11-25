@@ -427,7 +427,7 @@ száma valaha megváltozik, a sketch továbbra is lefordul, minden teszt zöld m
 (a teszt is a saját konstansát használja), és az eszköz **egy másik lábat**
 kapcsolgatna.
 
-Amit összevet (65 állítás):
+Amit összevet (66 állítás):
 
 | | |
 |---|---|
@@ -445,7 +445,7 @@ Amit összevet (65 állítás):
 | `IPAddress` | `operator[](int) const` (a statikus IP pár ellenőrzése) |
 | ESPping | `averageTime()` típusa, és az 1.0.5 fantom-sikerének oka (`_success = _expected_count - _errors`) |
 | `esp_random()` | szignatúra, és a dokumentált feltétel: bekapcsolt Wi-Fi mellett valódi véletlen |
-| `NetworkUDP` | `begin(uint16_t)`, `beginPacket(IPAddress, uint16_t)`, `endPacket()`, `parsePacket()`, `flush()`, `remoteIP()`, `remotePort()`; és a **viselkedés**: a `parsePacket()` nem blokkol (`MSG_DONTWAIT`), beolvasatlan csomag mellett 0-t ad, a `flush()` eldobja a maradékot |
+| `NetworkUDP` | `begin(uint16_t)`, `beginPacket(IPAddress, uint16_t)`, `endPacket()`, `parsePacket()`, `clear()`, `remoteIP()`, `remotePort()`; és a **viselkedés**: a `parsePacket()` nem blokkol (`MSG_DONTWAIT`), beolvasatlan csomag mellett 0-t ad, a `clear()` eldobja a maradékot (a 4.0.0-ban a `flush()` elavult) |
 | DNS-cím | `WiFi.dnsIP(uint8_t dns_no = 0)`, netif nélkül 0.0.0.0; `IPAddress::operator==` / `!=` |
 
 A **viselkedési** állítások azért vannak benne, mert a program döntései és a

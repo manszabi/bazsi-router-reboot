@@ -55,7 +55,8 @@ public:
     while (k < n && pos_ < rx_.size()) b[k++] = rx_[pos_++];
     return (int)k;
   }
-  void flush() { have_ = false; }
+  void clear() { have_ = false; }
+  [[deprecated("Use clear() instead.")]] void flush() { clear(); }
   void stop() { open_ = false; pending_ = false; have_ = false; }
   IPAddress remoteIP() { return from_; }
   uint16_t remotePort() { return 53; }

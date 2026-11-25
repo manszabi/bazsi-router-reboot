@@ -272,7 +272,7 @@ bool testDnsServer(const IPAddress& server, const char* name, const char* server
       if (udp.parsePacket() > 0) {
         const bool forras = udp.remoteIP() == server && udp.remotePort() == DNS_PORT;
         const int kapott = udp.read(csomag, sizeof(csomag));
-        udp.flush();
+        udp.clear();
         ok = forras && kapott > 0 && dnsResponseOk(csomag, (size_t)kapott, id);
       }
       resetbutton();
