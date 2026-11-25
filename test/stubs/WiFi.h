@@ -8,11 +8,6 @@ typedef int wl_status_t;
 #define WIFI_STA 1
 #define WIFI_AP 2
 
-// Olvasható HTTP-törzset hordozó kliens (a HTTPClient stub tölti fel)
-// A "beragadt szerver" modellezese: a kapcsolat EL, de nem jon tobb adat.
-// available() = 0 es connected() = true - ilyenkor a valodi socket olvasas a
-// sajat fogadasi timeoutjaig blokkolna, a sketchnek a sajat hataridejevel kell
-// kilepnie.
 extern bool g_httpStall;
 
 class WiFiClient : public Stream {
@@ -25,58 +20,46 @@ private:
   std::string data_; size_t pos_ = 0;
 };
 
-// Wi-Fi rádió szimuláció.
 struct WifiSim {
-  bool willConnect = false;      // sikerül-e a csatlakozás
-  // A hálózat csak ettől az időponttól elérhető (0 = azonnal). Ezzel
-  // modellezhető, hogy a router az ESP után percekkel áll fel.
+  bool willConnect = false;
+
   uint32_t availableFrom = 0;
-  // Mit adjon vissza a status() amikor nincs kapcsolat (WL_CONNECT_FAILED-del
-  // modellezheto a rossz jelszo).
+
   int failStatus = WL_DISCONNECTED;
-  // Rossz jelszo. NEM egyszeruen failStatus = WL_CONNECT_FAILED, mert a core
-  // az ELSO disconnect esemenyt meg nem minositi hitelesitesi hibanak:
-  // STA.cpp:148 szerint a feltetel "(reason == WIFI_REASON_AUTH_FAIL) &&
-  // !first_connect", a first_connect (STA.cpp:117) pedig csak az elso
-  // disconnect utan valt false-ra - es sosem all vissza true-ra. Addig a
-  // status WL_DISCONNECTED marad, vagyis EGYETLEN probalkozasbol a rossz
-  // jelszo lathatatlan lenne.
+
   bool authFail = false;
-  uint32_t latencyMs = 500;      // mennyi idő alatt jön létre
-  bool begun = false;            // fut-e a begin() óta kapcsolódás
+  uint32_t latencyMs = 500;
+  bool begun = false;
   uint32_t beginAt = 0;
   int mode = 0;
   bool radioOff = true;
-  // A netif statikus IP konfigja. disconnect(true) leállítja a WiFi-t,
-  // ilyenkor a valódi ESP32 core-ban ez elveszik -> DHCP.
+
   bool staticApplied = false;
   IPAddress cfgIp, cfgGw, cfgDns1, cfgDns2;
   int beginCount = 0;
   int configCount = 0;
-  bool configFails = false;      // a WiFi.config() hibat adjon vissza
+  bool configFails = false;
   int softApCount = 0;
-  std::string apPass;            // amivel a softAP()-ot hivtuk
-  std::string lastPass, lastSsid;  // amivel a WiFi.begin()-t hivtuk
-  // Modem-alvas: a valodi alapertek a WIFI_PS_MIN_MODEM (bekapcsolva).
+  std::string apPass;
+  std::string lastPass, lastSsid;
+
   bool sleepEnabled = true;
   int setSleepCount = 0;
-  // A DNS modellje. dnsOk = false: a nevfeloldas bukik (a valodi
-  // NetworkManager::hostByName() ilyenkor POZITIV lwIP hibakodot ad, nem 0-t).
+
   bool dnsOk = true;
   int dnsQueries = 0;
-  uint32_t dnsOkMs = 30;       // sikeres feloldas ideje
-  uint32_t dnsFailMs = 14000;  // bukott: ket szerver x ~7 mp (lasd WDT_TIMEOUT_MS)
-  // A STA netif DNS-tablazata (ESP_NETIF_DNS_MAIN/BACKUP/FALLBACK = 0/1/2).
+  uint32_t dnsOkMs = 30;
+  uint32_t dnsFailMs = 14000;
+
   IPAddress staDns[3];
   int dnsSetCount = 0;
   void reset() { *this = WifiSim(); }
 };
 extern WifiSim wifiSim;
 
-// NetworkInterface (core 3.x): a WiFi.STA tagon at erheto el.
 class STAClassStub {
 public:
-  // NetworkInterface.h: bool dnsIP(uint8_t dns_no, IPAddress ip)
+
   bool dnsIP(uint8_t dns_no, IPAddress ip) {
     if (dns_no >= 3) return false;
     wifiSim.staDns[dns_no] = ip; wifiSim.dnsSetCount++;
@@ -88,14 +71,13 @@ public:
 class WiFiClass {
 public:
   STAClassStub STA;
-  // WiFiGeneric.h: bool setSleep(bool enabled)
+
   bool setSleep(bool enabled) {
     wifiSim.sleepEnabled = enabled; wifiSim.setSleepCount++;
     simLog(enabled ? "WiFi.setSleep(true)" : "WiFi.setSleep(false)");
     return true;
   }
-  // WiFiGeneric.h: static int hostByName(const char*, IPAddress&). Siker: 1.
-  // Hiba: a lwIP hibakodja (POZITIV, pl. 202), a cim 0.0.0.0.
+
   static int hostByName(const char* host, IPAddress& out) {
     wifiSim.dnsQueries++;
     const bool ok = wifiSim.dnsOk;
@@ -112,15 +94,13 @@ public:
     if (m == WIFI_AP) { wifiSim.begun = false; }
   }
   void begin(const char* s, const char* p) {
-    // A jelszot ROGZITJUK: enelkul semmi nem ellenorizne, hogy a radioig a
-    // NYILT jelszo jut-e el, es nem a fajlban tarolt kodolt forma.
     wifiSim.lastPass = p ? p : "";
     wifiSim.lastSsid = s ? s : "";
     wifiSim.begun = true; wifiSim.beginAt = g_millis; wifiSim.radioOff = false;
     wifiSim.beginCount++;
     simLog(std::string("WiFi.begin(") + (s ? s : "") + ")");
   }
-  // A sikertelen csatlakozas statusza. Az authFail agat lasd a WifiSim-nel.
+
   wl_status_t failNow() {
     if (wifiSim.authFail) {
       return wifiSim.beginCount >= 2 ? WL_CONNECT_FAILED : WL_DISCONNECTED;
@@ -130,7 +110,7 @@ public:
   wl_status_t status() {
     if (!wifiSim.begun || !wifiSim.willConnect) return failNow();
     if (g_millis < wifiSim.availableFrom) return failNow();
-    // a társítás a begin() vagy a hálózat megjelenése közül a későbbitől indul
+
     const uint32_t from = wifiSim.beginAt > wifiSim.availableFrom
                           ? wifiSim.beginAt : wifiSim.availableFrom;
     return (g_millis - from) >= wifiSim.latencyMs ? WL_CONNECTED : failNow();
@@ -140,8 +120,7 @@ public:
   int RSSI() { return -50; }
   bool config(IPAddress ip, IPAddress gw, IPAddress sn, IPAddress d1 = IPAddress(), IPAddress d2 = IPAddress()) {
     (void)sn;
-    // A valodi NetworkInterface::config() false-t ad, ha nincs netif, vagy ha
-    // a DNS beallitasa hibazik (NetworkInterface.cpp:378, :411).
+
     if (wifiSim.configFails) { wifiSim.configCount++; simLog("WiFi.config_FAIL"); return false; }
     wifiSim.staticApplied = true; wifiSim.configCount++;
     wifiSim.cfgIp = ip; wifiSim.cfgGw = gw; wifiSim.cfgDns1 = d1; wifiSim.cfgDns2 = d2;
@@ -152,7 +131,7 @@ public:
     wifiSim.begun = false;
     if (off) {
       wifiSim.radioOff = true;
-      // esp_wifi_stop() -> a netif statikus IP konfigja elveszik
+
       wifiSim.staticApplied = false;
     }
     simLog(off ? "WiFi.disconnect(true)" : "WiFi.disconnect(false)");
@@ -160,7 +139,7 @@ public:
   void persistent(bool v) { simLog(v ? "WiFi.persistent(true)" : "WiFi.persistent(false)"); }
   bool softAP(const char* n, const char* p) {
     wifiSim.apPass = p ? p : "";
-    // A valodi APClass::create() 8 karakter alatt hibat ad es NEM indit AP-t.
+
     if (!wifiSim.apPass.empty() && wifiSim.apPass.size() < 8) {
       simLog("softAP_FAIL_short_passphrase");
       return false;

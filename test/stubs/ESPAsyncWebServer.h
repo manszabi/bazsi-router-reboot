@@ -18,12 +18,10 @@ private:
   String n_, v_; bool post_;
 };
 
-// Stream valasz: a tesztek a _body-ban latjak, amit a handler kiirt
 class AsyncResponseStream : public Print {
 public:
   std::string out;
-  // A valodi AsyncResponseStream a Print-tol orokli a write(uint8_t)-ot; a
-  // sketch ezzel ir ki egyetlen karaktert (HTML-escape).
+
   size_t write(uint8_t c) { out += (char)c; return 1; }
   size_t print(const char* s) { out += s; return 0; }
   size_t print(const String& s) { out += s.c_str(); return 0; }
@@ -34,7 +32,6 @@ public:
   }
 };
 
-// A tesztek ezen keresztül hajtják meg a regisztrált handlereket.
 class AsyncWebServerRequest {
 public:
   std::vector<AsyncWebParameter> _params;
@@ -49,11 +46,7 @@ public:
   const AsyncWebParameter* getParam(int i) const { return &_params[(size_t)i]; }
   void send(int c, const char*, const String& b) { _code = c; _body = b.c_str(); }
   void send(int c, const char*, const char* b) { _code = c; _body = b ? b : ""; }
-  // Hianyzo fajlnal a valodi konyvtar NEM 200-at ad:
-  //  - ahol a beginResponse(FS&,...) exists()-et ellenoriz, NULL-t ad vissza,
-  //    es a _send() kuld 501-et ("Handler did not handle the request");
-  //  - ahol nem, ott az AsyncFileResponse konstruktora allit _code = 404-et.
-  // Konyvtarverzio-fuggo, de mindenkeppen HIBA - a stub 404-kent modellezi.
+
   void send(fs::FS&, const char* path, const char*) {
     if (path && g_fs.count(path)) { _code = 200; _body = "<file>"; }
     else { _code = 404; _body = ""; }

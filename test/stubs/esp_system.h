@@ -1,6 +1,6 @@
 #pragma once
 #include <Arduino.h>
-// Az IDF v5.5 esp_reset_reason_t felsorolásának releváns része
+
 typedef enum {
   ESP_RST_UNKNOWN, ESP_RST_POWERON, ESP_RST_EXT, ESP_RST_SW, ESP_RST_PANIC,
   ESP_RST_INT_WDT, ESP_RST_TASK_WDT, ESP_RST_WDT, ESP_RST_DEEPSLEEP,
