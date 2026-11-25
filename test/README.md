@@ -90,7 +90,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 
 ## Lefedett esetek
 
-**361 forgatókönyv, 2140 ellenőrzés. Sorlefedettség: 99,53%.**
+**362 forgatókönyv, 2145 ellenőrzés. Sorlefedettség: 99,53%.**
 
 ### A watchdog-etetés globális invariánsa
 
@@ -411,7 +411,7 @@ réteget rögzíti, és külön ellenőrzi, hogy az ablak tényleg **nyitva volt
 
 ## A stubok igazolása: `make stubcheck`
 
-**A teljes host-tesztkészlet érvényessége ezen áll.** Mind a 2140 ellenőrzés a
+**A teljes host-tesztkészlet érvényessége ezen áll.** Mind a 2145 ellenőrzés a
 `test/stubs/` alatti modelleken keresztül lát: ha egy stub téved, a teszt
 **zöld**, az eszköz meg hibázik – és semmi nem szólna.
 
