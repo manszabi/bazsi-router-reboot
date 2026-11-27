@@ -8,6 +8,7 @@
 typedef int wl_status_t;
 #define WIFI_STA 1
 #define WIFI_AP 2
+#define WIFI_AP_STA 3
 
 extern bool g_httpStall;
 
@@ -45,6 +46,8 @@ struct WifiSim {
   std::string lastPass, lastSsid;
 
   bool sleepEnabled = true;
+  bool apRunning = false;
+  bool softApFails = false;
 
   IPAddress dhcpGw = IPAddress(192, 168, 1, 1);
   // A DHCP által adott első DNS (alapból a router).
@@ -79,8 +82,9 @@ public:
 
   void mode(int m) {
     wifiSim.mode = m;
-    simLog(m == WIFI_AP ? "WiFi.mode(AP)" : "WiFi.mode(STA)");
+    simLog(m == WIFI_AP ? "WiFi.mode(AP)" : m == WIFI_AP_STA ? "WiFi.mode(AP_STA)" : "WiFi.mode(STA)");
     if (m == WIFI_AP) { wifiSim.begun = false; }
+    if (m == WIFI_STA) { wifiSim.apRunning = false; }
   }
   void begin(const char* s, const char* p) {
     wifiSim.lastPass = p ? p : "";
@@ -142,13 +146,19 @@ public:
   bool softAP(const char* n, const char* p) {
     wifiSim.apPass = p ? p : "";
 
-    if (!wifiSim.apPass.empty() && wifiSim.apPass.size() < 8) {
+    if (wifiSim.softApFails || (!wifiSim.apPass.empty() && wifiSim.apPass.size() < 8)) {
       simLog("softAP_FAIL_short_passphrase");
       return false;
     }
-    wifiSim.softApCount++;
+    wifiSim.softApCount++; wifiSim.apRunning = true;
     simLog(std::string("WiFi.softAP(") + n + ")"); return true;
   }
+  bool softAPdisconnect(bool off = false) {
+    wifiSim.apRunning = false;
+    if (off && wifiSim.mode == WIFI_AP_STA) wifiSim.mode = WIFI_STA;
+    simLog("WiFi.softAPdisconnect"); return true;
+  }
   IPAddress softAPIP() { return IPAddress(192,168,4,1); }
+  IPAddress softAPSubnetMask() { return IPAddress(255,255,255,0); }
 };
 extern WiFiClass WiFi;

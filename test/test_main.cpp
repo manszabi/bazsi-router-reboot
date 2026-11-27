@@ -127,6 +127,10 @@ extern uint32_t g_epochTickFrom;
 bool quietHours();
 int localHour();
 void wifiFailed(bool coldStart);
+void stopOutageAp();
+void startOutageAp();
+bool outageApActive();
+extern bool outageApEnabled;
 void doWifiReset();
 extern int g_ntpStarts;
 void enterFatal(const char* reason);
@@ -271,6 +275,7 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   g_httpChunked = false; g_httpChunkSize = 0; g_httpRawOverride.clear();
   g_httpAutoOk = false;
   g_httpUrls.clear();
+  stopOutageAp(); outageApEnabled = false;
   wifiSim.reset(); pingSim = PingSim(); dnsSim = DnsSim();
   wifiSim.willConnect = willConnect; wifiSim.latencyMs = latency;
   if (s && *s)  g_fs["/ssid.txt"] = s;
@@ -1228,11 +1233,34 @@ static void scX2() {
   AsyncWebServerRequest req;
   req.addParam("ssid", "NyiltHalozat");
   req.addParam("pass", "");
+  req.addParam("open", "1");
   req.addParam("ip", ""); req.addParam("gateway", "");
   g_handlers["/#2"](&req);
-  CHECK(req._code == 200, "üres jelszó elfogadva (nyílt hálózat)");
+  CHECK(req._code == 200, "üres jelszó + nyílt hálózat jelölő elfogadva");
   CHECK(g_fs["/ssid.txt"] == "NyiltHalozat", "SSID mentve");
   CHECK(g_fs.count("/pass.txt") && storedPass().empty(), "üres jelszó mentve");
+}
+
+static void scX2b() {
+  // Az üres jelszómező a mentett jelszót megtartja; nyílt hálózat jelszóval: hiba.
+  coldBoot(false, "", "", "", "");
+  setup();
+  CHECK(postConfig("Otthon", "TitkosJelszo1", "", "") == 200, "első mentés jelszóval");
+  clearRestartRequest();
+  const std::string elotte = g_fs["/pass.txt"];
+  CHECK(postConfig("Otthon", "", "", "") == 200, "újramentés üres jelszómezővel");
+  CHECK(g_fs["/pass.txt"] == elotte && storedPass() == "TitkosJelszo1", "a mentett jelszó megmaradt");
+  clearRestartRequest();
+  AsyncWebServerRequest req;
+  req.addParam("ssid", "Otthon"); req.addParam("pass", "valami"); req.addParam("open", "1");
+  g_handlers["/#2"](&req);
+  CHECK(req._code == 500 && req._body.find("Nyilt halozathoz hagyd uresen") != std::string::npos,
+        "nyílt hálózat + jelszó: 500, magyarázattal");
+  CHECK(storedPass() == "TitkosJelszo1", "és nem írt semmit");
+  AsyncWebServerRequest req2;
+  req2.addParam("ssid", "Otthon"); req2.addParam("open", "2");
+  g_handlers["/#2"](&req2);
+  CHECK(req2._code == 500, "hibás nyílt-hálózat érték: 500");
 }
 
 static void scX3() {
@@ -7676,6 +7704,140 @@ static void scQH8() {
   CHECK(serialHas("ejszakai csendes idoszak"), "a csendes idoszak miatt");
 }
 
+static std::string urlapHtml() {
+  AsyncWebServerRequest req; g_handlers["/#1"](&req); return req._body;
+}
+
+static int postKapcsolo(std::initializer_list<const char*> ertekek) {
+  AsyncWebServerRequest req;
+  req.addParam("ssid", "TestNet");
+  for (const char* e : ertekek) req.addParam("outageap", e);
+  g_handlers["/#2"](&req);
+  return req._code;
+}
+
+static void scOA1() {
+  // A kapcsolo az urlapon: alapbol ki; mentes rejtett 0 + 1-gyel be, csak rejtett 0-val ki; hibas ertek 500.
+  coldBoot(false, "", "", "", "");
+  setup();
+  CHECK(!outageApEnabled, "alapbol ki");
+  std::string h = urlapHtml();
+  CHECK(h.find("name=\"outageap\" value=\"1\">") != std::string::npos, "az urlapon a jelolonegyzet, bejeloles nelkul");
+  CHECK(postKapcsolo({ "0", "1" }) == 200 && g_fs["/outageap.txt"] == "1" && outageApEnabled, "bejelolve: \"1\"");
+  h = urlapHtml();
+  CHECK(h.find("value=\"1\" checked>") != std::string::npos, "es az urlap bejelolve mutatja");
+  clearRestartRequest();
+  CHECK(postKapcsolo({ "0" }) == 200 && g_fs["/outageap.txt"] == "0" && !outageApEnabled, "uresen: \"0\"");
+  clearRestartRequest();
+  g_fs["/outageap.txt"] = "1"; outageApEnabled = true;
+  CHECK(postKapcsolo({ "2" }) == 500 && g_fs["/outageap.txt"] == "1" && outageApEnabled, "hibas ertek: 500, nem ir");
+  CHECK(postKapcsolo({}) == 200 && g_fs["/outageap.txt"] == "1", "a mezo nelkuli POST nem valtoztat rajta");
+}
+
+static void scOA2() {
+  // Mentett kapcsolo induláskor: "1" = be, "0" vagy hiany = ki; olvashatatlan fajl: vegzetes hiba (mint a tobbi).
+  for (const char* tartalom : { "1", "0", "" }) {
+    coldBoot(true, "TestNet", "pw", "", "");
+    if (*tartalom) g_fs["/outageap.txt"] = tartalom;
+    setup();
+    CHECK(outageApEnabled == (std::string(tartalom) == "1"), *tartalom == '1' ? "\"1\": be" : "\"0\"/hiany: ki");
+  }
+  coldBoot(true, "TestNet", "pw", "", "");
+  g_fs["/outageap.txt"] = ""; g_fsDirs.insert("/outageap.txt");
+  setup();
+  CHECK(deviceMode != (DeviceMode)2 && !outageApEnabled, "olvashatatlan kapcsolo-fajl: ki, nem vegzetes hiba");
+  g_fsDirs.erase("/outageap.txt");
+}
+
+static void scOA3() {
+  // Kikapcsolva a Wi-Fi-kieses alatt nincs sajat halozat.
+  wflIndit();
+  futtatUjraindulassal(20u * 60 * 1000, false, [] { return relayPulses() > 0; });
+  CHECK(wifiSim.softApCount == 0 && !outageApActive(), "kikapcsolva nincs AP");
+}
+
+static void scOA4() {
+  // Bekapcsolva: kieses alatt AP+STA, az allapotoldal a 192.168.4.x halozatrol el; a lepcso valtozatlan; visszajovetelkor leall.
+  wflIndit();
+  g_fs["/outageap.txt"] = "1"; outageApEnabled = true;
+  const uint32_t t0 = g_millis;
+  const int ujra = futtatUjraindulassal(5u * 60 * 1000, false, [] { return outageApActive(); });
+  CHECK(ujra == 1 && outageApActive() && wifiSim.apRunning && wifiSim.mode == WIFI_AP_STA,
+        "az ESP-ujrainditas utan azonnal AP+STA, az AP fut");
+  const double apPerc = (g_millis - t0) / 60000.0;
+  printf("     [info] a Wi-Fi elvesztesetol az AP-ig: %.1f perc\n", apPerc);
+  CHECK(apPerc < 4.0, "a kieses elso perceiben mar elerheto (eszleles, 3 proba, ujraindulas)");
+  g_log.clear();
+  int kod = 0;
+  std::string b;
+  futtatUjraindulassal(20u * 60 * 1000, false, [] { return relayPulses() > 0; });
+  CHECK(outageApActive() && wifiSim.apRunning, "a router reset alatt is fut");
+  const int ri = serialIndex("Router reset indul.");
+  const double perc = ri >= 0 ? (uptimeSecAt((size_t)ri) - (int)(t0 / 1000)) / 60.0 : -1;
+  printf("     [info] AP mellett a Wi-Fi elvesztesetol a router resetig: %.1f perc\n", perc);
+  CHECK(perc >= 4.0 && perc <= 6.0, "a lepcso ugyanugy jon (kb. 5 perc)");
+  b = allapotLap(IPAddress(192, 168, 4, 2), &kod);
+  CHECK(kod == 200 && b.find("Router figyelo - allapot") != std::string::npos, "a sajat halozatrol az allapotoldal el");
+  allapotLap(IPAddress(10, 0, 0, 5), &kod);
+  CHECK(kod == 403, "mas halozatrol tovabbra is 403");
+  bool staMod = false;
+  for (auto& l : g_log) if (l == "WiFi.mode(STA)") staMod = true;
+  CHECK(!staMod, "az ujracsatlakozasi probak nem kapcsoljak ki az AP-t");
+  wifiSim.willConnect = true; wifiSim.begun = false;
+  futtat(15u * 60 * 1000, [] { return serialHas("Successful Test"); });
+  CHECK(!outageApActive() && !wifiSim.apRunning, "a Wi-Fi visszajott: az AP leallt");
+  allapotLap(IPAddress(192, 168, 4, 2), &kod);
+  CHECK(kod == 403, "utana a 192.168.4.x mar nem fogadott");
+  CHECK(serialHas("a kieses alatti AP leallt"), "a soros porton is latszik");
+}
+
+static void scOA5() {
+  // A beallito AP mod atveszi a radiot: a kieses alatti AP jelzoje torlodik.
+  wflIndit();
+  g_fs["/outageap.txt"] = "1"; outageApEnabled = true;
+  futtatUjraindulassal(5u * 60 * 1000, false, [] { return outageApActive(); });
+  CHECK(outageApActive(), "kieses alatti AP fut");
+  startConfigPortal();
+  CHECK(!outageApActive() && wifiSim.mode == WIFI_AP, "AP modban a sajat jelzo torolve, a mod AP");
+}
+
+static void scOA6() {
+  // Hidegindulas (aramszunet utan) halott routerrel: a 10 perces turelem utan az AP elindul, a reset jon.
+  coldBoot(false, "TestNet", "pw", "", "");
+  g_fs["/outageap.txt"] = "1";
+  setup();
+  CHECK(outageApEnabled && !outageApActive(), "indulaskor meg nincs AP (turelmi ido)");
+  futtat(15u * 60 * 1000, [] { return relayPulses() > 0; });
+  CHECK(relayPulses() > 0 && outageApActive(), "a turelmi ido utan: AP es router reset");
+}
+
+static void scOA7() {
+  // Ha a sajat halozat nem indul el: nincs jelzo, vissza STA modba, es a kovetkezo probalkozas ujra megprobalja.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  monitorUzembe();
+  wifiSim.softApFails = true;
+  startOutageAp();
+  CHECK(serialHas("A kieses alatti AP nem indult el."), "kimondja");
+  CHECK(!outageApActive() && wifiSim.mode == WIFI_STA, "nincs jelzo, STA modban marad");
+  wifiSim.softApFails = false;
+  startOutageAp();
+  CHECK(outageApActive(), "a kovetkezo hivas ujra megprobalja, es most sikerul");
+}
+
+static void scST7() {
+  // A sajat halozatrol nezve kieses kozben: Wi-Fi "nincs kapcsolat, N perce"; DNS-reset utan az Internet sor 0 resetet mutat.
+  wflIndit();
+  g_fs["/outageap.txt"] = "1"; outageApEnabled = true;
+  futtatUjraindulassal(10u * 60 * 1000, false, [] { return outageApActive() && relayPulses() > 0; });
+  std::string b = allapotLap(IPAddress(192, 168, 4, 2));
+  CHECK(b.find("<td>Wi-Fi</td><td><b>nincs kapcsolat, ") != std::string::npos, "kieses kozben: nincs kapcsolat, N perce");
+  ftIndit();
+  testState.resetEvents = 1; testState.outage = false;  // egy DNS-reset utan, az internet el
+  b = allapotLap(IPAddress(192, 168, 1, 50));
+  CHECK(b.find("<td>Internet</td><td>rendben</td><td>0</td>") != std::string::npos, "az Internet sor: rendben, 0 reset");
+}
+
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
   { "W2: sikeres csatlakozás -> monitor mód, DHCP (nincs statikus IP)", sc1 },
@@ -7749,7 +7911,8 @@ static const Scenario kScenarios[] = {
   { "CPU1: a loop() a várakozó állapotokban nem pörgeti a CPU-t", scCPU1 },
   { "CPU2: a first start várakozás sem pörget", scCPU2 },
   { "X1: reset gomb a relé pulzus közben -> a router visszakapja az áramot", scX1 },
-  { "X2: nyílt hálózat (üres jelszó)", scX2 },
+  { "X2: nyílt hálózat (üres jelszó + jelölő)", scX2 },
+  { "X2b: az üres jelszómező a mentett jelszót megtartja", scX2b },
   { "X3: SSID/jelszó pontos határértékei", scX3 },
   { "X4: fél-konfigurált statikus IP -> DHCP", scX4 },
   { "X5: csak whitespace a konfig fájlban", scX5 },
@@ -8059,6 +8222,14 @@ static const Scenario kScenarios[] = {
   { "ST5: allapotoldal: csak az utolso 20 esemeny", scST5 },
   { "ST6: allapotoldal: a Wi-Fi kiesese es visszajotte", scST6 },
   { "QH8: hidegindulasnal ejjel a Wi-Fi miatti reset is var", scQH8 },
+  { "OA1: kieses-AP kapcsolo az urlapon: mentes, visszaolvasas, hibas ertek", scOA1 },
+  { "OA2: kieses-AP kapcsolo induláskor; olvashatatlan fajl: ki", scOA2 },
+  { "OA3: kikapcsolva a kieses alatt nincs AP", scOA3 },
+  { "OA4: bekapcsolva: kieses alatt AP+STA es allapotoldal, a lepcso valtozatlan", scOA4 },
+  { "OA5: a beallito AP mod atveszi a radiot", scOA5 },
+  { "OA6: hidegindulas halott routerrel: a turelmi ido utan AP", scOA6 },
+  { "OA7: ha a sajat halozat nem indul el, a lepcso fut tovabb", scOA7 },
+  { "ST7: allapotoldal: Wi-Fi kieses kozben a sajat halozatrol; Internet sor DNS-reset utan", scST7 },
   { "QH1: a csendes idoszak hatarai (22:00-05:00, CET es CEST)", scQH1 },
   { "QH2: ejjel a router sem valaszol: reset 10 perc utan", scQH2 },
   { "QH3: 8 perces router-kieses: ejjel nincs reset, nappal van", scQH3 },

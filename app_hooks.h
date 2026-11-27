@@ -18,6 +18,7 @@ struct DiagCounters {
   uint32_t wdtLimit;
   uint32_t wifiStep;
   uint32_t wifiOutageMin;
+  bool wifiUp;
   uint32_t heapRestarts;
   bool netOutage;
   uint32_t netOutageMin;

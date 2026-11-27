@@ -203,6 +203,18 @@ def main():
     allit("AsyncClient::remoteIP() const -> IPAddress",
           bool(re.search(r'IPAddress remoteIP\(\) const;', at)),
           bool(re.search(r'IPAddress remoteIP\(\) const', stub_aws)))
+    wap = szoveg(keres(gyokerek, 'libraries/WiFi/src/WiFiAP.h'))
+    allit("WiFiAPClass::softAPdisconnect(bool wifioff = false)",
+          bool(re.search(r'bool softAPdisconnect\(bool wifioff = false\);', wap)),
+          bool(re.search(r'bool softAPdisconnect\(bool off = false\)', stub_wifi)))
+    allit("WiFiAPClass::softAPSubnetMask() -> IPAddress",
+          bool(re.search(r'IPAddress softAPSubnetMask\(\);', wap)),
+          bool(re.search(r'IPAddress softAPSubnetMask\(\)', stub_wifi)))
+    wtg = szoveg(keres(gyokerek, 'esp_wifi/include/esp_wifi_types_generic.h'))
+    allit("WIFI_AP_STA = WIFI_MODE_APSTA = 3 (a stub erteke)",
+          bool(re.search(r'#define WIFI_AP_STA WIFI_MODE_APSTA', wt))
+          and bool(re.search(r'WIFI_MODE_NULL = 0,[^\n]*\n\s*WIFI_MODE_STA,[^\n]*\n\s*WIFI_MODE_AP,[^\n]*\n\s*WIFI_MODE_APSTA,', wtg)),
+          egy(stub_wifi, r'^#define WIFI_AP_STA (\d+)') == '3')
     allit("WiFiSTAClass::subnetMask() -> IPAddress",
           bool(re.search(r'IPAddress subnetMask\(\);', szoveg(keres(gyokerek, 'libraries/WiFi/src/WiFiSTA.h')))),
           bool(re.search(r'IPAddress subnetMask\(\)', stub_wifi)))

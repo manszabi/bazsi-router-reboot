@@ -18,6 +18,8 @@ const char ssidPath[] = "/ssid.txt";
 const char passPath[] = "/pass.txt";
 const char ipPath[] = "/ip.txt";
 const char gatewayPath[] = "/gateway.txt";
+const char outageApPath[] = "/outageap.txt";
+bool outageApEnabled = false;
 
 bool isUsableIPv4(const IPAddress& addr) {
   return (uint32_t)addr != 0;

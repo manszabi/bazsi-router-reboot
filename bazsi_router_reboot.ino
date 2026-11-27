@@ -207,6 +207,8 @@ RTC_NOINIT_ATTR uint32_t rtcWifiOutageMin;
 // A RAM-beli órák: a kiesés kezdete (az indulás óta) és a stabil kapcsolat kezdete.
 uint32_t wifiOutageSince = 0;
 uint32_t wifiConnectedSince = 0;
+// Kiírtuk-e a WIFI LOST-ot (a visszatérés WIFI OK-t kap, és a következő kiesés újra naplózódik).
+bool wifiDownLogged = false;
 
 // A reset oka (a NET DIAG esemény paramétere).
 enum NetDiag : uint8_t {
@@ -291,6 +293,7 @@ DiagCounters diagCounters() {
   d.wdtLimit = MAX_WDT_RESETS;
   d.wifiStep = wifiLadderLevel();
   d.wifiOutageMin = (rtcWifiRestarted != 0) ? wifiOutageMinutes() : 0;
+  d.wifiUp = (WiFi.status() == WL_CONNECTED);
   d.heapRestarts = rtcHeapRestarts;
   d.netOutage = testState.outage;
   d.netOutageMin = testState.outage ? (now - testState.outageStart) / 60000 : 0;
@@ -735,7 +738,7 @@ bool initWiFi() {
     return true;
   }
 
-  WiFi.mode(WIFI_STA);
+  WiFi.mode(outageApActive() ? WIFI_AP_STA : WIFI_STA);
 
   WiFi.setSleep(false);
 
@@ -1004,6 +1007,10 @@ void wifiFailed(bool coldStart) {
       return;
     }
   }
+  // Az újraindítás előtt értelmetlen volna: utána a setup() indítja, ha kimarad, itt.
+  if (outageApEnabled) {
+    startOutageAp();
+  }
   const uint32_t varni = ladderWaitMs(testState, now, wifiFirstWindowMs());
   if (varni > 0) {
     Serial.print("A kovetkezo Wi-Fi miatti router reset ");
@@ -1261,6 +1268,7 @@ void startConfigPortal() {
 
 void setup() {
   timing.startMillis = millis();
+  wifiDownLogged = false;
 
   firstStartProbeLast = timing.startMillis - CHECK_INTERVAL_MS;
 
@@ -1357,6 +1365,12 @@ void setup() {
     }
     if (readConfigValue(LittleFS, ipPath, ipStr, sizeof(ipStr)) == CONFIG_ERROR) st = CONFIG_ERROR;
     if (readConfigValue(LittleFS, gatewayPath, gatewayStr, sizeof(gatewayStr)) == CONFIG_ERROR) st = CONFIG_ERROR;
+    {
+      char kapcsolo[4];
+      // Opcionális kapcsoló: olvasási hiba esetén egyszerűen ki (nem végzetes, mint a négy fő beállítás).
+      const ConfigStatus os = readConfigValue(LittleFS, outageApPath, kapcsolo, sizeof(kapcsolo));
+      outageApEnabled = (os == CONFIG_OK && strcmp(kapcsolo, "1") == 0);
+    }
 
     if (st == CONFIG_ERROR && deviceMode != MODE_FATAL) {
       logEvent(EV_FATAL, 2);
@@ -1390,6 +1404,12 @@ void setup() {
                                         : "Nem sikerult csatlakozni - ujraprobalkozas, utana router reset.");
       deviceMode = MODE_MONITOR;
       digitalWrite(wifiledPin, LOW);
+      // Az induláskori sikertelen csatlakozás is kiesés: a visszatérése WIFI OK-t kap.
+      logEvent(EV_WIFI_LOST, (uint16_t)WiFi.status());
+      wifiDownLogged = true;
+      if (rtcWifiRestarted != 0 && outageApEnabled) {
+        startOutageAp();
+      }
     }
   }
   if (deviceMode == MODE_MONITOR) {
@@ -1575,14 +1595,24 @@ bool routerDnsCheck() {
   return true;
 }
 
+// A Wi-Fi visszajött: ha a kiesést naplóztuk, a visszatérés is bekerül (a lépcső fokával).
+void noteWifiUp() {
+  if (!wifiDownLogged) {
+    return;
+  }
+  wifiDownLogged = false;
+  logEvent(EV_WIFI_OK, (uint16_t)wifiLadderLevel());
+}
+
 // Percenkénti ellenőrzés: van-e internet, és ha egy ideje nincs, kell-e reset.
 void runCheckState() {
   timing.stateStart = millis();
   if (WiFi.status() != WL_CONNECTED) {
-    if (!lastEventWas((uint8_t)EV_WIFI_LOST)) {
+    if (!wifiDownLogged) {
       printUptime();
       logEvent(EV_WIFI_LOST, (uint16_t)WiFi.status());
       Serial.println("WiFi disconnected before test!");
+      wifiDownLogged = true;
     }
     digitalWrite(wifiledPin, LOW);
 
@@ -1590,6 +1620,7 @@ void runCheckState() {
     const bool siker = wifiResetPending() ? initWiFi() : reconnectWifi();
     if (siker) {
       digitalWrite(wifiledPin, HIGH);
+      noteWifiUp();
       timing.stateStart = millis();
       return;
     }
@@ -1599,6 +1630,8 @@ void runCheckState() {
   }
 
   digitalWrite(wifiledPin, HIGH);
+  noteWifiUp();
+  stopOutageAp();
   wifiConnectedTick();
   printUptime();
   Serial.println("Internet ellenorzes.");

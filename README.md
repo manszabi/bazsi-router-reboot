@@ -20,7 +20,9 @@ egyre ritkábban, ha az újraindítás nem segít.
 3. Első indításkor az eszköz saját Wi-Fi-t indít (`ESP-ESP32-C3-XXXX`, a jelszó
    a soros porton); a `192.168.4.1` oldalon add meg az otthoni Wi-Fi adatait.
 4. Normál üzemben az állapot a böngészőből is látszik:
-   `http://<az eszköz IP-je>/` (csak olvasható, csak a helyi hálózatról).
+   `http://<az eszköz IP-je>/` (csak olvasható, csak a helyi hálózatról). Ha a
+   beállító oldalon bekapcsolod, Wi-Fi-kiesés alatt az eszköz saját hálózatán, a
+   `192.168.4.1` címen is.
 
 ## Tesztek
 
