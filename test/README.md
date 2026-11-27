@@ -90,7 +90,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 
 ## Lefedett esetek
 
-**379 forgatókönyv, 2242 ellenőrzés. Sorlefedettség: 99,55%.**
+**387 forgatókönyv, 2287 ellenőrzés. Sorlefedettség: 99,52%.**
 
 ### A watchdog-etetés globális invariánsa
 
@@ -127,6 +127,13 @@ megerősítése után. A Wi-Fi-lépcső 12 mutánsa (ESP-újraindítás elsőké
 türelmi idő kihagyása, a stabil ablak, a lépcső, a 48 órás határ, a törlési és
 mentési utak, a magic-ellenőrzés) is mind elbukik; négyet csak a `WFL8`–`WFL10`
 és a `GWH5` megerősítése után.
+
+A közös reset-lépcső és az állapotoldal 18 mutánsa (az első türelmi idő, a
+nullázás, a lépcső-átvitel három adata és egyszeri felhasználása, a Wi-Fi-ág
+kezdete és szintje, a csendes időszak mindkét ágon, a DNS-ág nullázása, az
+állapotoldal címszűrése, indítása, leállítása és számlálói) mind elbukik; kettőt
+csak az `RD15` és a `QH8` hozzáadása után, egy harmadik pedig egyenértékűnek
+bizonyult, ezért a feltételt kivettük a kódból.
 
 Mutációval igazolva: a `startRouterReset()` pulzus-ciklusából kivett
 `feedWatchdog()` **57** forgatókönyvet buktat meg.
@@ -226,8 +233,9 @@ helyes eszköz – egy rossz globális küszöb csak zajt adna.
 | `LED4`–`LED6` | **LED-ek őszintesége**: a Wi-Fi LED legfeljebb egy percet késhet (mérve: 58 mp), a státusz LED normál üzemben végig világít, AP módban a mentés utáni türelmi idő alatt is villog |
 | `WDT8b` | **A LittleFS formázása** is belefér a watchdog ablakába: 7,5 mp tipikus és 51,5 mp rossz eset, mindkettő a 90 mp alatt |
 | `RR3` | egyetlen sikeres ellenőrzés nullázza a reset-számlálót és a kiesést |
-| `RD1`–`RD14` | **A reset-döntés** (funkcióteszt, percre bontott menetrenddel): router hiba → reset kb. 2 perc után; 5–14 perces szolgáltatói kiesés → nincs reset; 6 órás kiesés → 4 reset a 15 perc / 30 perc / 1 óra / 2 óra lépcsőn; **a 2026-11-22-i terepi nap → 0 reset**; pingre nem válaszoló router → router hibának látszik; szűrt ping, működő HTTP → nincs reset, az öt végpont sorra kerül; gyógyulás után a lépcső elölről; egy napig halott router → 9 reset, alvás nélkül; heap-átvitel; gateway-cím nélkül nincs vak ping; Wi-Fi-vesztés a kiesésen belül a lépcsőt követi; reset után rossz jelszó → AP mód; az 1.1.1.1 hallgat, a 8.8.8.8 válaszol → nincs reset; percenként pontosan egy ellenőrzés |
-| `QH1`–`QH7` | **Éjszakai csendes időszak**: a 22:00 és 05:00 határ téli és nyári időben, a setup() a magyar időzónát állítja be, érvényes idő nélkül nappali szabály; éjjel router hiba → reset 10 perc után; 8 perces router-kiesés → éjjel nincs reset, nappal van; 05:00 után újra 2 perc; a szolgáltatói kiesés éjjel is 15 perc; éjjel a Wi-Fi miatti router reset legalább 10 perc kiesés után (az ESP-újraindítás előtte); a várakozás alatt visszajövő Wi-Fi → nincs reset |
+| `RD1`–`RD15` | **A reset-döntés** (funkcióteszt, percre bontott menetrenddel): router hiba → reset kb. 2 perc után; 5–14 perces szolgáltatói kiesés → nincs reset; 6 órás kiesés → 4 reset a 15 perc / 30 perc / 1 óra / 2 óra lépcsőn; **a 2026-11-22-i terepi nap → 0 reset**; pingre nem válaszoló router → router hibának látszik; szűrt ping, működő HTTP → nincs reset, az öt végpont sorra kerül; gyógyulás után a lépcső elölről; egy napig halott router → 9 reset, alvás nélkül; heap-átvitel; gateway-cím nélkül nincs vak ping; Wi-Fi-vesztés a kiesésen belül a lépcsőt követi; reset után rossz jelszó → AP mód; az 1.1.1.1 hallgat, a 8.8.8.8 válaszol → nincs reset; percenként pontosan egy ellenőrzés; heap-újraindulás az első reset előtt → a türelmi idő folytatódik, nem indul elölről |
+| `ST1`–`ST6` | **Az állapotoldal**: normál üzemben fut, a helyi hálózatról 200 (számlálók, események, se SSID, se jelszó, se űrlap, se POST); más alhálózatról és Wi-Fi nélkül 403; kiesés közben a hiba és a resetszám látszik; AP módban leáll, ismeretlen út 404; csak az utolsó 20 esemény, ~2,5 kB; Wi-Fi-kiesés közben elérhetetlen (403), utána „rendben (nemrég kiesett)”, 30 perc stabil kapcsolat után „rendben” |
+| `QH1`–`QH8` | **Éjszakai csendes időszak**: a 22:00 és 05:00 határ téli és nyári időben, a setup() a magyar időzónát állítja be, érvényes idő nélkül nappali szabály; éjjel router hiba → reset 10 perc után; 8 perces router-kiesés → éjjel nincs reset, nappal van; 05:00 után újra 2 perc; a szolgáltatói kiesés éjjel is 15 perc; éjjel a Wi-Fi miatti router reset legalább 10 perc kiesés után (az ESP-újraindítás előtte); a várakozás alatt visszajövő Wi-Fi → nincs reset; hidegindulásnál (érvényes idővel) a Wi-Fi miatti reset is vár |
 | `DN1`–`DN12` | **A router DNS-ének ellenőrzése**: a router DNS-e hallgat, a ping és az `1.1.1.1` DNS megy → reset legkésőbb ~16 perc; a külső DNS is hallgat → nincs reset; 9 perces zavar → nincs reset; a 11-22-i nap DNS-zavarral → 0 reset; tartós hiba → saját lépcső (a ping nem nullázza); ha a DNS nem a router → kimarad; a válasz ellenőrzése (azonosító, forrás, SERVFAIL, NXDOMAIN, csonka, hallgatás: pontosan 2 × 3 mp); a kérdés formátuma az lwIP szerint; gyógyulás után elölről; statikus IP; 5 percenként egy kérdés; ping nélkül szünetel |
 | `HC1`–`HC2` | A **HTTP hibakód** naplózható alakja (1000 + \|kód\|) és az első bukáskor a naplóba kerül |
 | `FB1`, `SL1` | DHCP mellett **tartalék DNS** (1.1.1.1 a fallback helyen, a router DNS-ét nem írja felül); a Wi-Fi **modem-alvás kikapcsolva** a csatlakozás előtt |
@@ -422,7 +430,7 @@ réteget rögzíti, és külön ellenőrzi, hogy az ablak tényleg **nyitva volt
 
 ## A stubok igazolása: `make stubcheck`
 
-**A teljes host-tesztkészlet érvényessége ezen áll.** Mind a 2242 ellenőrzés a
+**A teljes host-tesztkészlet érvényessége ezen áll.** Mind a 2287 ellenőrzés a
 `test/stubs/` alatti modelleken keresztül lát: ha egy stub téved, a teszt
 **zöld**, az eszköz meg hibázik – és semmi nem szólna.
 

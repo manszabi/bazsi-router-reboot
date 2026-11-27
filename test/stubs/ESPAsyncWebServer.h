@@ -33,8 +33,17 @@ public:
   }
 };
 
+// AsyncTCP: a kérés kliense (csak a távoli cím kell).
+class AsyncClient {
+public:
+  IPAddress _remote = IPAddress(192, 168, 1, 50);
+  IPAddress remoteIP() const { return _remote; }
+};
+
 class AsyncWebServerRequest {
 public:
+  AsyncClient _client;
+  AsyncClient* client() { return &_client; }
   std::vector<AsyncWebParameter> _params;
   int _code = 0;
   std::string _body;
@@ -61,15 +70,22 @@ public:
 
 typedef std::function<void(AsyncWebServerRequest*)> ArRequestHandlerFunction;
 
+// Az elso letrehozott szerver (az AP portal) kezeloi a g_handlers-be, a masodike (allapotoldal) a g_statusHandlers-be.
 extern std::map<std::string, ArRequestHandlerFunction> g_handlers;
+extern std::map<std::string, ArRequestHandlerFunction> g_statusHandlers;
+extern int g_serverCount;
+extern bool g_statusServerRunning;
 
 class AsyncWebServer {
 public:
-  AsyncWebServer(int) {}
+  AsyncWebServer(int) : id_(g_serverCount++) {}
   void on(const char* path, int method, ArRequestHandlerFunction fn) {
-    g_handlers[std::string(path) + "#" + std::to_string(method)] = fn;
+    map()[std::string(path) + "#" + std::to_string(method)] = fn;
   }
-  void onNotFound(ArRequestHandlerFunction fn) { g_handlers["404"] = fn; }
-  void begin() {}
-  void end() {}
+  void onNotFound(ArRequestHandlerFunction fn) { map()["404"] = fn; }
+  void begin() { if (id_ == 1) g_statusServerRunning = true; }
+  void end() { if (id_ == 1) g_statusServerRunning = false; }
+private:
+  int id_;
+  std::map<std::string, ArRequestHandlerFunction>& map() { return id_ == 1 ? g_statusHandlers : g_handlers; }
 };

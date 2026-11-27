@@ -11,6 +11,11 @@ void startWebPortal();
 
 void stopWebPortal();
 
+// Normál üzemben csak olvasható állapotoldal (GET /), kizárólag a saját alhálózatról.
+void startStatusPage();
+
+void stopStatusPage();
+
 // Az eszközönkénti AP jelszó kiírása a soros portra (ha már van).
 void announceApPassword();
 

@@ -1,7 +1,9 @@
-# Működési táblázat
+# Működés – a teljes leírás
 
-Az eszköz teljes viselkedése: mikor mit csinál és meddig. Minden érték a
-`bazsi_router_reboot.ino` konstansaiból származik.
+Az eszköz teljes viselkedése: mikor mit csinál és meddig, a hardver, a
+telepítés, a biztonság és a folyamatábrák. Minden érték a
+`bazsi_router_reboot.ino` konstansaiból származik. Rövid változat:
+[ATTEKINTES.md](ATTEKINTES.md); a tesztkészlet: [test/README.md](test/README.md).
 
 ---
 
@@ -137,6 +139,25 @@ hálózat a pinget szűri. A 204-es végpontok captive portált sem fogadnak el.
 Sikernél a soros portra csak a `Successful Test` kerül; eltéréskor a kapott
 törzs és a `Hamis ertek!` is.
 
+A tartalék HTTP teszt öt végpontja (mindig a soron következő jön):
+
+| # | Végpont | Üzemeltető | Elvárt válasz |
+|:-:|---|---|---|
+| 1 | `msftconnecttest.com/connecttest.txt` | Microsoft | `Microsoft Connect Test` |
+| 2 | `cp.cloudflare.com/generate_204` | Cloudflare | **204 No Content** |
+| 3 | `detectportal.firefox.com/success.txt` | Mozilla | `success` |
+| 4 | `nmcheck.gnome.org/check_network_status.txt` | GNOME | `NetworkManager is online` |
+| 5 | `connectivitycheck.gstatic.com/generate_204` | Google | **204 No Content** |
+
+Egy ping 4 próbából 2 választ követel (egy elveszett csomag nem kiesés). A
+204-es ellenőrzés szigorúbb a szövegesnél: captive portál nem tud
+`204 No Content`-et adni. A szöveges ellenőrzés legfeljebb 96 bájtot olvas, és
+a `Transfer-Encoding: chunked` keretezést maga bontja le (a `HTTPClient` ezt
+csak a `getString()` útján tenné, az viszont korlátlanul foglalna).
+
+> **DNS-szűrő (Pi-hole, AdGuard):** ha egy végpontot tilt, csak az a HTTP teszt
+> bukik; a döntést a két ping hozza, így ez téves resetet nem okoz.
+
 ---
 
 ## 4. Az internet kiesik – router újraindítás
@@ -161,7 +182,7 @@ reset. Rossz jelszónál reset helyett AP mód.
 **Éjszakai csendes időszak** (`QUIET_START_HOUR` = 22, `QUIET_END_HOUR` = 5,
 helyi idő a `NTP_TZ` szerint): a router-hiba (`NET DIAG` 1) türelmi ideje
 2 helyett 10 perc, és a Wi-Fi miatti első router reset is csak legalább 10 perc
-kiesés után jön (`wifiResetWaitMs()`), hogy egy éjszakai firmware-frissítést ne
+kiesés után jön (`wifiFirstWindowMs()`), hogy egy éjszakai firmware-frissítést ne
 szakítson félbe. A szolgáltatói hiba (15 perc), a DNS-ág és a lépcső többi foka
 változatlan. Érvényes idő nélkül (áramszünet után, NTP előtt) a nappali szabály
 él. Az időzónát a `setup()` maga állítja be (`applyTimezone()`), mert az
@@ -274,19 +295,28 @@ a státusz LED marad **be**). Utána:
   Így egy instabil routernél a második kiesés már router resetet kap, nem újabb
   ESP-újraindítást (`WFL5`).
 
-**Mit őriz meg az újraindulás:** a fokot és a kiesés eddigi hosszát
-és az utolsó router reset óta eltelt percet (`rtcWifiStep`, `rtcWifiOutageMin`,
-`rtcWifiResetAgoMin`, `RTC_NOINIT`, ellenőrző értékkel). Indulás után a
-2+. fok az internet-ág reset-számlálóját is beállítja, így ha a Wi-Fi visszajön,
-de az internet nem, ott sem jön idő előtt újabb reset. Ez a
-saját, a heap miatti és a watchdog-újraindulást túléli. **Törli** az
+**Egy közös lépcső.** A Wi-Fi miatti router resetek ugyanazon a lépcsőn
+lépnek, mint az internet-ág resetjei (`ResetLadder`, `ladderWaitMs()`; a DNS-ág
+is ezt a szerkezetet használja, saját példánnyal). A Wi-Fi-ágnak csak két saját
+adata van: megvolt-e már az ESP-újraindítás (`rtcWifiRestarted`), és mióta tart
+a kiesés (`rtcWifiOutageMin`, a 48 órás határhoz). A „fok” ezekből számolódik
+(`wifiLadderLevel()`: 0 = nincs kiesés, 1 = ESP-újraindítás, 2+ = utána N-1
+router reset). Következmény: egy sikeres internet-ellenőrzés a Wi-Fi miatti
+reseteket is nullázza – ahogy minden más resetet –, az ESP-újraindítás jelzője
+viszont csak 30 perc stabil kapcsolat után törlődik.
+
+**Mit őriz meg az újraindulás:** az újraindítás jelzőjét és a kiesés hosszát
+(`RTC_NOINIT`, ellenőrző értékkel), az internet-lépcsőt pedig a szándékos
+újraindulás előtti mentés viszi át (12. fejezet). Ez a saját és a heap miatti
+újraindulást túléli; watchdog-újraindulás után a jelző megmarad, a lépcső
+elölről indul. **Törli** az
 áramszünet, a reset és a wifireset gomb, a mentés utáni újraindulás és minden
 alvás – ezek emberi beavatkozások, tehát tiszta lap.
 
 | Mérve | Eredmény | Teszt |
 |---|---|---|
 | az újraindítás után visszajön a Wi-Fi | nincs router reset, azonnal figyel | `WFL1` |
-| a Wi-Fi elvesztésétől a router reset kezdetéig | **5,3 perc**; éjjel (22:00–05:00) **15,3 perc** | `WFL2`, `QH6` |
+| a Wi-Fi elvesztésétől a router reset kezdetéig | **5,3 perc**; éjjel (22:00–05:00) **13,3 perc** | `WFL2`, `QH6` |
 | tartós Wi-Fi-hiány | resetek 30 / 60 / 120 / 240 perc szünettel (+ a bootvárakozás), 48 óra után AP, alvás nélkül | `WFL3` |
 | várakozás közben visszajön | legfeljebb 1 perc alatt észreveszi; percenként 1 próba | `WFL4` |
 
@@ -379,6 +409,33 @@ nem fut tovább – az újraindítgatás csak elfedné a hibát.
 | Deep sleep | **5 perc** után (`FATAL_SLEEP_AFTER_MS`) |
 | Ébredés | **csak a reset gombbal** vagy áramtalanítással |
 
+### A fájlműveletek hibái
+
+A beállítások LittleFS-en tárolódnak, ezért minden fájlművelet hibája
+kezelve van – és ami fontosabb, **egyik sem hazudik sikert**.
+
+| Hiba | Viselkedés |
+|---|---|
+| A mentés félbeszakad (megtelt / haldokló flash) | A **régi érték is odavész**: a `FILE_WRITE` már a megnyitáskor csonkol, tehát mire kiderül, hogy az írás nem fér ki, a korábbi tartalom nincs meg. A válasz 500, az eszköz **nem indul újra**, és a következő induláskor üres SSID-vel **AP módba** kerül, ahol újra beállítható (mérve: `FS14`) |
+| A fájlrendszer nem csatolható | Konkrét ok kiírása (a `begin()` csak `ESP_FAIL`-nél formáz, hiányzó partíciónál nem), majd végzetes hibajelzés – lásd fent |
+| Hiányzó konfigurációs fájl | `CONFIG_MISSING` – nem hiba, AP beállító portál |
+| A fájl nem nyitható írásra | `writeConfigValue()` `false`-t ad, a mentés nem történik meg |
+| Rövid írás (megtelt FS) | A `print()` visszatérési értéke ellenőrizve, `false` |
+| Az írás „sikerült", de a tartalom hibás | **Visszaolvasásos ellenőrzés** fogja meg |
+| A törlés (csonkolás) nem megy | Tartalék: a fájl törlése `remove()`-val |
+| Mentés a beállító oldalról | Két fázisú: fájl csak akkor íródik, ha **minden** mező érvényes. Hiba esetén HTTP 500 magyarázattal és **nincs újraindítás** |
+| Érvénytelen űrlapadat (rossz SSID hossz, IP formátum, hiányzó SSID) | HTTP 500 az ok megnevezésével; **semmi nem íródik ki**, a futó konfiguráció sem változik |
+| Mentés, miközben a wifireset gomb épp töröl | HTTP 503, a mentés nem ír bele a törlésbe (atomikus zár) |
+
+A visszaolvasás azért kell, mert a `File::close()` és a `File::flush()` is
+`void` a core-ban – a lezáráskor jelentkező hibát másképp nem lehetne észlelni.
+
+A beállító oldalról mentés hibája korábban a legkellemetlenebb módon jelent
+volna meg: az eszköz „Done"-t válaszol, újraindul, és mivel nem mentett semmit,
+ismét AP módban jön fel – a felhasználó pedig végtelen körben próbálkozik
+magyarázat nélkül. Most a hibát megkapja, és az eszköz nem indul újra, tehát a
+beírt adatok sem vesznek el.
+
 ### Hol keletkezik a jelzés
 
 A 4-es ok annyiban különbözik, hogy a gombkezelőből jön, ami **blokkoló
@@ -417,20 +474,174 @@ kezd (ez igaz, lásd a 15. fejezet uptime-megjegyzését), és hogy nem fordul k
 Rendellenesnek számít: `ESP_RST_TASK_WDT`, `ESP_RST_INT_WDT`, `ESP_RST_WDT`,
 `ESP_RST_PANIC`, `ESP_RST_CPU_LOCKUP`.
 
-### Ha a watchdogot nem sikerül élesíteni
+### Miért kell külön beállítani
 
-Az `enableLoopWDT()` a core-ban `void`: ha a feliratkozás nem sikerül, csak egy
-belső hibaüzenet jelzi. Ezért az indulás után visszakérdezünk
-(`esp_task_wdt_status()`), és **csak akkor** írjuk ki, hogy `Watchdog enabled`,
-ha a `loop()` tényleg figyelve van. Ha nem:
+Ha a program megakadna (végtelen ciklus, deadlock), a legrosszabb eset az, hogy
+**a relé bekapcsolt állapotban ragad, és a router tartósan áram nélkül marad**.
+A watchdog ezt oldja meg: újraindítja az ESP-t, a `setup()` pedig azonnal
+`LOW`-ra állítja a relét, tehát a router visszakapja az áramot.
 
+Az ESP-IDF task watchdogja alapból fut, de önmagában **nem véd meg**:
+
+| | Érték a kész Arduino libekben | Következmény |
+|---|---|---|
+| `loopTaskWDTEnabled` | `false` (Arduino `main.cpp:111`) | a `loop()` megakadását észre sem veszi |
+| `ESP_TASK_WDT_PANIC` | `y` (`defconfig.common:21`) – az IDF saját alapja `n` | jó, de nem a mi érdemünk: egy másképp fordított libnél a timeout csak figyelmeztetés lenne |
+| `ESP_TASK_WDT_TIMEOUT_S` | `5` (IDF alap, a lib-builder nem írja felül) | rövidebb, mint a firmware szándékos blokkolásai |
+
+> A „kész Arduino libek" értékei az
+> [espressif/esp32-arduino-lib-builder](https://github.com/espressif/esp32-arduino-lib-builder)
+> `configs/defconfig.common` és `configs/defconfig.esp32c3` fájljaiból valók –
+> ezekből fordulnak az `esp32-arduino-libs` előfordított könyvtárak. Ami ott
+> nem szerepel, arra az ESP-IDF Kconfig alapértelmezése érvényes.
+
+Ezért az `initWatchdog()` mindhármat kifejezetten beállítja:
+
+- **90 másodperces** timeout – a leghosszabb *nem etethető* blokkolás a
+  `http.GET()`. A rossz eset nem a hallgató szerver (5 mp connect + 10 mp
+  válasz = 15 mp), hanem a **halott DNS**, mert a névfeloldás a connect
+  timeouton **kívül** esik – lásd lentebb
+- **`trigger_panic = true`** – timeoutkor valódi újraindulás
+- **`idle_core_mask = 0`** – csak a saját loop taskot figyeli. Az idle task
+  figyelése itt káros lenne, mert a firmware szándékosan blokkol percekig
+- a hosszú várakozások (`waitWithButtons`, `blockingDelay`, a 90 mp-es relé
+  pulzus, az újracsatlakozás) **etetik** a watchdogot ~10 ms-onként
+
+> A TWDT timeoutja globális, ezért az AsyncTCP saját taskjának figyelése is
+> 5 mp-ről 90 mp-re lazul (`CONFIG_ASYNC_TCP_USE_WDT=1`, `AsyncTCP.cpp:334`).
+> Ez a gyakorlatban nem számít: az aszinkron szerver kérései (az AP portál és
+> a normál üzemű állapotoldal) ezredmásodpercek alatt lefutnak.
+
+#### Mikor élesedik
+
+A watchdog **a soros port beállása után azonnal** élesedik, még a
+gombellenőrzés és a LittleFS csatolása előtt – vagyis a `setup()` gyakorlatilag
+teljes egészében felügyelet alatt van:
+
+| Szakasz | Felügyelve? | Megjegyzés |
+|---|:---:|---|
+| `pinMode`-ok, relé hold feloldása, `Serial.begin()` + max. 3 mp várakozás | nem | ide még nem megy ki soros üzenet, tehát az `initWatchdog()` hibajelzése is elveszne |
+| gombellenőrzés, `checkWatchdogResets()` | **igen** | 3 mp türelem az elengedésre, aztán 3 mp villogás és deep sleep |
+| LittleFS csatolás / **formázás** | **igen** | lásd lent |
+| konfiguráció beolvasása | **igen** | négy rövid fájl |
+| `WiFi.persistent()`, `initWiFi()`, AP portál indítása | **igen** | a Wi-Fi init a legvalószínűbb lefagyási pont; a 20 mp-es várakozás magától etet |
+| `loop()` | **igen** | a core minden `loop()` körben etet (`loopTaskWDTEnabled`) |
+
+> **Miért fér bele a formázás?** A `LittleFS.begin(true)` első indításkor
+> formáz, etetés nélkül. A `partitions_custom.csv` 512 KiB-os partíciója
+> **128 szektor**: tipikusan 30–50 ms/szektor, azaz **4–7 mp**, és még a
+> szélsőségesen lassú, 400 ms/szektoros esetben is **~51 mp** – mindkettő a
+> 90 mp-es `WDT_TIMEOUT_MS` alatt marad. A korábbi, ~1,5 MB-os sémánál ez
+> 15–20 mp volt tipikusan, de a rossz esetben **153 mp**, azaz a timeout
+> fölött – **ezért volt ott indokolt kihagyni a formázást a felügyeletből, és
+> ezért fér bele most.** A kisebb partíció tette lehetővé ezt a változtatást.
+
+#### Mit fog el a hardver magától
+
+Az ESP32-C3 watchdogjai mind hardveresek (`SOC_WDT_SUPPORTED`):
+
+| Watchdog | Állapot az Arduino buildben | Mit fog el |
+|---|---|---|
+| **INT_WDT** (interrupt) | **bekapcsolva, 300 ms** – `CONFIG_ESP_INT_WDT_TIMEOUT_MS=300` (`defconfig.common:17`); magát a `CONFIG_ESP_INT_WDT`-t a lib-builder sehol nem tiltja le, tehát marad az IDF `default y` | ha a FreeRTOS tick megáll: letiltott megszakítás, végtelen ciklus megszakításban |
+| **TWDT** (task) | bekapcsolva (`ESP_TASK_WDT_EN`/`_INIT` IDF alap `y`), 5 mp, panic **`y`** (`defconfig.common:21`); az idle task nincs figyelve (`# CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0 is not set`, `defconfig.esp32c3:2`) | egy figyelt task nem etet – ezt konfiguráljuk 90 mp-re |
+| **RWDT** (RTC) | bootloader, 9000 ms | **csak a bootot** – az IDF `app_main()` előtt kikapcsolja (`BOOTLOADER_WDT_DISABLE_IN_USER_CODE` alapból `n`) |
+
+Az INT_WDT és a TWDT megléte **fordítási idejű** (sdkconfig) döntés: ezek a
+beállítások az előfordított `esp32-arduino-libs` könyvtárakba vannak beleégetve.
+Vázlatból nincs API, amivel az INT_WDT-t be lehetne kapcsolni – ha ki lenne
+kapcsolva, csak saját IDF-fordítás vagy az `esp32-arduino-lib-builder`
+segítene. A TWDT-ből ezzel szemben van futásidejű API (`esp_task_wdt_*`), és a
+firmware ezt használja is.
+
+##### Miért 90 mp, és nem 30
+
+A `NetworkClient::connect(host, port, timeout)` **először** névfeloldást végez,
+és az `http.setConnectTimeout()` erre **nem vonatkozik**:
+
+```cpp
+int NetworkClient::connect(const char *host, uint16_t port, int32_t timeout_ms) {
+  IPAddress srv((uint32_t)0);
+  if (Network.hostByName(host, srv) != 1) {   // <- nincs timeout paraméter
+    return 0;
+  }
+  return connect(srv, port, timeout_ms);
+}
 ```
-FIGYELEM: a watchdog NEM vedi a loop()-ot (...). A program fut, de
-lefagyas eseten nem indul ujra.
-```
 
-Ilyenkor a firmware **nem etet** – etetés feliratkozás nélkül csak
-hibaüzeneteket öntene a soros portra (mérve 100 sor/perc), védelmet nem adna.
+Egy lwIP DNS lekérdezés **szerverenként ~7 mp** alatt adja fel: `DNS_MAX_RETRIES`
+= 4 (lwIP `opt.h`), `DNS_TMR_INTERVAL` = 1000 ms (`dns.h`), és a `dns_check_entry()`
+a `tmr`-t 1, 1, 2, 3 lépésekben növeli – összesen 7 tick. DHCP-től jellemzően
+2 szerver jön (a 3. slot a fallback, `LWIP_FALLBACK_DNS_SERVER_SUPPORT` alapból `n`).
+
+Ha az eszköznek van **globális IPv6 címe** (a lib-builder `CONFIG_LWIP_IPV6_AUTOCONFIG=y`),
+a `hostByName()` **kétszer** kérdez: előbb csak `AF_INET6`-ot, aztán `AF_UNSPEC`-et.
+
+A 3.3.x core-ban ráadásul a sikertelen névfeloldás után még egy `0.0.0.0`-ra
+irányuló `connect()` is lefutott a maga 5 másodpercével (a `lwip_getaddrinfo()`
+pozitív hibakódját a `!hostByName()` nem vette észre). A 4.0.0 ezt javította
+(`NetworkClient::connect()`: `hostByName(...) != 1` → azonnali kilépés), így ott
+a legrosszabb eset ~28 mp.
+
+| eset | egy bukott HTTP teszt |
+|---|---|
+| szerver hallgat, DNS jó | 15 mp |
+| 1 DNS szerver, nincs IPv6 | ~12 mp |
+| 2 DNS szerver, nincs IPv6 | ~19 mp |
+| 2 DNS szerver + globális IPv6 | ~28 mp (4.0.0), **~33 mp** (3.3.x) |
+
+A 90 mp tehát legalább ~2,7-szeres tartalékot ad. A `WD13` teszt a 33 mp-es
+legrosszabb esetet méri.
+
+A „kemény" megállást tehát az INT_WDT 300 ms alatt elkapja, akkor is, ha a
+task watchdog még nem élesedett. Amit **csak** a task watchdog lát, az a
+csendes, szabályosan blokkoló beragadás – amikor a rendszer tovább tickel, de
+a mi taskunk örökre vár valamire. Épp ezért kellett a Wi-Fi init elé.
+
+#### A feliratkozás ellenőrzése
+
+Az `enableLoopWDT()` a core-ban **`void`** (`esp32-hal-misc.c`): ha az
+`esp_task_wdt_add()` hibázik, csak egy belső `log_e()` jelzi, a visszatérési
+értékből semmi. Ez akkor fordulhat elő, ha a TWDT nincs inicializálva
+(`ESP_TASK_WDT_INIT=n`) – ilyenkor az `add()` `ESP_ERR_INVALID_STATE`-et ad.
+
+Ezért az `initWatchdog()`:
+
+1. ha kell, maga hívja az `esp_task_wdt_init()`-et (figyelt task nélkül ez még
+   nem indítja el a timert),
+2. **utána** iratkozik fel – ez a sorrend azért kell, mert az
+   `esp_task_wdt_reconfigure()` csak nem üres tasklistánál indítja újra a
+   timert (`task_wdt.c:595`),
+3. végül `esp_task_wdt_status(NULL)`-lal **visszakérdezi**, hogy a `loop()`
+   tényleg figyelve van-e.
+
+Csak ha ez igaz, írja ki, hogy `Watchdog enabled`. Ha nem, egyértelmű
+figyelmeztetést ad, és **nem etet**: feliratkozás nélkül minden
+`feedLoopWDT()` `ESP_ERR_NOT_FOUND`-ot kapna, amire a core `log_e()`-t hív –
+mérve **100 hibasor percenként** normál működésben, védelem nélkül.
+
+#### Ismétlődő watchdog újraindulás
+
+Ha a program ismételten megakad, az újraindítgatás önmagában nem megoldás.
+**3 watchdog/panic miatti újraindulás után** az eszköz ugyanúgy leáll, mint a
+többi végzetes hibánál: mindkét LED villog, 5 perc után deep sleep, és **csak a
+reset gomb ébreszti**.
+
+- A számláló `RTC_NOINIT_ATTR`-ben van, mert az `RTC_DATA_ATTR`-t egy watchdog
+  reset újrainicializálná, azaz épp azt veszítenénk el, amit számolni akarunk.
+- Rendellenesnek számít: `ESP_RST_TASK_WDT`, `ESP_RST_INT_WDT`, `ESP_RST_WDT`,
+  `ESP_RST_PANIC`, `ESP_RST_CPU_LOCKUP`.
+- **Áramtalanítás** vagy külső reset nullázza (emberi beavatkozás → tiszta lap).
+- **1 óra hibátlan működés** szintén nullázza.
+
+Az **interrupt watchdog** (`ESP_INT_WDT`) az Arduino buildben aktív
+(lásd fentebb: `defconfig.common:17`), és a panic kezelő alapértelmezése
+`PRINT_REBOOT`, tehát a megszakítás-szintű megakadásokat az IDF már eleve
+kezeli.
+
+> A hosszú várakozások `delay()`-t használnak `yield()` helyett. A `yield()`
+> csak azonos prioritású taskok között ad át vezérlést, tehát a korábbi
+> változat a 90 mp-es relé pulzus alatt 100%-on pörgette a CPU-t; a `delay()`
+> `vTaskDelay()`-re fordul, ami ténylegesen felfüggeszti a taskot.
 
 ---
 
@@ -717,30 +928,32 @@ Egy `ESP.restart()` a RAM-ot törli, tehát minden sima globális elveszik. A
 többségükért nem kár: a `timing` újraszámolódik, a `firstStart` várakozás újra
 lefut (és a próba perceken belül le is zárja).
 
-**Egy kivétel van:** a `testState.resetEvents`, a reset-lépcső állása. Ha egy
-heap-újraindulás nullázná, a következő reset a 30+ perces lépcső helyett már
-2–15 perc múlva jönne. Ezért átmegy az RTC memórián (`rtcCarryResetEvents`), és
-a `setup()` **pontosan egyszer** használja fel; ha nem nulla, a kiesés
-folytatódik, és a következő reset a lépcső szerint az indulástól számít.
-(Mérve: `HP4`, `RD9`.)
+**Egy kivétel van:** az internet-lépcső (`testState`: a resetek száma, a kiesés
+kezdete, az utolsó reset ideje). Ha egy újraindulás nullázná, a következő reset
+a 30+ perces lépcső helyett már 2–15 perc múlva jönne. Ezért minden
+**szándékos** újraindulás (a heap és a Wi-Fi miatti) előtt ugyanaz a függvény
+menti az RTC memóriába (`carryLadder()`: `rtcCarryResetEvents`,
+`rtcCarryOutageAgoMin`, `rtcCarryResetAgoMin`), és a `setup()` **pontosan
+egyszer** állítja vissza (`applyLadderCarry()`): a kiesés és a lépcső percre
+pontosan ott folytatódik, ahol abbamaradt. (Mérve: `HP4`, `RD9`, `WFL11`,
+`WFL12`.)
 
 Ami eleve túléli: a diagnosztikai napló és a watchdog-számláló (`RTC_NOINIT`),
 valamint a LittleFS-en tárolt konfiguráció.
 
-#### A Wi-Fi-lépcső
+#### A Wi-Fi-kiesés
 
-A Wi-Fi-lépcső foka és a kiesés hossza eleve `RTC_NOINIT`-ben él (5. fejezet),
-tehát külön átvitel nélkül is túléli a heap-újraindulást; előtte a kiesés eddigi
-hossza percre pontosan mentődik. Gombnyomás viszont törli: ott tiszta lap kell.
-(Mérve: `WFL8`, `GWH5`.)
+Az ESP-újraindítás jelzője és a Wi-Fi-kiesés hossza eleve `RTC_NOINIT`-ben él
+(5. fejezet); a szándékos újraindulás előtt a kiesés eddigi hossza percre
+pontosan mentődik (`persistBeforeRestart()`). Gombnyomás viszont törli: ott
+tiszta lap kell. (Mérve: `WFL8`, `GWH5`.)
 
 #### A teljes lista: mi vész el, és miért nem baj
 
 | Változó | Mi lesz vele | Miért rendben |
 |---|---|---|
-| `testState.resetEvents` | **átvisszük** | enélkül a reset-lépcső elölről kezdődne |
-| `rtcWifiStep`, `rtcWifiOutageMin`, `rtcWifiResetAgoMin` (Wi-Fi-lépcső) | eleve `RTC_NOINIT`, a kiesés hossza előtte mentődik | lásd fent |
-| `testState.outage`, `outageStart`, `lastResetAt` | újraszámolódik | ha volt reset, a kiesés az indulástól folytatódik (`GWH3`) |
+| `testState` lépcső (`resetEvents`, `outage`, `outageStart`, `lastResetAt`) | **átvisszük**, percre pontosan | enélkül a reset-lépcső elölről kezdődne (`GWH3`, `RD9`) |
+| `rtcWifiRestarted`, `rtcWifiOutageMin` (Wi-Fi-kiesés) | eleve `RTC_NOINIT`, a kiesés hossza előtte mentődik | lásd fent |
 | `testState.endpointIndex` | elvész | csak azt mondja meg, melyik HTTP végpont jön |
 | `dnsState` (DNS-gyanú, DNS-lépcső) | elvész | a DNS-ellenőrzés újraindul; legfeljebb egy korábbi DNS-reset jön |
 | `testState.resetStep` | elvész | **nem lehet** félbehagyott pulzus: a relé impulzusa alatt nincs újraindulás |
@@ -771,7 +984,7 @@ hossza percre pontosan mentődik. Gombnyomás viszont törli: ott tiszta lap kel
 ## 13. Két task, egy memória
 
 A programban két task fut: a `loop` task és az AsyncTCP webszerver
-**`async_tcp`** taskja (ez utóbbi csak AP beállító módban). Néhány globálishoz
+**`async_tcp`** taskja (az AP portál és a normál üzemű állapotoldal kérései). Néhány globálishoz
 mindkettő hozzáfér – itt van egy helyen, mi védi őket:
 
 | Globális | `async_tcp` | `loop` | Mi védi |
@@ -779,8 +992,8 @@ mindkettő hozzáfér – itt van egy helyen, mi védi őket:
 | `apDeadline` | ír (mind a 4 kezelő) | olvas | `volatile`, igazított 32 bites szó – a C3-on egyetlen utasítás |
 | `restartPending`, `restartAt` | ír (POST) | olvas | `volatile` |
 | `savingConfig` | foglal/elenged (POST) | foglal (gombok, leállás) | **spinlock** (`beginConfigWrite()`) |
-| `rtcEvents`, `rtcEvNext` | ír (`CONFIG SAVED`), olvas (`/log`) | ír, olvas | **`evLogMux`** kritikus szakasz |
-| `rtcWdtResets`, `rtcWifiStep`, `rtcWifiOutageMin` | **csak olvas** (`/log`) | ír | igazított szó – a lapon legfeljebb egy pillanattal régi érték áll |
+| `rtcEvents`, `rtcEvNext` | ír (`CONFIG SAVED`), olvas (`/log`, állapotoldal) | ír, olvas | **`evLogMux`** kritikus szakasz |
+| `rtcWdtResets`, a lépcsők (`testState`, `dnsState`, `rtcWifiRestarted`), `rtcWifiOutageMin` | **csak olvas** (`/log`, állapotoldal) | ír | igazított szó – a lapon legfeljebb egy pillanattal régi érték áll |
 | `ssid`, `pass`, `ipStr`, `gatewayStr` | ír (POST 2. fázisa) | olvas (`WiFi.begin()`) | **szerkezeti invariáns**, lásd lent |
 
 ### A négy konfigurációs puffer
@@ -989,6 +1202,27 @@ szólunk róla. (Mérve: `NV2`.)
 > a fájlrendszerre. Ezért: **ha az `EventEntry` vagy az `EVLOG_SIZE` változik, az
 > `EVLOG_MAGIC`-et is emelni kell.** Az ára egyetlen bootnyi napló, cserébe
 > nincs hamis diagnosztika. (Mérve: `LOG8`.)
+
+### Az állapotoldal normál üzemben
+
+Figyelés közben az eszköz egy **csak olvasható** oldalt szolgál ki a saját
+IP-címén (`http://<az eszköz IP-je>/`; a cím a soros porton, induláskor
+látszik). AP módba váltáskor leáll, mert ott a beállító portál veszi át a 80-as
+portot.
+
+| Mit mutat | Honnan |
+|---|---|
+| uptime, az utolsó indulás oka, szabad heap | a futó rendszer |
+| internet és a router DNS-e: rendben / hiba N perce, és a resetek száma ebben a hibában; Wi-Fi: rendben / nemrég kiesett (Wi-Fi nélkül az oldal el sem érhető) | a lépcsők (`diagCounters()`) |
+| fut-e épp router reset; watchdog- és heap-újraindulások | számlálók |
+| az utolsó **20** esemény | az RTC napló (fájlt nem olvas) |
+
+**Biztonság:** csak a saját alhálózatról érkező kérést szolgálja ki (a kliens
+címe a `WiFi.localIP()` / `WiFi.subnetMask()` hálózatába esik), máshonnan –
+például egy továbbított portról – `403`. Nincs űrlap, nincs POST, nincs
+fájl-kiszolgálás, és sem az SSID, sem a jelszó nem szerepel rajta (`ST1`–`ST5`).
+A teljes napló és a beállítások továbbra is csak AP módban érhetők el. Aki a
+helyi hálózaton van, látja az eszköz állapotát – ez a tudatos ár.
 
 ### Mit mutat az AP mód weboldala?
 
@@ -1200,7 +1434,7 @@ arányosan romlik; a védelem hat sor, és nincs hátránya. (Mérve: `LOG4`.)
 ## 16. A forráskód szerkezete
 
 A program **nyolc fordítási egység**: a `bazsi_router_reboot.ino` és hét modul
-a sketch mappájában. Összesen ~3550 sor, 123 függvény. A kommentek egysorosak
+a sketch mappájában. Összesen ~3750 sor, ~130 függvény. A kommentek egysorosak
 és csak a nem magától értetődő részeknél állnak; a döntések indoklása ebben a
 dokumentumban és a commit-üzenetekben van.
 
@@ -1220,6 +1454,38 @@ dokumentumban és a commit-üzenetekben van.
 
 A `MODE_MONITOR`-ból van út a másik kettőbe, **visszaút nincs**.
 
+### A fájlok
+
+```
+bazsi-router-reboot/
+├── bazsi_router_reboot.ino   # Fő sketch: a döntéshozatal (setup, loop, állapotgép)
+│
+├── limits_config.h           # a konfig mezők méretkorlátai (se állapot, se függvény)
+├── app_hooks.h               # amit a főmodul ad a moduloknak (szándékosan rövid)
+├── strutil.h/.cpp            # tiszta szöveg-segédek
+├── secret.h/.cpp             # a mentett jelszó összekeverése
+├── sync.h/.cpp               # a két task közti osztott állapot
+├── configstore.h/.cpp        # a négy mentett érték + LittleFS
+├── eventlog.h/.cpp           # diagnosztikai napló + valós idő (NTP)
+├── netprobe.h/.cpp           # HTTP végpont-tesztek, ICMP ping, DNS-kérdés
+├── webportal.h/.cpp          # az AP beállító portál és a normál üzemű állapotoldal
+│
+├── partitions_custom.csv     # Egyedi partíciós tábla: OTA nélkül, 512 KiB LittleFS
+├── test/                     # host tesztkészlet (387 forgatókönyv)
+│
+├── README.md                 # belépő: mi ez, és hol mi van
+├── ATTEKINTES.md             # egyoldalas összefoglaló
+├── MUKODES.md                # a teljes leírás (ez a fájl), folyamatábrákkal
+└── LICENSE                   # MIT License
+```
+
+A Wi-Fi beállító weboldal a programba van fordítva (`FORM_HEAD` / `FORM_TAIL`
+konstansok + a `sendConfigForm()` generálja a mezőket), a flash `.rodata`
+szekciójában – nincs külön feltöltendő `data/` mappa. A LittleFS-re így csak a
+négy konfigurációs fájl, az AP jelszó és a mentett napló kerül (`/ssid.txt`,
+`/pass.txt`, `/ip.txt`, `/gateway.txt`, `/appass.txt`, `/evlog.bin` – ez
+utóbbi ~1,5 KB, 128 bejegyzés).
+
 ### A modulok
 
 Fentről lefelé: minden modul csak a nála lentebb állóktól függ. A `configstore`
@@ -1234,8 +1500,8 @@ Fentről lefelé: minden modul csak a nála lentebb állóktól függ. A `config
 | **`configstore`** | 230 | a négy mentett érték, a fájljaik, a LittleFS | a négy puffer, `readConfigValue()`, `readSecretValue()`, `writeConfigValue()`, `clearConfigValue()`, `staticPairValid()`, `initLittleFS()`, `filesystemReady()` |
 | **`eventlog`** | 517 | a diagnosztikai napló **és** a valós idő (NTP) | `logEvent()`, `saveEventLog()`, `loadEventLogHeader()`, `loadEventLogRange()`, `printEventLogs()`, `eventName()`, `formatEpoch()`, `ensureNtp()`, `applyTimezone()`, `localHour()` |
 | **`netprobe`** | 331 | HTTP végpont-tesztek, ICMP ping, DNS-kérdés | `testInternetHTTP()`, `lastHttpCode()`, `httpCodeLogParam()`, `testInternetPing()`, `buildDnsQuery()`, `dnsResponseOk()`, `testDnsServer()` |
-| **`webportal`** | 596 | az AP beállító portál és az eszközönkénti AP jelszó | `startWebPortal()`, `stopWebPortal()`, `touchApDeadline()`, `announceApPassword()` |
-| **`app_hooks.h`** | 22 | amit a főmodul ad a moduloknak | `feedWatchdog()`, `resetbutton()`, `wifiresetbutton()`, `waitWithButtons()`, `printUptime()`, `diagCounters()` |
+| **`webportal`** | 702 | az AP beállító portál, az eszközönkénti AP jelszó és a normál üzemű állapotoldal | `startWebPortal()`, `stopWebPortal()`, `startStatusPage()`, `stopStatusPage()`, `touchApDeadline()`, `announceApPassword()` |
+| **`app_hooks.h`** | 30 | amit a főmodul ad a moduloknak | `feedWatchdog()`, `resetbutton()`, `wifiresetbutton()`, `waitWithButtons()`, `printUptime()`, `diagCounters()` |
 
 > A `webportal` kapta a legszorosabb határt, mert ez a program
 > **biztonságkritikus felülete**: ezen megy be a Wi-Fi jelszó. A POST-kezelő,
@@ -1246,7 +1512,7 @@ Fentről lefelé: minden modul csak a nála lentebb állóktól függ. A `config
 > az a rossz határhúzás első jele.** Egyszer már meg is történt – a
 > `filesystemReady()` átmenetileg ide került, majd oda, ahová való (`configstore`).
 
-### A főmodul (`bazsi_router_reboot.ino`, ~1700 sor, 61 függvény)
+### A főmodul (`bazsi_router_reboot.ino`, ~1740 sor, 67 függvény)
 
 Ami maradt: a **döntéshozatal**. A modulok mérnek és tárolnak, a főmodul
 eldönti, mi következik.
@@ -1257,12 +1523,13 @@ eldönti, mi következik.
 | A `loop()` ágai | `clearHealthyRunCounters()` · `handleFatalMode()` · `handleConfigMode()` · `runMonitorStateMachine()` |
 | Az állapotgép | `runCheckState()` · `runResetState()` · `handleFirstStart()` |
 | Wi-Fi | `initWiFi()` · `reconnectWifi()` · `wifiAuthFailed()` · `ensureFallbackDns()` |
-| Wi-Fi-lépcső | `wifiFailed()` · `initWifiLadder()` · `wifiConnectedTick()` · `wifiResetPending()` · `wifiResetWaitMs()` · `wifiOutageMinutes()` · `wifiLadderPersist()` · `wifiLadderClear()` |
-| Internet és router | `internetOk()` · `gatewayPingOk()` · `routerDnsCheck()` · `gatewayUnreachable()` · `resetWaitMs()` · `quietHours()` · `backoffMs()` |
+| Wi-Fi-lépcső | `wifiFailed()` · `initWifiLadder()` · `wifiConnectedTick()` · `wifiResetPending()` · `wifiFirstWindowMs()` · `wifiLadderLevel()` · `wifiOutageMinutes()` · `persistBeforeRestart()` · `wifiLadderClear()` |
+| Internet és router | `internetOk()` · `gatewayPingOk()` · `routerDnsCheck()` · `gatewayUnreachable()` · `netFirstWindowMs()` · `quietHours()` |
+| A közös reset-lépcső | `ladderBegin()` · `ladderEnd()` · `ladderCountReset()` · `ladderWaitMs()` · `backoffMs()` · `carryLadder()` · `applyLadderCarry()` |
 | Relé | `startRouterReset()` · `reset_device()` · `holdRelayForSleep()` |
 | A két alvás | `enterDeepSleep()` ← `apSleep()`, `fatalSleep()`; külön úton `handleStuckButton()` |
 | Gombok | a két ISR (`onResetButtonEdge()`, `onWifiResetButtonEdge()`) · `armButtonLatches()` · `resetbutton()` · `wifiresetbutton()` · `pressedButtonNow()` · `doWifiReset()` |
-| Watchdog és heap | `initWatchdog()` · `checkWatchdogResets()` · `feedWatchdog()` · `checkHeap()` · `initHeapState()` · `applyHeapCarry()` |
+| Watchdog és heap | `initWatchdog()` · `checkWatchdogResets()` · `feedWatchdog()` · `checkHeap()` · `initHeapState()` |
 | Soros parancsok | `serialCommands()` · `runSerialCommand()` |
 | Várakozások | `blockingDelay()` · `waitWithButtons()` · `onlineProbe()` · `onlineProbeDue()` |
 | Leállás | `lockConfigBeforeShutdown()` · `restartFromButton()` · `enterFatal()` · `fatalHalt()` |
@@ -1282,3 +1549,596 @@ Négy visszatérő minta szövi át az egészet:
 | **Előjel nélküli különbség minden időzítésnél** | így a `millis()` 49,7 napos körbefordulása sehol nem számít |
 | **„Csak a sorozat első tagja"** | `TEST FAIL` (kiesésenként), `WIFI LOST`, `STUCK BUTTON`, `LOW HEAP` – ez védi a 32 elemű naplót és a soros portot |
 | **A zár atomikus megszerzése** | sosem „megnézem, szabad-e, aztán csinálom" – a webszerver taskja közben beléphet |
+
+---
+
+## 17. Hardver és bekötés
+
+| Komponens | Leírás |
+|-----------|--------|
+| **Mikrokontroller** | ESP32-C3 (pl. XIAO ESP32-C3) |
+| **Relé modul** | 1 csatornás relé (router tápellátásának kapcsolására), a vezérlőbemenetén 22 kΩ lehúzó ellenállás a GND felé |
+| **LED #1** | Állapot LED (D4 pin) |
+| **LED #2** | Wi-Fi állapot LED (D3 pin) |
+| **Nyomógomb #1** | Reset gomb (D1 pin) – ESP újraindítás |
+| **Nyomógomb #2** | Wi-Fi reset gomb (D0 pin) – mentett Wi-Fi adatok törlése |
+
+> ⚠️ **Strapping láb.** A `D0` = **GPIO2** az ESP32-C3 egyik strapping lába: a
+> chip csak akkor bootol, ha a reset pillanatában GPIO2 = 1. A Wi-Fi reset
+> gombot **bekapcsolás közben ne tartsd nyomva** – az eszköz el sem indulna,
+> és ez ellen szoftver nem védhet. Új hardver revízióban a gombot érdemes
+> szabad, nem-strapping lábra tenni (pl. `D2` = GPIO4, ami RTC-képes is).
+
+#### Pin kiosztás
+
+| Pin | Funkció |
+|-----|---------|
+| `D0` | Wi-Fi reset gomb (INPUT_PULLUP) |
+| `D1` | Reset / ébresztő gomb (INPUT_PULLUP) – RTC GPIO, deep sleepből is ébreszt |
+| `D3` | Wi-Fi állapot LED |
+| `D4` | Állapot LED |
+| `D10` | Relé vezérlés (router tápellátás) – **külső 22 kΩ lehúzó a GND felé** |
+
+A LED-jelzések a 11. fejezetben.
+
+---
+
+## 18. Telepítés
+
+### Szükséges könyvtárak
+
+| Könyvtár | Leírás |
+|----------|--------|
+| `WiFi.h` | ESP32 Wi-Fi kezelés (a board package része) |
+| `ESPAsyncWebServer` (**ESP32Async** fork, tesztelve: 3.12.1) | Aszinkron webszerver |
+| `AsyncTCP` (**ESP32Async** fork, tesztelve: 3.6.1 – a 3.6.0-t kerüld, bootolási hurok) | Aszinkron TCP az ESPAsyncWebServer-hez |
+| `LittleFS` | Fájlrendszer a flash memóriában (a board package része) |
+| `HTTPClient` | HTTP kérések az internettesztekhez (a board package része) |
+| `ESPping` (dvarrel, tesztelve: 1.0.5) | ICMP ping (internet és router) |
+
+> A webszervernél kifejezetten a karbantartott **ESP32Async** forkot használd
+> (`ESP32Async/ESPAsyncWebServer` + `ESP32Async/AsyncTCP`): a régi, elhagyott
+> me-no-dev változat API-ja több ponton eltér (pl. `params()` visszatérési
+> típusa, `getParam()` const-ossága, a hiányzó fájl hibakódja).
+
+### Fordítás és feltöltés
+
+#### Arduino IDE
+
+1. Telepítsd az **ESP32 board support**-ot az Arduino IDE-ben
+2. Telepítsd a szükséges könyvtárakat (Library Manager vagy kézi telepítés)
+3. Válaszd ki a board-ot: **ESP32-C3** (pl. *XIAO_ESP32C3*)
+4. Nyisd meg a `bazsi_router_reboot.ino` fájlt. A mellette lévő `.h` és `.cpp`
+   modulokat **ugyanabban a mappában** kell hagyni – az Arduino a sketch mappa
+   minden forrását lefordítja és hozzálinkeli (a szerkesztőben külön fülként
+   jelennek meg).
+
+   > **A mappanévnek egyeznie kell a `.ino` nevével.** A klónozott repó mappája
+   > `bazsi-router-reboot` (kötőjellel), a sketch viszont
+   > `bazsi_router_reboot.ino` (alulvonással) – ezt az Arduino nem fogadja el
+   > (`main file missing from sketch`). Másold a `.ino`-t, az összes `.h`/`.cpp`
+   > modult és a partíciós táblát egy `bazsi_router_reboot` nevű mappába:
+   >
+   > ```bash
+   > mkdir -p bazsi_router_reboot
+   > cp bazsi_router_reboot.ino *.h *.cpp bazsi_router_reboot/
+   > cp partitions_custom.csv bazsi_router_reboot/partitions.csv
+   > ```
+   >
+   > (Az Arduino IDE 2.x fel is ajánlja a másolást, amikor megnyitod a fájlt.)
+   > A CI ugyanezt teszi a fordítás előtt.
+5. Másold a `partitions_custom.csv`-t a sketch mappájába **`partitions.csv`**
+   néven – a core a sketch melletti `partitions.csv`-t automatikusan használja.
+   A fordítás végén kiírt méretkorlát viszont a `Partition Scheme` menüé
+   (alapból 1,25 MB); a program ~1,2 MB. Ha egyszer fölé nőne, válaszd a
+   **Huge APP** sémát: az csak a korlátot emeli, a partíciós tábla a sketch
+   melletti `partitions.csv` marad (a core azt másolja utoljára).
+   (Ha inkább gyári sémát választanál a `Tools` → `Partition Scheme` menüből,
+   olyat válassz, amiben van SPIFFS/LittleFS partíció.)
+6. Töltsd fel a sketch-et az ESP-re
+
+Fájlrendszert **nem kell feltölteni**: a weboldal a programban van, a LittleFS-t
+az első indulás formázza meg magától.
+
+#### PlatformIO
+
+```ini
+[env:esp32c3]
+platform = espressif32
+board = seeed_xiao_esp32c3
+framework = arduino
+lib_deps =
+    ESP32Async/ESPAsyncWebServer @ ^3.12.1
+    ESP32Async/AsyncTCP @ ^3.6.1
+    dvarrel/ESPping @ ^1.0.5
+board_build.filesystem = littlefs
+board_build.partitions = partitions_custom.csv
+```
+
+### Partíciós tábla (`partitions_custom.csv`)
+
+A gyári Arduino sémák vagy két app-partíciót tartanak fenn az OTA-nak
+(`default.csv`: 2 × 1,25 MB), vagy ~1,5 MB fájlrendszert adnak. Ez a program
+egyiket sem használja: **OTA nincs benne** (USB-ről flashelünk), a LittleFS-en
+pedig összesen négy rövid szöveges fájl él. A weboldal a programban van, tehát
+a fájlrendszernek nem kell weblapot tárolnia.
+
+| Név | Típus | Cím | Méret | Mire |
+|---|---|---|---|---|
+| `nvs` | data / nvs | `0x9000` | 20 KiB | a core saját kulcs-érték tára |
+| `phy_init` | data / phy | `0xE000` | 4 KiB | rádió kalibrációs adatok |
+| `factory` | app / factory | `0x10000` | **3520 KiB (~3,44 MB)** | a program |
+| `spiffs` | data / spiffs | `0x380000` | **512 KiB** | LittleFS (`/ssid.txt`, `/pass.txt`, `/ip.txt`, `/gateway.txt`, `/evlog.bin`) |
+
+A tábla pontosan kitölti a XIAO ESP32-C3 4 MB-os flash-ét. Az app partíció
+kezdőcíme 64 KB-ra, a data partíciók 4 KB-ra igazítottak (a `0xF000`–`0x10000`
+közti 4 KB emiatt marad ki).
+
+Amit ez hoz:
+
+- a program **~3,44 MB**-ot kaphat 1,25 MB helyett,
+- az első indulás LittleFS-formázása 15–20 mp helyett **4–7 mp** (128 szektor
+  × 30–50 ms), ami a watchdog élesedése előtti szakaszt is lerövidíti,
+- cserébe **OTA frissítés nincs** – a program csak USB-n keresztül flashelhető.
+
+> A LittleFS partíció címkéje szándékosan `spiffs`: az Arduino core a
+> `LittleFS.begin()`-ben ezt a címkét keresi. A címke a formátumot nem
+> határozza meg, a partíció tartalma LittleFS.
+
+### Tesztelt konfiguráció
+
+| | |
+|---|---|
+| **Board package** | ESP32 Arduino **4.0.0** (a 3.3.x is fordul: a kód mindkét IDF-et kezeli) |
+| **Beágyazott ESP-IDF** | v6.1 (`esp32-arduino-libs-idf-release_v6.1-051e4c4e-v2`) |
+| **Board** | XIAO ESP32-C3 (`D0`=GPIO2, `D1`=GPIO3, `D3`=GPIO5, `D4`=GPIO6, `D10`=GPIO10) |
+| **ESPAsyncWebServer** | ESP32Async fork, **3.12.1** |
+| **AsyncTCP** | ESP32Async fork, **3.6.1** |
+| **ESPping** | dvarrel, **1.0.5** |
+| **Partíciós séma** | `partitions_custom.csv` (OTA nélkül, 512 KiB LittleFS) |
+
+A firmware viselkedését meghatározó feltételezések a 4.0.0-s core és az IDF 6.1
+forrásában lettek ellenőrizve (a stubokat a `make stubcheck` is igazolja):
+
+- `WiFi.disconnect(true)` → az első paraméter `wifioff`, **nem** `eraseap`
+  (`WiFiSTA.h`), tehát a mentett hálózat nem törlődik.
+- `WiFi.config(ip, gw, subnet, dns1, dns2)` STA ága a DNS-t **szó szerint** az
+  átadott paraméterből veszi (`NetworkInterface.cpp` → `esp_netif_set_dns_info`),
+  gateway-fallback nincs, a DHCP-t pedig leállítja. Ezért kell a DNS-t kézzel
+  megadni.
+- `disconnect(true)` → `STA.end()` → `enableSTA(false)` → `STAClass::onDisable()`,
+  ami `_esp_netif = NULL; destroyNetif()`. A statikus IP/DNS és az
+  `ESP_NETIF_HAS_STATIC_IP_BIT` elvész, a következő `connect()` pedig a bit
+  hiányában `config()`-ot hív → DHCP. Ezért nem elég a nyers `WiFi.begin()`
+  a router reset után.
+- Deep sleepben az ESP32-C3 `GPIO6–21` lábai nagyimpedanciásak, csak a
+  `GPIO0–5` tartható hold funkcióval (ESP-IDF *Sleep Modes*, esp32c3).
+- A deep sleep gomb-ébresztés IDF 6-ban
+  `esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown()`, IDF 5.5-ben
+  `esp_deep_sleep_enable_gpio_wakeup()` – a kód mindkettőt kezeli. Csak RTC-képes
+  lábat fogad el; a `D1` = GPIO3 megfelel.
+
+---
+
+## 19. Biztonság
+
+- A LittleFS-en tárolt Wi-Fi adatok (`/ssid.txt`, `/pass.txt`, `/ip.txt`,
+  `/gateway.txt`) **nem érhetők el a webszerveren keresztül** – a portál a
+  fájlrendszerről semmit nem szolgál ki, a `/` és a `/log` tartalma is a
+  programból megy ki. A normál üzemű állapotoldal csak olvasható, és csak a
+  helyi alhálózatról érhető el (15. fejezet).
+- A jelszó soha nem kerül ki nyílt szövegként a soros portra, csak a hossza.
+- **A mentett jelszó semmilyen weboldalon nem érhető el**: sem az űrlap
+  előkitöltésében (`AP2`), sem a naplóoldalon (`LOG2`), sem a hibaüzenetekben –
+  azok fix szövegek, sosem a beírt érték. A beírás `type="password"` mezőben
+  történik, `POST` metódussal, tehát a böngésző előzményeibe sem kerül be.
+- **Az előkitöltött értékek HTML-escape-elve mennek ki** (`AP3`). Az SSID
+  tetszőleges 32 bájt lehet, idézőjelet és `<` jelet is: escape nélkül az
+  előkitöltés maga nyitna XSS-t a saját portálunkon.
+- **Az AP jelszava eszközönként egyedi** (`APP1`–`APP6`): 12 karakter egy
+  32 elemű, összetéveszthető jelek nélküli ábécéből (60 bit), az `esp_random()`
+  hardveres véletlenszám-generátorából – a rádió bekapcsolása UTÁN, mert csak
+  akkor valódi véletlen (`esp_random.h`). Kódolva a `/appass.txt`-ben áll, a
+  wifireset gomb nem törli. Sérült vagy hiányzó fájlnál új jelszó generálódik
+  (a soros port kiírja). Normál üzemben nincs flash-írás.
+- **Ami tudatosan NINCS**, és miért: *flash-titkosítás* (az eFuse égetése
+  visszafordíthatatlan – éles eszközön a Wi-Fi jelszó valódi védelméhez ez
+  kellene, a mostani kódolás csak elfedés); *OTA frissítés* (hitelesített
+  frissítési lánc nélkül nagyobb rés lenne, mint a hiánya).
+
+#### A mentett jelszó összekeverése
+
+A `/pass.txt` nem nyílt szöveggel tárolódik:
+
+```
+v1:ef58b21d923ed7afdc03f7e8336431cc8f158ea5
+```
+
+**Amit ad:**
+
+| | |
+|---|---|
+| `strings dump.bin` a flash dumpon | nem ad használható jelszót (még 4 karakteres darabját sem) |
+| Kimásolt `/pass.txt` másik lapkán | nem működik |
+| Kész dekóder a nyilvános forrásból | önmagában nem elég – kell hozzá a konkrét chip |
+
+A kulcsfolyam magjában ott van az **eFuse MAC** is
+(`esp_efuse_mac_get_default()`, `Esp.cpp`). Az eFuse **nem a flashben van**,
+ezért egy önmagában kimásolt flash-tartalom kevés hozzá.
+
+**Amit NEM ad – ez fontos:**
+
+> Ez **nem titkosítás**. Aki kódot tud futtatni az eszközön – az ESP32-C3-ban
+> beépített USB Serial/JTAG-gel (`SOC_USB_SERIAL_JTAG_SUPPORTED`), vagy egy
+> saját sketch-csel –, az a visszafejtett jelszót kiolvassa a RAM-ból: a
+> művelet ugyanis magán az eszközön történik, az eszköz maga a visszafejtő.
+> Ez a `strings | grep` utat zárja le, nem a felkészült támadót.
+>
+> **Az egyetlen valódi védelem a flash titkosítás** (XTS-AES-128, eFuse-ban
+> tárolt kulccsal – a C3 tudja: `SOC_FLASH_ENCRYPTION_XTS_AES_128`). Ára:
+> egyirányú eFuse-égetés és körülményesebb újraflashelés.
+>
+> A legjobb ár/érték arányú lépés viszont nem szoftveres: **tedd az eszközt
+> vendég- vagy IoT-SSID-re**. Akkor egy ellopott eszközből csak a
+> mellékhálózat kulcsa nyerhető ki.
+
+**Kompatibilitás és hibatűrés:**
+
+- A formátum verziózott (`v1:`). Az előtag nélküli fájl **régi, nyílt szöveges
+  mentés** – azt továbbra is elfogadja, tehát egy frissítés nem teszi
+  használhatatlanná a már beállított eszközöket.
+- Hibás tartalom **nem** végzetes hiba: az eszköz sima szövegként kezeli, a
+  Wi-Fi nem jön össze, és a szokásos úton AP módba kerül, ahol újra
+  beállítható. Ez öngyógyul; a villogó LED nem.
+- **Lapkacsere esetén újra kell konfigurálni** – a mentés az adott chiphez
+  kötött. Ugyanezért egy LittleFS-mentés sem hordozható át másik eszközre.
+
+---
+
+## 20. Időzítések egy helyen
+
+| Paraméter | Érték | Leírás |
+|-----------|-------|--------|
+| `WIFI_CONNECT_TIMEOUT_MS` | 20s | Wi-Fi csatlakozási timeout |
+| `CHECK_INTERVAL_MS` | 1 perc | Ilyen sűrűn ellenőriz (a kör kezdetétől); a hosszú várakozások korai lezárását is ilyen sűrűn nézi |
+| `ROUTER_DOWN_WINDOW_MS` | 2 perc | Ennyi internet nélküli idő után reset, ha a router sem válaszol |
+| `WAN_DOWN_WINDOW_MS` | 15 perc | Ennyi után reset, ha a router válaszol (szolgáltatói hiba) |
+| `QUIET_START_HOUR` / `QUIET_END_HOUR` / `QUIET_WINDOW_MS` | 22 / 5 óra, 10 perc | Éjszakai csendes időszak (helyi idő): ilyenkor a `ROUTER_DOWN_WINDOW_MS` helyett 10 perc, és a Wi-Fi miatti első router reset is legalább 10 perc kiesés után |
+| `RETRY_BACKOFF_MS` | 30 / 60 / 120 / 240 perc | Ha a reset nem segített, ennyivel az előző után jön a következő (az utolsó ismétlődik) |
+| `DNS_CHECK_INTERVAL_MS` | 5 perc | Ilyen sűrűn kérdezi a router DNS-ét (gyanúnál percenként) |
+| `DNS_FAIL_WINDOW_MS` | 10 perc | Ennyi folyamatos router-DNS-hiba után reset |
+| `RESET_PULSE` | 90s | Router áramtalanítás időtartama |
+| `RESET_DELAY` | **max.** 10 perc | Várakozás a router reset után (bootolási idő) – korábban véget ér, ha a hálózat és az internet is visszajött |
+| `firstStartDelay` | **max.** 10 perc | Első indítás utáni várakozás – ugyanígy korábban is véget érhet |
+| `wifi_maxRetries` | 3 | Wi-Fi újracsatlakozási próbálkozások |
+| `wifiInterval` | 30s | Szünet a próbálkozások között |
+| `WIFI_STABLE_MS` | 30 perc | Ennyi stabil Wi-Fi után nullázódik a Wi-Fi-lépcső |
+| `WIFI_GIVEUP_MIN` | 48 óra | Ennyi Wi-Fi nélküli idő után AP beállító mód |
+| `AP_TIMEOUT_MS` | 5 perc | AP mód tétlenség után alvás |
+
+---
+
+## 21. Folyamatábrák
+
+A firmware **jelenlegi** működésének pontos folyamatábrái, [Mermaid](https://mermaid.js.org/)
+jelöléssel – a GitHub és a GitLab natívan rendereli, a forrás pedig a kóddal
+együtt verziókezelhető és diff-elhető. Minden időzítés és feltétel a
+`bazsi_router_reboot.ino` konstansaiból származik; a doboz-feliratok a tényleges
+függvény- és konstansneveket használják, hogy az ábra a kódból ellenőrizhető
+legyen.
+
+Jelölés: lekerekített doboz = belépési/kilépési pont, rombusz = döntés,
+téglalap = művelet. Az `EV_*` címkék a diagnosztikai napló eseménykódjai
+(lásd `MUKODES.md` 15. fejezet). A `saveEventLog()` a naplót a LittleFS-re is
+kiírja – **öt** fontos pillanatban: **router reset előtt**, **AP módba váltás
+előtt**, **minden `enterDeepSleep()`-en át vezető alvás előtt** (egyetlen közös
+ponton, a függvény elején), a **heap miatti** és a **Wi-Fi miatti** saját
+újraindulás előtt;
+így egy áramszünet sem viszi el. A mentés **hozzáfűz**, nem ír felül: a fájl
+saját, 128 bejegyzéses gyűrű, az RTC napló 32-es gyűrűje pedig csak a legutóbbi
+mentés óta eltelt időt őrzi. Egyetlen kivétel a beragadt gomb 60 mp-es alvása:
+az a `setup()` elején, a `handleStuckButton()`-ból megy el, saját úton – ott a
+LittleFS még csatolva sincs, tehát nem is volna mit írni.
+
+---
+
+### 1. Üzemmódok – madártávlat
+
+Az eszköz minden ébredése teljes újraindulás (a deep sleep is), ezért a teljes
+életciklus a `setup()`-ból indul. **Három** üzemmód van (`deviceMode`:
+`MODE_MONITOR`, `MODE_CONFIG`, `MODE_FATAL`); alvásból mindig a `setup()`-ba
+tér vissza.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Setup: bekapcsolás / reset / ébredés
+    Setup --> MODE_MONITOR: WiFi OK, vagy first start várakozás
+    Setup --> MODE_CONFIG: nincs mentett SSID
+    Setup --> MODE_FATAL: LittleFS / konfig / 3x watchdog hiba
+    Setup --> StuckSleep: beragadt gomb
+    MODE_MONITOR --> MODE_CONFIG: rossz jelszó / 48 órája nincs Wi-Fi / rossz statikus IP
+    MODE_MONITOR --> Restart: Wi-Fi-lépcső 1. foka (ESP-újraindítás)
+    MODE_MONITOR --> Restart: tartósan kritikus heap (önkéntes újraindulás)
+    MODE_MONITOR --> MODE_FATAL: 3x heap-újraindulás sem segített
+    MODE_CONFIG --> ApSleep: 5 perc tétlenség (csak gombbal ébred)
+    MODE_CONFIG --> Restart: sikeres mentés (2 s múlva)
+    MODE_FATAL --> FatalSleep: 5 perc villogás után (csak gombbal ébred)
+    StuckSleep --> Setup: 60 s timer
+    ApSleep --> Setup: reset gomb
+    FatalSleep --> Setup: reset gomb
+    Restart --> Setup
+```
+
+---
+
+### 2. `setup()` – indulási folyamat
+
+```mermaid
+flowchart TD
+    PWR([Bekapcsolás / reset / ébredés]) --> PINS["GPIO-k beállítása<br>relé = LOW, státusz LED = HIGH<br>relé hold feloldása (gpio_hold_dis)"]
+    PINS --> SER["Serial indítása<br>max 3 s várakozás + 0,5 s CDC-beállás"]
+    SER --> WDT["initWatchdog()<br>TWDT: 90 s, trigger_panic = true<br>a loop task feliratkoztatva<br>innentől a setup() is felügyelt"]
+    WDT --> STUCK{"Nyomva van valamelyik gomb?<br>reset (D1) vagy wifireset (D0) = LOW"}
+    STUCK -->|igen| HOLD{"Elengedik 3 s-on belül?<br>(STUCK_BUTTON_CONFIRM_MS)<br>a gombos ébresztés alatt a gomb<br>MINDIG lenyomva találtatik"}
+    HOLD -->|"igen – ez ébresztő gombnyomás volt"| BOOTLOG
+    HOLD -->|"nem – tényleg beragadt"| SBLOG["EV_BOOT + EV_STUCK_BUTTON naplózása<br>(csak az első körben – az ismétlődő<br>60 s-os ébredések némák)"]
+    SBLOG --> SBLINK["3 s: a két LED FELVÁLTVA villog"]
+    SBLINK --> SB60["Deep sleep 60 s<br>csak timer ébresztés, gomb NEM<br>(boot loop ellen)"]
+    SB60 --> PWR
+    STUCK -->|nem| BOOTLOG["EV_BOOT naplózása"]
+    BOOTLOG --> ARM0["armButtonLatches()<br>a gomb-megszakítások élesítése<br>(a beragadt-gomb ellenőrzés UTÁN)"]
+    ARM0 --> WCHK{"checkWatchdogResets()<br>rendellenes reset volt?<br>(TASK_WDT / INT_WDT / PANIC / LOCKUP)"}
+    WCHK -->|"igen, sorozatban a 3."| FATAL["enterFatal()<br>MODE_FATAL, EV_FATAL(3)"]
+    WCHK -->|"nem, vagy még 3 alatt"| HC["initHeapState() + applyLadderCarry()<br>a szándékos újraindulás átvitele: az internet-lépcső (pontosan egyszer)<br>initWifiLadder(): a Wi-Fi-kiesés (magic-kel);<br>ha az ESP már újraindult, a first start kimarad"]
+    FATAL --> HC
+    HC --> FS{"initLittleFS()<br>begin(formatOnFail = true)<br>formázás: 128 szektor, 4-7 s"}
+    FS -->|"csatolás sikertelen"| FATAL2["enterFatal()<br>EV_FATAL(1)"]
+    FS -->|ok| CFG{"Konfig olvasása:<br>/ssid.txt /pass.txt /ip.txt /gateway.txt<br>(jelszó: v1 hexa dekódolás)"}
+    CFG -->|"fájl létezik, de olvashatatlan"| FATAL3["enterFatal()<br>EV_FATAL(2)"]
+    CFG -->|"ok vagy hiányzó fájl"| PERS["WiFi.persistent(false)"]
+    FATAL2 --> PERS
+    FATAL3 --> PERS
+    PERS --> ISFATAL{MODE_FATAL?}
+    ISFATAL -->|igen| TOLOOP([loop: hibajelzés])
+    ISFATAL -->|nem| WIFI{"initWiFi()<br>statikus IP ha érvényes, különben DHCP<br>csatlakozás max 20 s"}
+    WIFI -->|siker| MON["MODE_MONITOR<br>EV_WIFI_OK (param: a lépcső foka)<br>WiFi LED = HIGH"]
+    WIFI -->|"ssid üres"| AP["startConfigPortal()<br>MODE_CONFIG, EV_AP_MODE(1)"]
+    WIFI -->|"ssid van, de nem érhető el"| FIRST["MODE_MONITOR<br>first start várakozás indul<br>(3. ábra)"]
+    MON --> TOLOOP2([loop: ELŐBB handleFirstStart 3. ábra,<br>utána az állapotgép])
+    FIRST --> TOLOOP2
+    AP --> TOLOOP3([loop: portál])
+```
+
+---
+
+### 3. First start – türelmi idő induláskor
+
+Áramszünet után a router lassabban bootol, mint az ESP; ezért mentett SSID
+mellett az eszköz nem megy azonnal AP módba. A 10 perc **felső korlát**:
+60 másodpercenként megnézzük, hogy visszajött-e a hálózat és az internet, és
+ha mindkettő megvan, a várakozás azonnal véget ér.
+
+```mermaid
+flowchart TD
+    IN([MODE_MONITOR, firstStart = true<br>MINDKÉT úton ide jutunk: a WiFi MÁR élhet<br>ha az initWiFi sikerült, vagy még nem jött össze]) --> PRB{"onlineProbe() – az ELSŐ próba azonnal<br>esedékes, utána 60 s-onként<br>1. Wi-Fi: van kapcsolat? (ha nincs: csak<br>aszinkron begin(), következmény nélkül)<br>2. CSAK ha van: internetOk()<br>(ping 1.1.1.1 → 8.8.8.8 → HTTP)"}
+    PRB -->|"mindkettő OK"| EARLY["firstStart AZONNAL lezárva<br>(nem várjuk ki a maradékot)"]
+    EARLY --> DONE
+    PRB -->|"bármelyik bukik"| WAIT{"Eltelt már 10 perc?<br>(firstStartDelay)"}
+    WAIT -->|"nem – 60 s múlva ÚJRA próbál"| BACK([vissza a loop-ba<br>gombok és watchdog élnek])
+    BACK -.->|"a következő ütem"| PRB
+    WAIT -->|igen| REC{"reconnectWifi()<br>3 próba, 30 s szünetekkel<br>(próbánként 20 s timeout)"}
+    REC -->|siker| DONE["firstStart lezárva<br>normál monitor üzem (4. ábra)"]
+    REC -->|sikertelen| GU["wifiFailed(hidegindulás)<br>(6. ábra) – az ESP-újraindítás kimarad,<br>az első lépés a router reset"]
+```
+
+---
+
+### 4. `loop()` diszpécser és a monitor állapotgép
+
+```mermaid
+flowchart TD
+    L([loop ciklus, 10 ms-onként]) --> SER["serialCommands()<br>LOG = a teljes napló (fájl + RTC)<br>HELP = a parancsok listája<br>nem blokkol, MINDEN üzemmódban fut"]
+    SER --> RP{"restartPending és<br>letelt a 2 s türelmi idő?"}
+    RP -->|igen| WFW["lockConfigBeforeShutdown()<br>(fájlírás megvárása max 5 s,<br>ÉS a zár megszerzése)"] --> RS([ESP.restart])
+    RP -->|nem| WDC0["1 óra hibátlan futás után:<br>watchdog + heap számláló nullázása"]
+    WDC0 --> HEAP["checkHeap() – 10 s-onként mér<br>30 percenként állapotsor<br>25 kB alatt figyelmeztet (csak az átlépéskor)<br>KRITIKUS: szabad &lt; 12 kB VAGY legnagyobb tömb &lt; 6 kB<br>ha 3 egymást követő mérésen át kitart (30 s):<br>ÖNKÉNTES ÚJRAINDULÁS – csak MODE_MONITOR-ban,<br>fájlírás / relé-impulzus / reset-ellenőrző ablak alatt SOHA<br>EV_HEAP_RESTART + saveEventLog() a flashbe,<br>a resetEvents átvitelével, a Wi-Fi-lépcső mentésével"]
+    HEAP --> NTP["ensureNtp()<br>óraszinkron indítása, amint van kapcsolat<br>(bármelyik úton jött is létre)"]
+    NTP --> MODE{deviceMode}
+    MODE -->|MODE_FATAL| FB["Mindkét LED együtt villog (5 Hz)<br>gombok élnek"] --> F5{"5 perc letelt?"}
+    F5 -->|igen| FSL["fatalSleep() – EV_SLEEP(4)<br>alvás timer NÉLKÜL"]
+    F5 -->|nem| L
+    MODE -->|MODE_CONFIG| APB["Wi-Fi LED villog 1 Hz<br>státusz LED végig be"] --> APT{"5 perc tétlenség,<br>nincs mentés, nincs restart?"}
+    APT -->|igen| ASL["apSleep() – EV_SLEEP(3)<br>alvás timer NÉLKÜL"]
+    APT -->|nem| L
+    MODE -->|MODE_MONITOR| FST{firstStart?}
+    FST -->|igen| HFS["handleFirstStart() (3. ábra)"] --> L
+    FST -->|nem| SM{currentState}
+
+    SM -->|CHECK_STATE| WL{"WiFi.status()<br>== WL_CONNECTED?"}
+    WL -->|nem| RC{"EV_WIFI_LOST (csak a sorozat 1.)<br>a lépcső várakozása alatt 1 próba (initWiFi),<br>különben 3 próba (reconnectWifi)"}
+    RC -->|siker| L
+    RC -->|sikertelen| GUP["wifiFailed() (6. ábra):<br>rossz jelszó → AP · ESP-újraindítás ·<br>router reset · várakozás a lépcső szerint"] --> L
+    WL -->|igen| NET{"internetOk()<br>ping 1.1.1.1 → ping 8.8.8.8 →<br>HTTP a soron következő végpontra"}
+    NET -->|"bármelyik siker"| SUC["kiesés vége, resetEvents = 0"] --> DNSC["routerDnsCheck()<br>(4b. ábra)"]
+    DNSC -->|"nincs reset"| WAIT0["WAIT_STATE"] --> L
+    DNSC -->|"reset indult"| L
+    NET -->|"mind hallgat"| FST1["a kiesés első köre:<br>EV_TEST_FAIL + EV_HTTP_ERROR"]
+    FST1 --> GWP{"gatewayPingOk()<br>válaszol a router?"}
+    GWP --> DUE{"letelt a várakozás?<br>1. reset: 2 perc (router sem; 22–05 óráig 10 perc) / 15 perc (router él)<br>utána: 30 → 60 → 120 → 240 perc az előző óta"}
+    DUE -->|nem| WAIT2["kiírja a hátralévő percet<br>WAIT_STATE"] --> L
+    DUE -->|igen| RST
+
+    SM -->|WAIT_STATE| SD{"1 perc letelt<br>a kör kezdete óta?"}
+    SD -->|igen| BT["CHECK_STATE"] --> L
+    SD -->|nem| L
+
+    SM -->|RESET_STATE| RW["várakozás a router bootjára<br>(5. ábra)"] --> L
+```
+
+#### Tartalék HTTP végpontok (sorban váltakoznak)
+
+| # | Végpont | Elvárt válasz |
+|:-:|---|---|
+| 1 | `http://www.msftconnecttest.com/connecttest.txt` | `Microsoft Connect Test` |
+| 2 | `http://cp.cloudflare.com/generate_204` | 204 No Content |
+| 3 | `http://detectportal.firefox.com/success.txt` | `success` |
+| 4 | `http://nmcheck.gnome.org/check_network_status.txt` | `NetworkManager is online` |
+| 5 | `http://connectivitycheck.gstatic.com/generate_204` | 204 No Content |
+
+#### 4b. A router DNS-ének ellenőrzése (`routerDnsCheck()`)
+
+```mermaid
+flowchart TD
+    IN([a ping szerint van internet]) --> DUE{"esedékes?<br>5 percenként, gyanúnál percenként"}
+    DUE -->|nem| NO([nincs reset])
+    DUE -->|igen| ISR{"a DNS szerver<br>a router (gateway)?"}
+    ISR -->|nem| SKIP["kimarad (egyszer kiírja)"] --> NO
+    ISR -->|igen| Q1{"testDnsServer(router)<br>2 próba × 3 s, közvetlen UDP"}
+    Q1 -->|"válasz, hibakód 0 vagy 3"| OK["gyanú vége,<br>DNS-lépcső nullázva"] --> NO
+    Q1 -->|"hallgat / hibás válasz"| Q2{"testDnsServer(1.1.1.1)<br>kontroll"}
+    Q2 -->|hallgat| NOTR["nem a router hibája"] --> NO
+    Q2 -->|válaszol| SUS["gyanú (kezdete rögzítve)"]
+    SUS --> WIN{"letelt?<br>1. reset: 10 perc folyamatos gyanú<br>utána: 30 → 60 → 120 → 240 perc"}
+    WIN -->|nem| NO
+    WIN -->|igen| RST["dnsState.resetEvents++<br>startRouterReset(NET DIAG 3)"]
+```
+
+---
+
+### 5. Router reset (`startRouterReset()` és `RESET_STATE`)
+
+```mermaid
+flowchart TD
+    IN([Letelt a várakozás, elveszett a Wi-Fi, vagy a router DNS-e hallgat]) --> D["EV_NET_DIAG<br>1 = a router sem válaszol, 2 = a router él,<br>3 = a router DNS-e hallgat"]
+    D --> GW1{"NET DIAG 1, statikus IP<br>és Wi-Fi kapcsolat?"}
+    GW1 -->|igen| GWL["EV_GW_UNREACHABLE(1)"] --> CNT
+    GW1 -->|nem| CNT["resetEvents++, lastResetAt = most<br>EV_ROUTER_RESET<br>saveEventLog() – MÉG a relé előtt"]
+    CNT --> P1["Relé = HIGH: router áram nélkül<br>90 s (RESET_PULSE)<br>státusz LED VILLOG 2 Hz, Wi-Fi LED sötét"]
+    P1 --> P2["Relé = LOW: router bootol<br>RESET_STATE, max 10 perc (RESET_DELAY)<br>gombok + watchdog élnek"]
+    P2 --> PRB{"percenként: onlineProbe()<br>1. Wi-Fi: van kapcsolat? (ha nincs: csak<br>aszinkron begin(), következmény nélkül)<br>2. CSAK ha van: internetOk()"}
+    PRB -->|"mindkettő OK"| GW2
+    PRB -->|"még nem, és letelt a 10 perc"| P3["WiFi.disconnect(true)<br>reconnectWifi(): 3 próba, 30 s szünet<br>(a statikus IP/DNS újra beáll)"]
+    PRB -->|"még nem, és van hátra idő"| P2
+    P3 -->|sikertelen| GU["wifiFailed() (6. ábra)"]
+    P3 -->|siker| GW2{"Statikus IP, és a gateway<br>továbbra sem pingelhető?"}
+    GW2 -->|igen| APX["EV_GW_UNREACHABLE(2) + EV_AP_MODE(4)<br>startConfigPortal()<br>(valószínűleg rossz a statikus IP)"]
+    GW2 -->|nem| OK["CHECK_STATE"]
+```
+
+---
+
+### 6. `wifiFailed()` – a Wi-Fi-lépcső
+
+```mermaid
+flowchart TD
+    IN([a Wi-Fi-próbák elbuktak]) --> AUTH{"WL_CONNECT_FAILED?<br>(rossz jelszó)"}
+    AUTH -->|igen| AP2["lépcső törlése<br>startConfigPortal(), EV_AP_MODE(2)"]
+    AUTH -->|nem| GIVE{"48 órája nincs Wi-Fi?<br>(WIFI_GIVEUP_MIN)"}
+    GIVE -->|igen| AP3["lépcső törlése<br>startConfigPortal(), EV_AP_MODE(3)"]
+    GIVE -->|nem| S0{"volt már ESP-újraindítás?<br>(rtcWifiRestarted)"}
+    S0 -->|"nem, és nem hidegindulás"| RST["rtcWifiRestarted = 1, persistBeforeRestart()<br>(a kiesés hossza + az internet-lépcső az RTC-be)<br>EV_WIFI_RESTART, saveEventLog()<br>ESP.restart() – a router érintetlen"]
+    S0 -->|"igen (vagy hidegindulás)"| PEND{"ladderWaitMs(testState) > 0?<br>1. reset: nappal azonnal, 22–05 óráig 10 perc kiesés<br>utána: 30 → 60 → 120 → 240 perc"}
+    PEND -->|igen| WAIT["WAIT_STATE: percenként 1 próba"]
+    PEND -->|nem| RR["startRouterReset(NET DIAG 1)<br>(a közös lépcső lép)"]
+```
+
+Az ESP-újraindítás jelzője **30 perc stabil Wi-Fi után** törlődik
+(`wifiConnectedTick()`), a router-reset lépcső pedig az első sikeres
+internet-ellenőrzéskor nullázódik. Az áramszünet, a gombok, a mentés utáni
+újraindulás és minden alvás törli.
+
+---
+
+### 7. AP beállító portál (MODE_CONFIG)
+
+```mermaid
+flowchart TD
+    IN([startConfigPortal]) --> AP["WIFI_AP mód<br>SSID: ESP-ESP32-C3-XXXX (MAC vége)<br>jelszó: eszközönként egyedi (/appass.txt)<br>végpontok: GET / , /ping, /log és POST /"]
+    AP --> IDLE["5 perces tétlenségi visszaszámlálás<br>MINDEN kérés (404 is) újraindítja;<br>a nyitott lap 60 s-onként /ping-el"]
+    IDLE --> REQ{Kérés típusa}
+    REQ -->|"GET /"| FORM["Beépített beállító űrlap (sendConfigForm)<br>SSID/IP/gateway ELŐKITÖLTVE, escape-elve;<br>a jelszó SOHA. A LittleFS-ről semmit<br>nem szolgálunk ki"]
+    REQ -->|"GET /log"| LOG["Diagnosztikai napló: reset ok, számlálók,<br>a FÁJL teljes tartalma (max 128), majd az RTC-ből<br>a mentés óta keletkezett rész (max 32)<br>Forrás oszlop: fajl / RTC, kettőzés nincs"]
+    REQ -->|"POST /"| FSOK{"fsReady?<br>(csatolva van a LittleFS?)"}
+    FSOK -->|nem| E500F["500: LittleFS nem elerheto<br>(partíciós séma hiba)"]
+    FSOK -->|igen| VAL{"1. FÁZIS - validálás:<br>mind a négy mezőn ELŐBB trim, AZTÁN hossz<br>SSID 1-32, jelszó max 63,<br>IP és gateway: IPv4, nem 0.0.0.0<br>statikus IP CSAK párban"}
+    VAL -->|hiba| E500["500 + konkrét indok<br>SEMMI nem íródik ki, a futó konfig<br>sem változik, NINCS újraindítás"]
+    VAL -->|"minden mező érvényes"| LOCK{"Zár megszerzése<br>(beginConfigWrite, atomikus)"}
+    LOCK -->|"foglalt (wifireset töröl)"| E503["503: próbáld újra<br>egy pillanat múlva"]
+    LOCK -->|ok| SAVE["2. FÁZIS - commit:<br>globálisok + fájlok írása<br>visszaolvasó ellenőrzéssel<br>(jelszó: v1 + XOR-hexa kódolás)<br>savingConfig = false"]
+    SAVE -->|"írási hiba"| E500W["500: LittleFS írási hiba<br>NINCS újraindítás"]
+    SAVE -->|ok| R200["200: Done. ESP will restart...<br>restartPending = true"]
+    R200 --> DEF["A loop 2 s türelmi idő után<br>(esetleges 2. mentést megvárva)<br>ESP.restart()"]
+```
+
+#### A mentés két taskja (halasztott újraindítás)
+
+```mermaid
+sequenceDiagram
+    participant B as Böngésző
+    participant W as async_tcp task (webszerver)
+    participant L as loop task
+    B->>W: POST / (ssid, pass, ip, gateway)
+    W->>W: savingConfig = true
+    W->>W: validálás + 4 fájl írása és visszaolvasása
+    W->>W: savingConfig = false
+    W-->>B: 200 "Done. ESP will restart..."
+    W->>L: restartPending = true, restartAt = most + 2 s
+    Note over L: savingConfig alatt tilos: gombkezelés,<br>alvás, újraindítás (sérült konfig ellen)
+    L->>L: 2 s türelmi idő (dupla mentés beérhet)
+    L->>L: lockConfigBeforeShutdown() – max 5 s, a zárat meg is szerzi
+    L->>L: ESP.restart()
+```
+
+---
+
+### 8. Elalvás és ébredés
+
+Minden alvás a közös `enterDeepSleep()`-en megy át:
+
+```mermaid
+flowchart TD
+    IN([enterDeepSleep timerUs]) --> SV["saveEventLog()<br>a napló kiírása a fájlrendszerre<br>(minden alvás előtt)"]
+    SV --> W["lockConfigBeforeShutdown()<br>fájlírás közben nem alszunk<br>(a zárat meg is szerzi)"]
+    W --> OFF["LED-ek + relé = LOW<br>relé hold: gpio_hold_en + deep_sleep_hold<br>WiFi le, webszerver le, Serial le"]
+    OFF --> DET["A gomb-megszakítások leválasztása<br>(ugyanazok a GPIO regiszterek)"]
+    DET --> ARM["Minden ébresztőforrás törlése,<br>majd: reset gomb (D1 = GPIO3, RTC-képes)<br>élesítése LOW szintre"]
+    ARM --> TMR{"timerUs > 0?"}
+    TMR -->|igen| T1["Timer élesítése"]
+    TMR -->|"nem, DE a gombélesítés hibázott"| T2["Biztonsági háló:<br>1 órás timer mégis"]
+    TMR -->|"nem, gomb OK"| T3["Nincs timer –<br>csak a gomb ébreszt"]
+    T1 --> DS([esp_deep_sleep_start])
+    T2 --> DS
+    T3 --> DS
+```
+
+| Alvás | Kiváltó ok | Napló | Timer | Reset gomb ébreszt? |
+|---|---|---|:---:|:---:|
+| `apSleep()` | AP portál 5 perc tétlenség | `EV_SLEEP(3)` | – | igen |
+| `fatalSleep()` | végzetes hiba, 5 perc villogás után | `EV_SLEEP(4)` | – | igen |
+| beragadt gomb\* | reset/wifireset LOW induláskor **és 3 s után is** | `EV_STUCK_BUTTON` | 60 s | **nem** (szándékosan) |
+
+\* Ez az egyetlen alvás, ami **nem** az `enterDeepSleep()`-en megy át: a
+`handleStuckButton()` a `setup()` elején, saját úton alszik el (nincs
+`saveEventLog()` – a LittleFS ott még nincs csatolva; és szándékosan nem
+armol gombébresztést, különben a beragadt gomb azonnal boot loopot okozna).
+
+Ébredéskor az eszköz teljesen újraindul (`setup()`, 2. ábra); a RAM-beli
+számlálók (`testState`, `timing`, `uiFlags`) nullázódnak. Ami az RTC
+memóriában túléli:
+
+| Változó | Tárolás | Mit él túl? |
+|---|---|---|
+| diagnosztikai napló (`rtcEvMagic`, `rtcEvNext`, `rtcEvents`) | `RTC_NOINIT` | deep sleep, watchdog reset, reset gomb – csak az áramtalanítás törli |
+| `rtcSavedEvNext` (a legutóbbi fájlmentés pozíciója) | `RTC_NOINIT` | ugyanaz |
+| watchdog számláló (`rtcWdtMagic`, `rtcWdtResets`) | `RTC_NOINIT` | ugyanaz |
+| heap-újraindulások és a lépcső-átvitel (`rtcHeapMagic`, `rtcHeapRestarts`, `rtcCarryResetEvents`, `rtcCarryOutageAgoMin`, `rtcCarryResetAgoMin`) | `RTC_NOINIT` | ugyanaz |
+| a Wi-Fi-kiesés (`rtcWifiMagic`, `rtcWifiRestarted`, `rtcWifiOutageMin`) | `RTC_NOINIT` | a saját, a heap miatti és a watchdog-újraindulást – az áramszünet, a gombok és az alvás törlik |
+
+A **valós idő** (`gettimeofday()`) szintén túléli a deep sleepet – az RTC
+órából jön –, míg a `millis()` minden ébredéskor nulláról indul.
+
+---
+
+*Az ábrák a `bazsi_router_reboot.ino` aktuális állapotát dokumentálják.
+Módosításkor a kóddal együtt frissítendők – a viselkedést a `test/` alatti
+387 forgatókönyves (2287 ellenőrzéses) tesztkészlet rögzíti.*

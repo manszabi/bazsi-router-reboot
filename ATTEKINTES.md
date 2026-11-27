@@ -58,12 +58,15 @@ routernél. Ha a router DNS-e 10 percig hallgat, miközben egy külső DNS
   ha az sem segít, **router reset** (22:00–05:00 között legalább 10 perc
   kiesés után). Utána egyre ritkábban: 30 perc → 1 óra →
   2 óra → 4 óránként. Közben percenként próbálkozik, alvás nincs.
-- 48 óra Wi-Fi nélkül → beállító mód. 30 perc stabil kapcsolat mindent nulláz.
+- 48 óra Wi-Fi nélkül → beállító mód. A resetek ugyanazon a lépcsőn lépnek, mint
+  az internetnél; az ESP-újraindítás csak 30 perc stabil kapcsolat után jöhet újra.
 - Áramszünet után 10 perc türelmi idő (a router lassabban bootol), az
   ESP-újraindítás ott kimarad.
 
 ## Napló
 
+- Normál üzemben: `http://<az eszköz IP-je>/` – csak olvasható állapotoldal
+  (lépcsők, resetek, utolsó 20 esemény), csak a helyi hálózatról.
 - Soros porton: `LOG` (vagy `/log`) – a teljes eseménynapló.
 - Beállító módban: a `192.168.4.1/log` oldal.
 - A legfontosabb bejegyzések: `TEST FAIL` + `HTTP ERROR` (a kiesés kezdete),
@@ -76,7 +79,5 @@ routernél. Ha a router DNS-e 10 percig hallgat, miközben egy külső DNS
 
 | Dokumentum | Miről szól |
 |---|---|
-| [README.md](README.md) | telepítés, hardver, részletes működés |
-| [MUKODES.md](MUKODES.md) | minden időzítés és döntés táblázatban |
-| [FOLYAMATABRA.md](FOLYAMATABRA.md) | folyamatábrák |
+| [MUKODES.md](MUKODES.md) | a teljes leírás: minden időzítés és döntés, hardver, telepítés, biztonság, folyamatábrák |
 | [test/README.md](test/README.md) | a tesztkészlet |

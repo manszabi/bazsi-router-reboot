@@ -37,6 +37,12 @@ static_assert(SECRET_ENC_MAX >= SECRET_PREFIX_LEN + 2 * (sizeof(ConfigDraft::pas
 
 static AsyncWebServer server(80);
 
+// Az állapotoldal külön szerver: sosem fut egyszerre az AP portállal.
+static AsyncWebServer statusServer(80);
+static bool statusHandlersSet = false;
+static bool statusRunning = false;
+constexpr uint16_t STATUS_EVENTS = 20;
+
 constexpr size_t LOG_PAGE_FIX_BYTES = 2600;
 constexpr size_t LOG_PAGE_ROW_BYTES = 120;
 constexpr size_t LOG_STREAM_MIN = 3072;
@@ -519,7 +525,7 @@ static void sendDiagnosticLog(AsyncWebServerRequest* request) {
              "idoben, 1100 = a kerest nem lehetett inditani</li>"
              "<li>NET DIAG: a router reset oka. 1 = a router sem valaszol "
              "(vagy nincs Wi-Fi), 2 = a router valaszol, az internet nem, "
-             "3 = az internet el, de a router DNS-e 15 perce hallgat</li>"
+             "3 = az internet el, de a router DNS-e 10 perce hallgat</li>"
              "</ul>"));
   r->print(F("<p><i>Az uptime minden indulaskor nullarol indul, ezert a "
              "BOOT sorok jelzik az ujraindulasokat. A naplo az "
@@ -529,6 +535,104 @@ static void sendDiagnosticLog(AsyncWebServerRequest* request) {
   r->print(KEEPALIVE_JS);
   r->print(F("</body></html>"));
   request->send(r);
+}
+
+// Csak a saját alhálózatról érkező kérést szolgáljuk ki (a router mögül), máshonnan 403.
+static bool fromLocalNet(AsyncWebServerRequest* request) {
+  const uint32_t sajat = (uint32_t)WiFi.localIP();
+  const uint32_t maszk = (uint32_t)WiFi.subnetMask();
+  const uint32_t tav = (uint32_t)request->client()->remoteIP();
+  return sajat != 0 && maszk != 0 && (tav & maszk) == (sajat & maszk);
+}
+
+static void printYesNoMin(AsyncResponseStream* r, const char* mi, bool aktiv,
+                          uint32_t perc, uint32_t resetek, const char* rendben) {
+  r->printf("<tr><td>%s</td><td>", mi);
+  if (aktiv) {
+    r->printf("<b>hiba, %u perce</b>", (unsigned)perc);
+  } else {
+    r->print(rendben);
+  }
+  r->printf("</td><td>%u</td></tr>", (unsigned)resetek);
+}
+
+// Az állapotoldal: a számlálók és az utolsó események az RTC naplóból (fájlt nem olvas).
+static void sendStatusPage(AsyncWebServerRequest* request) {
+  if (!fromLocalNet(request)) {
+    request->send(403, "text/plain", "Csak a helyi halozatrol");
+    return;
+  }
+  uint32_t evTotal;
+  EventEntry evCopy[EVLOG_SIZE];
+  portENTER_CRITICAL(&evLogMux);
+  evTotal = (rtcEvMagic == EVLOG_MAGIC) ? rtcEvNext : 0;
+  memcpy(evCopy, rtcEvents, sizeof(evCopy));
+  portEXIT_CRITICAL(&evLogMux);
+  const uint32_t elerheto = evTotal < EVLOG_SIZE ? evTotal : EVLOG_SIZE;
+  const uint16_t db = (uint16_t)(elerheto < STATUS_EVENTS ? elerheto : STATUS_EVENTS);
+
+  const DiagCounters dc = diagCounters();
+  AsyncResponseStream* r = request->beginResponseStream("text/html", LOG_STREAM_MIN);
+  r->print(F("<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+             "<title>Allapot</title></head><body><h2>Router figyelo - allapot</h2>"));
+  const uint32_t up = (uint32_t)(esp_timer_get_time() / 1000000);
+  const esp_reset_reason_t rr = esp_reset_reason();
+  r->printf("<p><b>Uptime:</b> %ud %uh %um<br><b>Utolso indulas oka:</b> %s (%d)<br>"
+            "<b>Szabad heap:</b> %u B</p>",
+            (unsigned)(up / 86400), (unsigned)((up % 86400) / 3600), (unsigned)((up % 3600) / 60),
+            resetReasonName(rr), (int)rr, (unsigned)ESP.getFreeHeap());
+  r->print(F("<table border=1 cellpadding=4><tr><th>Mit</th><th>Allapot</th>"
+             "<th>Resetek ebben a hibaban</th></tr>"));
+  printYesNoMin(r, "Internet", dc.netOutage, dc.netOutageMin, dc.netResets, "rendben");
+  printYesNoMin(r, "A router DNS-e", dc.dnsSuspect, dc.dnsSuspectMin, dc.dnsResets, "rendben");
+  // Wi-Fi nélkül az oldal el sem érhető, ezért itt csak a nemrég lezajlott kiesés látszik.
+  r->printf("<tr><td>Wi-Fi</td><td>%s</td><td>-</td></tr>",
+            dc.wifiStep > 0 ? "rendben (nemreg kiesett, a lepcso 30 perc stabil kapcsolat utan nullazodik)"
+                            : "rendben");
+  r->print(F("</table>"));
+  r->printf("<p><b>Router reset most:</b> %s<br><b>Watchdog ujraindulasok:</b> %u / %u<br>"
+            "<b>Heap miatti ujraindulasok:</b> %u</p>",
+            dc.resetRunning ? "folyamatban" : "nem", (unsigned)dc.wdtResets,
+            (unsigned)dc.wdtLimit, (unsigned)dc.heapRestarts);
+  r->printf("<h3>Utolso %u esemeny</h3>", (unsigned)db);
+  if (db == 0) {
+    r->print(F("<p>Nincs rogzitett esemeny.</p>"));
+  } else {
+    r->print(F("<table border=1 cellpadding=4><tr><th>Ido</th><th>Uptime</th>"
+               "<th>Esemeny</th><th>Param</th><th>Forras</th></tr>"));
+    for (uint16_t i = 0; i < db; i++) {
+      printLogRow(r, evCopy[(evTotal - db + i) % EVLOG_SIZE], "RTC");
+    }
+    r->print(F("</table>"));
+  }
+  r->print(F("<p><i>Csak olvashato oldal. A teljes naplo es a beallitasok "
+             "az AP beallito modban erhetok el.</i></p></body></html>"));
+  request->send(r);
+}
+
+void startStatusPage() {
+  if (statusRunning) {
+    return;
+  }
+  if (!statusHandlersSet) {
+    statusServer.on("/", HTTP_GET, [](AsyncWebServerRequest* request) { sendStatusPage(request); });
+    statusServer.onNotFound([](AsyncWebServerRequest* request) {
+      request->send(404, "text/plain", "Not found");
+    });
+    statusHandlersSet = true;
+  }
+  statusServer.begin();
+  statusRunning = true;
+  Serial.println("Allapotoldal elinditva (csak olvashato, csak a helyi halozatrol).");
+}
+
+void stopStatusPage() {
+  if (!statusRunning) {
+    return;
+  }
+  statusServer.end();
+  statusRunning = false;
 }
 
 // A LittleFS-ről semmit nem szolgálunk ki (a /pass.txt-t is kiadná).
