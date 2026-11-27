@@ -39,6 +39,11 @@ constexpr uint32_t CHECK_INTERVAL_MS = 60 * 1000;
 constexpr uint32_t ROUTER_DOWN_WINDOW_MS = 2 * 60 * 1000;
 constexpr uint32_t WAN_DOWN_WINDOW_MS = 15 * 60 * 1000;
 
+// Éjszakai csendes időszak (helyi idő, pl. firmware-frissítés): a router-hiba miatti reset csak 10 perc után.
+constexpr int QUIET_START_HOUR = 22;
+constexpr int QUIET_END_HOUR = 5;
+constexpr uint32_t QUIET_WINDOW_MS = 10 * 60 * 1000;
+
 // Ha a reset nem segített, a következő ennyivel az előző után jön (az utolsó ismétlődik).
 constexpr uint32_t RETRY_BACKOFF_MS[] = { 30 * 60 * 1000, 60 * 60 * 1000,
                                           120 * 60 * 1000, 240 * 60 * 1000 };
@@ -243,6 +248,7 @@ void wifiLadderClear();
 void wifiLadderPersist();
 void startRouterReset(uint8_t diag);
 uint32_t backoffMs(uint8_t resetek);
+bool quietHours();
 bool wifiAuthFailed();
 bool reset_device();
 void startConfigPortal();
@@ -918,9 +924,23 @@ void wifiConnectedTick() {
   }
 }
 
+// Ennyi ms múlva jöhet a következő Wi-Fi miatti router reset (0 = most).
+uint32_t wifiResetWaitMs() {
+  if (rtcWifiStep == 1) {
+    const uint32_t kieses = wifiOutageMinutes() * 60000;
+    return (quietHours() && kieses < QUIET_WINDOW_MS) ? QUIET_WINDOW_MS - kieses : 0;
+  }
+  if (rtcWifiStep < 2) {
+    return 0;
+  }
+  const uint32_t varni = backoffMs((uint8_t)(rtcWifiStep - 1));
+  const uint32_t eltelt = millis() - wifiLastResetAt;
+  return (eltelt < varni) ? varni - eltelt : 0;
+}
+
 // Kell-e még várni a következő Wi-Fi miatti router resettel.
 bool wifiResetPending() {
-  return rtcWifiStep >= 2 && millis() - wifiLastResetAt < backoffMs((uint8_t)(rtcWifiStep - 1));
+  return wifiResetWaitMs() > 0;
 }
 
 // A Wi-Fi próbák után: rossz jelszó -> AP; különben a lépcső következő foka, 48 óra után AP.
@@ -958,10 +978,11 @@ void wifiFailed(bool coldStart) {
     ESP.restart();
     return;
   }
-  if (wifiResetPending()) {
+  const uint32_t varni = wifiResetWaitMs();
+  if (varni > 0) {
     Serial.print("A kovetkezo Wi-Fi miatti router reset ");
-    Serial.print((backoffMs((uint8_t)(rtcWifiStep - 1)) - (millis() - wifiLastResetAt) + 59999) / 60000);
-    Serial.println(" perc mulva.");
+    Serial.print((varni + 59999) / 60000);
+    Serial.println(rtcWifiStep == 1 ? " perc mulva (ejszakai csendes idoszak)." : " perc mulva.");
     currentState = WAIT_STATE;
     return;
   }
@@ -1278,6 +1299,7 @@ void setup() {
 
   checkWatchdogResets();
   initHeapState();
+  applyTimezone();
   applyHeapCarry();
   initWifiLadder();
   // Saját Wi-Fi miatti újraindulás után a router nem kapcsolt le: nincs mire várni.
@@ -1423,6 +1445,12 @@ void startRouterReset(uint8_t diag) {
   resetDelayProbeLast = timing.stateStart;
 }
 
+// Csendes időszak: 22:00-05:00 helyi idő szerint; érvényes idő nélkül (NTP előtt) nem az.
+bool quietHours() {
+  const int ora = localHour();
+  return ora >= 0 && (ora >= QUIET_START_HOUR || ora < QUIET_END_HOUR);
+}
+
 // A lépcső: az n. sikertelen reset után ennyit várunk a következővel (n >= 1).
 uint32_t backoffMs(uint8_t resetek) {
   const uint8_t lepcso = (resetek <= RETRY_BACKOFF_STEPS) ? (uint8_t)(resetek - 1)
@@ -1433,7 +1461,10 @@ uint32_t backoffMs(uint8_t resetek) {
 // A kiesés kezdete (első reset előtt) vagy az utolsó reset óta ennyit várunk a resettel.
 uint32_t resetWaitMs(bool routerOk) {
   if (testState.resetEvents == 0) {
-    return routerOk ? WAN_DOWN_WINDOW_MS : ROUTER_DOWN_WINDOW_MS;
+    if (routerOk) {
+      return WAN_DOWN_WINDOW_MS;
+    }
+    return quietHours() ? QUIET_WINDOW_MS : ROUTER_DOWN_WINDOW_MS;
   }
   return backoffMs(testState.resetEvents);
 }

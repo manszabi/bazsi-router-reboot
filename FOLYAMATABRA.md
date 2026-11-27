@@ -144,7 +144,7 @@ flowchart TD
     DNSC -->|"reset indult"| L
     NET -->|"mind hallgat"| FST1["a kiesés első köre:<br>EV_TEST_FAIL + EV_HTTP_ERROR"]
     FST1 --> GWP{"gatewayPingOk()<br>válaszol a router?"}
-    GWP --> DUE{"letelt a várakozás?<br>1. reset: 2 perc (router sem) / 15 perc (router él)<br>utána: 30 → 60 → 120 → 240 perc az előző óta"}
+    GWP --> DUE{"letelt a várakozás?<br>1. reset: 2 perc (router sem; 22–05 óráig 10 perc) / 15 perc (router él)<br>utána: 30 → 60 → 120 → 240 perc az előző óta"}
     DUE -->|nem| WAIT2["kiírja a hátralévő percet<br>WAIT_STATE"] --> L
     DUE -->|igen| RST
 
@@ -217,7 +217,7 @@ flowchart TD
     GIVE -->|igen| AP3["lépcső törlése<br>startConfigPortal(), EV_AP_MODE(3)"]
     GIVE -->|nem| S0{"0. fok, és nem hidegindulás?"}
     S0 -->|igen| RST["1. fok mentése az RTC-be (magic-kel)<br>EV_WIFI_RESTART, saveEventLog()<br>ESP.restart() – a router érintetlen"]
-    S0 -->|nem| PEND{"2+. fok, és a lépcső szerint<br>még nem esedékes?<br>30 → 60 → 120 → 240 perc"}
+    S0 -->|nem| PEND{"wifiResetWaitMs() > 0?<br>1. fok: 22–05 óráig 10 perc kiesés<br>2+. fok: 30 → 60 → 120 → 240 perc"}
     PEND -->|igen| WAIT["WAIT_STATE: percenként 1 próba"]
     PEND -->|nem| RR["fok++ (legalább 2)<br>startRouterReset(NET DIAG 1)"]
 ```
@@ -320,4 +320,4 @@ A **valós idő** (`gettimeofday()`) szintén túléli a deep sleepet – az RTC
 
 *Az ábrák a `bazsi_router_reboot.ino` aktuális állapotát dokumentálják.
 Módosításkor a kóddal együtt frissítendők – a viselkedést a `test/` alatti
-370 forgatókönyves (2195 ellenőrzéses) tesztkészlet rögzíti.*
+377 forgatókönyves (2232 ellenőrzéses) tesztkészlet rögzíti.*

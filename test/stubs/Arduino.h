@@ -315,6 +315,8 @@ public:
 extern EspClass ESP;
 
 extern uint32_t g_epochNow;
+// Ha nem 0: az óra a millis()-szel együtt jár, ettől a millis()-től számítva.
+extern uint32_t g_epochTickFrom;
 extern int      g_ntpStarts;
 void configTzTime(const char* tz, const char* server);
 

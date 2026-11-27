@@ -146,7 +146,7 @@ internet nélküli idő után jön a reset:
 
 | `NET DIAG` | Helyzet | Reset |
 |:---:|---|---|
-| **1** | a router **sem** válaszol (vagy nincs Wi-Fi / gateway-cím) | **2 perc** után (`ROUTER_DOWN_WINDOW_MS`) |
+| **1** | a router **sem** válaszol (vagy nincs Wi-Fi / gateway-cím) | **2 perc** után (`ROUTER_DOWN_WINDOW_MS`); 22:00–05:00 között **10 perc** (`QUIET_WINDOW_MS`) |
 | **2** | a router válaszol, az internet nem | **15 perc** után (`WAN_DOWN_WINDOW_MS`) |
 
 Ha a reset nem segített, a következő az előzőhöz képest **30 perc → 1 óra →
@@ -154,9 +154,20 @@ Ha a reset nem segített, a következő az előzőhöz képest **30 perc → 1 �
 ellenőrzés mindent nulláz. Alvás ezen az ágon nincs: az eszköz végig figyel, és
 naplózza, amikor visszajön az internet.
 
-A Wi-Fi elvesztése (3 próba után sincs kapcsolat) router hibának számít:
-azonnali reset, kivéve ha a kiesés már kapott resetet – ekkor a lépcső szerint
-vár. Rossz jelszónál reset helyett AP mód.
+A Wi-Fi elvesztésére (3 próba után sincs kapcsolat) a Wi-Fi-lépcső felel
+(5. szakasz): előbb az ESP indul újra, és csak ha az sem segít, jön a router
+reset. Rossz jelszónál reset helyett AP mód.
+
+**Éjszakai csendes időszak** (`QUIET_START_HOUR` = 22, `QUIET_END_HOUR` = 5,
+helyi idő a `NTP_TZ` szerint): a router-hiba (`NET DIAG` 1) türelmi ideje
+2 helyett 10 perc, és a Wi-Fi miatti első router reset is csak legalább 10 perc
+kiesés után jön (`wifiResetWaitMs()`), hogy egy éjszakai firmware-frissítést ne
+szakítson félbe. A szolgáltatói hiba (15 perc), a DNS-ág és a lépcső többi foka
+változatlan. Érvényes idő nélkül (áramszünet után, NTP előtt) a nappali szabály
+él. Az időzónát a `setup()` maga állítja be (`applyTimezone()`), mert az
+újraindulás után az NTP csak Wi-Fi-vel indulna, az óra viszont az RTC-ben
+megmaradt; e nélkül éjjel UTC-ben számolna, és a napló időbélyegei is UTC-ben
+jelennének meg.
 
 ### Mennyi idő alatt dönt? (mérve)
 
@@ -268,7 +279,7 @@ alvás – ezek emberi beavatkozások, tehát tiszta lap.
 | Mérve | Eredmény | Teszt |
 |---|---|---|
 | az újraindítás után visszajön a Wi-Fi | nincs router reset, azonnal figyel | `WFL1` |
-| a Wi-Fi elvesztésétől a router reset kezdetéig | **5,3 perc** | `WFL2` |
+| a Wi-Fi elvesztésétől a router reset kezdetéig | **5,3 perc**; éjjel (22:00–05:00) **15,3 perc** | `WFL2`, `QH6` |
 | tartós Wi-Fi-hiány | resetek 30 / 60 / 120 / 240 perc szünettel (+ a bootvárakozás), 48 óra után AP, alvás nélkül | `WFL3` |
 | várakozás közben visszajön | legfeljebb 1 perc alatt észreveszi; percenként 1 próba | `WFL4` |
 
@@ -1083,8 +1094,8 @@ elérhetetlen vagy a névfeloldás bukik, az a mi `loop()`-unkat nem érinti.
 
 > A mérés: az `NV11` végigjátssza a teljes eszkalációt (tesztek bukása → router
 > reset → mentés → alvás), majd egy áramszünet utáni `/log` oldalt is –
-> **végig óraszinkron nélkül**. Mellékesen az **egész tesztkészlet** így fut: a
-> `coldBoot()` `g_epochNow = 0`-t állít, tehát mind a 370 forgatókönyv a
+> **végig óraszinkron nélkül**. Mellékesen **szinte az egész tesztkészlet** így fut: a
+> `coldBoot()` `g_epochNow = 0`-t állít, tehát a forgatókönyvek döntő többsége a
 > „nincs óraszinkron" állapotot játssza.
 
 > A valós idő a **deep sleepet túléli**. Az `esp_timer` (és így a `millis()`)
@@ -1214,7 +1225,7 @@ Fentről lefelé: minden modul csak a nála lentebb állóktól függ. A `config
 | **`secret`** | 86 | a jelszó elfedése a flashben | `encodeSecret()`, `decodeSecretInPlace()` |
 | **`sync`** | 88 | a két task közti osztott állapot | 7 függvény + `evLogMux`, `apDeadline` |
 | **`configstore`** | 230 | a négy mentett érték, a fájljaik, a LittleFS | a négy puffer, `readConfigValue()`, `readSecretValue()`, `writeConfigValue()`, `clearConfigValue()`, `staticPairValid()`, `initLittleFS()`, `filesystemReady()` |
-| **`eventlog`** | 494 | a diagnosztikai napló **és** a valós idő (NTP) | `logEvent()`, `saveEventLog()`, `loadEventLogHeader()`, `loadEventLogRange()`, `printEventLogs()`, `eventName()`, `formatEpoch()`, `ensureNtp()` |
+| **`eventlog`** | 517 | a diagnosztikai napló **és** a valós idő (NTP) | `logEvent()`, `saveEventLog()`, `loadEventLogHeader()`, `loadEventLogRange()`, `printEventLogs()`, `eventName()`, `formatEpoch()`, `ensureNtp()`, `applyTimezone()`, `localHour()` |
 | **`netprobe`** | 331 | HTTP végpont-tesztek, ICMP ping, DNS-kérdés | `testInternetHTTP()`, `lastHttpCode()`, `httpCodeLogParam()`, `testInternetPing()`, `buildDnsQuery()`, `dnsResponseOk()`, `testDnsServer()` |
 | **`webportal`** | 596 | az AP beállító portál és az eszközönkénti AP jelszó | `startWebPortal()`, `stopWebPortal()`, `touchApDeadline()`, `announceApPassword()` |
 | **`app_hooks.h`** | 22 | amit a főmodul ad a moduloknak | `feedWatchdog()`, `resetbutton()`, `wifiresetbutton()`, `waitWithButtons()`, `printUptime()`, `diagCounters()` |
@@ -1228,7 +1239,7 @@ Fentről lefelé: minden modul csak a nála lentebb állóktól függ. A `config
 > az a rossz határhúzás első jele.** Egyszer már meg is történt – a
 > `filesystemReady()` átmenetileg ide került, majd oda, ahová való (`configstore`).
 
-### A főmodul (`bazsi_router_reboot.ino`, ~1670 sor, 59 függvény)
+### A főmodul (`bazsi_router_reboot.ino`, ~1700 sor, 61 függvény)
 
 Ami maradt: a **döntéshozatal**. A modulok mérnek és tárolnak, a főmodul
 eldönti, mi következik.
@@ -1239,8 +1250,8 @@ eldönti, mi következik.
 | A `loop()` ágai | `clearHealthyRunCounters()` · `handleFatalMode()` · `handleConfigMode()` · `runMonitorStateMachine()` |
 | Az állapotgép | `runCheckState()` · `runResetState()` · `handleFirstStart()` |
 | Wi-Fi | `initWiFi()` · `reconnectWifi()` · `wifiAuthFailed()` · `ensureFallbackDns()` |
-| Wi-Fi-lépcső | `wifiFailed()` · `initWifiLadder()` · `wifiConnectedTick()` · `wifiResetPending()` · `wifiOutageMinutes()` · `wifiLadderPersist()` · `wifiLadderClear()` |
-| Internet és router | `internetOk()` · `gatewayPingOk()` · `routerDnsCheck()` · `gatewayUnreachable()` · `resetWaitMs()` · `backoffMs()` |
+| Wi-Fi-lépcső | `wifiFailed()` · `initWifiLadder()` · `wifiConnectedTick()` · `wifiResetPending()` · `wifiResetWaitMs()` · `wifiOutageMinutes()` · `wifiLadderPersist()` · `wifiLadderClear()` |
+| Internet és router | `internetOk()` · `gatewayPingOk()` · `routerDnsCheck()` · `gatewayUnreachable()` · `resetWaitMs()` · `quietHours()` · `backoffMs()` |
 | Relé | `startRouterReset()` · `reset_device()` · `holdRelayForSleep()` |
 | A két alvás | `enterDeepSleep()` ← `apSleep()`, `fatalSleep()`; külön úton `handleStuckButton()` |
 | Gombok | a két ISR (`onResetButtonEdge()`, `onWifiResetButtonEdge()`) · `armButtonLatches()` · `resetbutton()` · `wifiresetbutton()` · `pressedButtonNow()` · `doWifiReset()` |

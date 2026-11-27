@@ -35,7 +35,7 @@ Minden körben a router pingjét is megnézi:
 
 | Helyzet | Router reset |
 |---|---|
-| a router **sem** válaszol (vagy nincs Wi-Fi) | **2 perc** után |
+| a router **sem** válaszol (vagy nincs Wi-Fi) | **2 perc** után; **22:00–05:00 között 10 perc** (éjszakai firmware-frissítés) |
 | a router válaszol, az internet nem (szolgáltatói hiba) | **15 perc** után |
 | a reset nem segített | a következő **30 perc → 1 óra → 2 óra → 4 óra** múlva, onnan 4 óránként |
 
@@ -55,7 +55,8 @@ routernél. Ha a router DNS-e 10 percig hallgat, miközben egy külső DNS
 - 3 csatlakozási próba, köztük 30 mp.
 - Rossz jelszó → beállító mód (AP), router reset nélkül.
 - Ha így sem jön vissza: **előbb az ESP indul újra** (a router érintetlen), és
-  ha az sem segít, **router reset**. Utána egyre ritkábban: 30 perc → 1 óra →
+  ha az sem segít, **router reset** (22:00–05:00 között legalább 10 perc
+  kiesés után). Utána egyre ritkábban: 30 perc → 1 óra →
   2 óra → 4 óránként. Közben percenként próbálkozik, alvás nincs.
 - 48 óra Wi-Fi nélkül → beállító mód. 30 perc stabil kapcsolat mindent nulláz.
 - Áramszünet után 10 perc türelmi idő (a router lassabban bootol), az

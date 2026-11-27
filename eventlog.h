@@ -72,6 +72,10 @@ constexpr uint32_t NTP_MIN_VALID_EPOCH = 1735689600UL;
 
 void ensureNtp();
 
+void applyTimezone();
+
+int localHour();
+
 // Csak a host tesztek hívják (egy processzben több bekapcsolás).
 void ntpResetForColdBoot();
 

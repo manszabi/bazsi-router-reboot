@@ -2,6 +2,7 @@
 
 #include <esp_attr.h>
 #include <LittleFS.h>
+#include <stdlib.h>
 #include <WiFi.h>
 #include <string.h>
 #include <time.h>
@@ -55,6 +56,24 @@ void ensureNtp() {
   }
   ntpStarted = true;
   startNtp();
+}
+
+// A helyi időzóna; induláskor is kell, mert újraindulás után az NTP csak Wi-Fi-vel áll újra be.
+void applyTimezone() {
+  setenv("TZ", NTP_TZ, 1);
+  tzset();
+}
+
+// A helyi óra (0-23), vagy -1, ha még nincs érvényes idő.
+int localHour() {
+  const uint32_t epoch = nowEpoch();
+  if (epoch == 0) {
+    return -1;
+  }
+  const time_t t = (time_t)epoch;
+  struct tm tmv;
+  localtime_r(&t, &tmv);
+  return tmv.tm_hour;
 }
 
 bool formatEpoch(uint32_t epoch, char* out, size_t outSize) {

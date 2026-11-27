@@ -12,6 +12,7 @@ ESP32-C3 alapú automatikus router újraindító rendszer. Az eszköz folyamatos
 - **Wi-Fi Manager** – böngészőből konfigurálható SSID, jelszó, IP-cím és gateway
 - **Beépített beállító weboldal** – a programba fordítva, nincs feltöltendő fájlrendszer-tartalom
 - **LittleFS** – a beállítások áramszünet után is megmaradnak
+- **Éjszakai csendes időszak** – 22:00 és 05:00 között (magyar idő) a router-hiba miatti reset csak 10 perc után jön, hogy egy éjszakai firmware-frissítést ne szakítson félbe
 - **Wi-Fi-lépcső** – ha elvész a Wi-Fi, előbb az ESP indul újra, utána router reset, majd egyre ritkábban (30 perc → 1 / 2 / 4 óra); 48 óra után beállító mód
 - **Fizikai gombok** – reset és Wi-Fi reset gombok debounce-szal
 - **Uptime kijelzés** – Soros porton folyamatosan látható az eszköz futási ideje
@@ -192,7 +193,7 @@ csak a `getString()` útján tenné, az viszont korlátlanul foglalna).
 
 | Helyzet | Router reset |
 |---|---|
-| a router **sem** válaszol pingre (vagy nincs Wi-Fi / gateway) | **2 perc** internet nélkül |
+| a router **sem** válaszol pingre (vagy nincs Wi-Fi / gateway) | **2 perc** internet nélkül; **22:00–05:00 között 10 perc** |
 | a router válaszol, az internet nem (szolgáltatói hiba) | **15 perc** internet nélkül |
 | a reset nem segített | a következő **30 perc → 1 óra → 2 óra → 4 óra** múlva, onnan 4 óránként |
 | egyetlen sikeres ellenőrzés | minden nullázódik |
@@ -248,6 +249,25 @@ helyette AP mód); utána a lépcső szerint ritkul.
 
 A stabil méréshez a Wi-Fi modem-alvás ki van kapcsolva, és DHCP mellett is van
 tartalék DNS (`1.1.1.1`, a router DNS-e után).
+
+#### Éjszakai csendes időszak
+
+A szolgáltatók a router firmware-ét jellemzően éjjel frissítik, és a router
+közben újraindul. Ha ilyenkor az ESP elvenné az áramát, a frissítés félbeszakadna.
+Ezért **22:00 és 05:00 között** (magyar idő, nyári időszámítással együtt):
+
+| Helyzet | Nappal | Éjjel |
+|---|---|---|
+| a router sem válaszol | 2 perc után reset | **10 perc** után (mérve 11,9 perc, `QH2`) |
+| elvész a Wi-Fi | ESP-újraindítás, router reset 5,3 perc után | ESP-újraindítás, router reset **legalább 10 perc** kiesés után (mérve 15,3 perc, `QH6`) |
+| a router válaszol, az internet nem | 15 perc | 15 perc (változatlan) |
+| a router DNS-e hallgat | 10 perc | 10 perc (a frissítés alatt a ping sem megy, így ez szünetel) |
+
+Egy 8 perces éjszakai router-kiesés így nem kap resetet (`QH3`), 05:00 után
+pedig újra a nappali szabály él (`QH4`). Az időt az NTP adja; az ESP órája a
+saját újraindítását túléli. **Áramszünet után, amíg nincs internet, nincs
+érvényes idő** – ilyenkor a nappali szabály érvényes (a hidegindítás 10 perces
+türelmi ideje viszont ott is megvan).
 
 ### 3. Fizikai gombok
 
@@ -343,7 +363,7 @@ bazsi-router-reboot/
 ├── webportal.h/.cpp          # az AP beállító portál HTTP felülete
 │
 ├── partitions_custom.csv     # Egyedi partíciós tábla: OTA nélkül, 512 KiB LittleFS
-├── test/                     # host tesztkészlet (370 forgatókönyv)
+├── test/                     # host tesztkészlet (377 forgatókönyv)
 │
 ├── ATTEKINTES.md             # egyoldalas összefoglaló
 ├── MUKODES.md                # minden időzítés és döntés táblázatban
@@ -496,6 +516,7 @@ Amit ez hoz:
 | `CHECK_INTERVAL_MS` | 1 perc | Ilyen sűrűn ellenőriz (a kör kezdetétől); a hosszú várakozások korai lezárását is ilyen sűrűn nézi |
 | `ROUTER_DOWN_WINDOW_MS` | 2 perc | Ennyi internet nélküli idő után reset, ha a router sem válaszol |
 | `WAN_DOWN_WINDOW_MS` | 15 perc | Ennyi után reset, ha a router válaszol (szolgáltatói hiba) |
+| `QUIET_START_HOUR` / `QUIET_END_HOUR` / `QUIET_WINDOW_MS` | 22 / 5 óra, 10 perc | Éjszakai csendes időszak (helyi idő): ilyenkor a `ROUTER_DOWN_WINDOW_MS` helyett 10 perc, és a Wi-Fi miatti első router reset is legalább 10 perc kiesés után |
 | `RETRY_BACKOFF_MS` | 30 / 60 / 120 / 240 perc | Ha a reset nem segített, ennyivel az előző után jön a következő (az utolsó ismétlődik) |
 | `DNS_CHECK_INTERVAL_MS` | 5 perc | Ilyen sűrűn kérdezi a router DNS-ét (gyanúnál percenként) |
 | `DNS_FAIL_WINDOW_MS` | 10 perc | Ennyi folyamatos router-DNS-hiba után reset |
@@ -875,7 +896,8 @@ kapcsolat után** nullázódik, így egy instabil routernél a második kiesés 
 router resetet kap. Rossz jelszónál bármelyik fokon azonnal AP mód. Az
 újraindulás előtt a fok és a kiesés hossza RTC memóriába mentődik (ellenőrző
 értékkel); az áramszünet, a gombok és az alvás törlik. Mérve: a Wi-Fi
-elvesztésétől a router resetig **5,3 perc** (`WFL2`).
+elvesztésétől a router resetig **5,3 perc** (`WFL2`), az éjszakai csendes
+időszakban **15,3 perc** (`QH6`; az ESP-újraindítás ott is az elején jön).
 
 > **Ha te magad áramtalanítod a routert:** az eszköz ezt **nem tudja
 > megkülönböztetni** attól, hogy a router lefagyott. A türelmi idő a hálózat

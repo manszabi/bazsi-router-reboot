@@ -290,6 +290,7 @@ size_t strlcpy(char* d, const char* s, size_t n) {
 #endif
 
 uint32_t g_epochNow = 0;
+uint32_t g_epochTickFrom = 0;
 int      g_ntpStarts = 0;
 void configTzTime(const char* tz, const char* server) {
   (void)tz; (void)server;
@@ -299,7 +300,7 @@ void configTzTime(const char* tz, const char* server) {
 
 #undef time
 time_t stub_time(time_t* out) {
-  const time_t t = (time_t)g_epochNow;
+  const time_t t = (time_t)(g_epochNow == 0 ? 0 : g_epochNow + (g_epochTickFrom != 0 ? (g_millis - g_epochTickFrom) / 1000 : 0));
   if (out) *out = t;
   return t;
 }

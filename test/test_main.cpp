@@ -123,6 +123,9 @@ bool lastEventWas(uint8_t code);
 bool stuckCycleAlreadyLogged(uint16_t which);
 void lockConfigBeforeShutdown();
 extern uint32_t g_epochNow;
+extern uint32_t g_epochTickFrom;
+bool quietHours();
+int localHour();
 void doWifiReset();
 extern int g_ntpStarts;
 void enterFatal(const char* reason);
@@ -229,7 +232,7 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
 
   heapCheckLast = 0; heapLogLast = 0; heapCritStreak = 0; heapWarnActive = false;
   ntpResetForColdBoot();
-  g_epochNow = 0; g_ntpStarts = 0;
+  g_epochNow = 0; g_epochTickFrom = 0; g_ntpStarts = 0;
 
   g_serialOn = false; g_serialBaud = 0; g_serialFirstWriteMs = 0;
   g_serialWritesAfterEnd = 0; g_serialFlushedAll = true;
@@ -310,7 +313,9 @@ static void softReboot(bool willConnect) {
   const uint32_t wm = rtcWifiMagic, wo = rtcWifiOutageMin; const uint8_t ws = rtcWifiStep;
   const auto fs = g_fs;
   const uint32_t evm = rtcEvMagic, evn = rtcEvNext, ora = g_millis;
+  const uint32_t ep = g_epochNow, epTick = g_epochTickFrom;
   coldBoot(willConnect, "", "", "", "");
+  g_epochNow = ep; g_epochTickFrom = epTick;  // az RTC ora a szoftveres ujrainditast tuleli
   g_millis = ora + 300;  // a szimulalt ido folytonos marad, hogy a teszt merhessen
   g_fs = fs;
   rtcWifiMagic = wm; rtcWifiStep = ws; rtcWifiOutageMin = wo;
@@ -7162,7 +7167,6 @@ static void scDN12() {
 }
 
 
-
 // Monitor uzem, mukodo Wi-Fi-vel; utana a Wi-Fi tartosan eltunik.
 static void wflIndit() {
   coldBoot(true, "TestNet", "pw", "", "");
@@ -7374,6 +7378,105 @@ static void scWFL10() {
 }
 
 struct Scenario { const char* name; void (*fn)(); };
+// Helyi ido beallitasa (epoch); innentol a szimulalt ora a millis()-szel jar.
+static void oraAllit(uint32_t epoch) {
+  g_epochNow = epoch;
+  g_epochTickFrom = g_millis != 0 ? g_millis : 1;
+}
+
+constexpr uint32_t EP_TEL_2300 = 1795816800UL;  // 2026-11-27 23:00 CET
+constexpr uint32_t EP_TEL_1200 = 1795777200UL;  // 2026-11-27 12:00 CET
+
+static void scQH1() {
+  // A csendes idoszak hatarai, teli (CET) es nyari (CEST) idoben, idozona nelkuli indulas utan is.
+  coldBoot(true, "TestNet", "pw", "", "");
+  setenv("TZ", "UTC0", 1); tzset();
+  setup();
+  const struct { uint32_t ep; bool csendes; const char* mit; } esetek[] = {
+    { 1795813199UL, false, "tel 21:59:59: nappal" },
+    { 1795813200UL, true, "tel 22:00:00: csendes" },
+    { 1795838399UL, true, "tel 04:59:59: csendes" },
+    { 1795838400UL, false, "tel 05:00:00: nappal" },
+    { 1784145599UL, false, "nyar 21:59:59: nappal" },
+    { 1784145600UL, true, "nyar 22:00:00: csendes" },
+    { 1784170799UL, true, "nyar 04:59:59: csendes" },
+    { 1784170800UL, false, "nyar 05:00:00: nappal" },
+  };
+  for (auto& e : esetek) { oraAllit(e.ep); CHECK(quietHours() == e.csendes, e.mit); }
+  oraAllit(EP_TEL_2300);
+  CHECK(localHour() == 23, "a setup() beallitja a magyar idozonat (nem UTC)");
+  g_epochNow = 0;
+  CHECK(localHour() == -1 && !quietHours(), "ervenyes ido nelkul nincs csendes idoszak");
+}
+
+static void scQH2() {
+  // Ejjel a router sem valaszol: reset csak 10 perc utan (pl. firmware-frissites).
+  ftIndit();
+  oraAllit(EP_TEL_2300);
+  auto r = ftJatszik(30, [](uint32_t) { return FtPerc{ false, false, false }; });
+  ftKiir("ejjel router hiba", r);
+  CHECK(r.size() == 1 && r[0] >= 10.0 && r[0] < 12.5, "10 perc utan, nem 2 perc utan");
+  CHECK(evCount(EVC_NET_DIAG, 1) == 1, "NET DIAG 1");
+}
+
+static void scQH3() {
+  // Ejjel egy 8 perces router-kieses (frissites, ujraindulas): nincs reset; nappal ugyanez reset.
+  for (bool ejjel : { true, false }) {
+    ftIndit();
+    oraAllit(ejjel ? EP_TEL_2300 : EP_TEL_1200);
+    auto r = ftJatszik(40, [](uint32_t p) {
+      const bool rossz = p >= 5 && p < 13;
+      return FtPerc{ !rossz, !rossz, !rossz }; });
+    printf("     [info] 8 perces router-kieses %s: %zu reset\n", ejjel ? "ejjel" : "nappal", r.size());
+    CHECK(ejjel ? r.empty() : r.size() == 1, ejjel ? "ejjel: nincs reset" : "nappal: reset");
+  }
+}
+
+static void scQH4() {
+  // A csendes idoszak vege: 04:55-kor kezdodo router-hiba 05:00 utan nappali szaballyal resetel.
+  ftIndit();
+  oraAllit(1795838100UL);  // 2026-11-28 04:55 CET
+  auto r = ftJatszik(20, [](uint32_t) { return FtPerc{ false, false, false }; });
+  ftKiir("04:55-kor kezdodo router hiba", r);
+  CHECK(r.size() == 1 && r[0] >= 4.0 && r[0] < 7.0, "05:00 utan nem var tovabb 10 percig");
+}
+
+static void scQH5() {
+  // Ejjel a szolgaltatoi kieses (a router valaszol) tovabbra is 15 perc: a csendes ido nem rovidit.
+  ftIndit();
+  oraAllit(EP_TEL_2300);
+  auto r = ftJatszik(30, [](uint32_t) { return FtPerc{ false, true, false }; });
+  CHECK(r.size() == 1 && r[0] >= 15.0 && r[0] < 17.5, "15 perc utan");
+  CHECK(evCount(EVC_NET_DIAG, 2) == 1, "NET DIAG 2");
+}
+
+static void scQH6() {
+  // Ejjel elvesz a Wi-Fi: az ESP ujraindul, de a router reset csak 10 perc kieses utan jon.
+  wflIndit();
+  oraAllit(EP_TEL_2300);
+  const uint32_t t0 = g_millis;
+  futtatUjraindulassal(30u * 60 * 1000, false, [] { return serialHas("Router reset indul."); });
+  const int ri = serialIndex("Router reset indul.");
+  const double perc = ri >= 0 ? (uptimeSecAt((size_t)ri) - (int)(t0 / 1000)) / 60.0 : -1;
+  printf("     [info] ejjel a Wi-Fi elvesztesetol a router resetig: %.1f perc\n", perc);
+  CHECK(evCount(18) == 1, "elobb az ESP indult ujra");
+  CHECK(serialHas("ejszakai csendes idoszak"), "kimondja, miert var");
+  CHECK(perc >= 10.0 && perc <= 16.5, "a router reset legalabb 10 perc kieses utan, nem kb. 5 perc utan");
+  CHECK(rtcWifiStep == 2, "2. fok");
+}
+
+static void scQH7() {
+  // Ejjel a Wi-Fi a varakozas alatt visszajon: nincs router reset.
+  wflIndit();
+  oraAllit(EP_TEL_2300);
+  const uint32_t t0 = g_millis;
+  futtatUjraindulassal(30u * 60 * 1000, false, [] { return serialHas("ejszakai csendes idoszak"); });
+  wifiSim.willConnect = true;
+  futtat(15u * 60 * 1000, [] { return serialHas("Successful Test"); });
+  CHECK(serialHas("Successful Test") && g_millis - t0 < 15u * 60 * 1000, "a Wi-Fi visszajott");
+  CHECK(relayPulses() == 0, "a router erintetlen maradt");
+}
+
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
   { "W2: sikeres csatlakozás -> monitor mód, DHCP (nincs statikus IP)", sc1 },
@@ -7747,6 +7850,13 @@ static const Scenario kScenarios[] = {
   { "DN10: statikus IP: a gateway a router DNS-e, kontroll az 1.1.1.1", scDN10 },
   { "DN11: normal uzemben 5 percenkent egy kerdes", scDN11 },
   { "DN12: ping nelkul a DNS-ellenorzes szunetel", scDN12 },
+  { "QH1: a csendes idoszak hatarai (22:00-05:00, CET es CEST)", scQH1 },
+  { "QH2: ejjel a router sem valaszol: reset 10 perc utan", scQH2 },
+  { "QH3: 8 perces router-kieses: ejjel nincs reset, nappal van", scQH3 },
+  { "QH4: 05:00 utan ujra a nappali szabaly", scQH4 },
+  { "QH5: ejjel a szolgaltatoi kieses tovabbra is 15 perc", scQH5 },
+  { "QH6: ejjel a Wi-Fi miatti router reset 10 perc kieses utan", scQH6 },
+  { "QH7: ejjel a varakozas alatt visszajon a Wi-Fi: nincs reset", scQH7 },
 
   { "APP1: az elso portal-inditas egyedi, eros AP jelszot general", scAPP1 },
   { "APP2: az AP jelszo allando, indulaskor kiirva, normal uzemben nincs iras", scAPP2 },
