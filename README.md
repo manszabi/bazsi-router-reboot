@@ -363,7 +363,7 @@ bazsi-router-reboot/
 ├── webportal.h/.cpp          # az AP beállító portál HTTP felülete
 │
 ├── partitions_custom.csv     # Egyedi partíciós tábla: OTA nélkül, 512 KiB LittleFS
-├── test/                     # host tesztkészlet (377 forgatókönyv)
+├── test/                     # host tesztkészlet (379 forgatókönyv)
 │
 ├── ATTEKINTES.md             # egyoldalas összefoglaló
 ├── MUKODES.md                # minden időzítés és döntés táblázatban
@@ -886,7 +886,7 @@ Wi-Fi-modul elakadása), ezért előbb az ESP indítja újra magát:
 | Fok | Mikor | Mit csinál |
 |:-:|---|---|
 | 1 | 3 próba (30 mp szünetekkel) sem segít | **ESP-újraindítás**, a router érintetlen; utána nincs 10 perces türelmi idő |
-| 2 | utána ismét 3 próba sem segít | **router reset**, legfeljebb 10 perc várakozás, 3 próba |
+| 2 | utána ismét 3 próba sem segít | **router reset**, legfeljebb 10 perc várakozás, 3 próba (22:00–05:00 között csak legalább 10 perc kiesés után) |
 | 3 … | még mindig nincs Wi-Fi | újabb router reset **30 perc → 1 óra → 2 óra → 4 óránként** |
 | – | 48 órája nincs Wi-Fi | **AP beállító mód** |
 
@@ -895,14 +895,17 @@ Wi-Fi visszajön, azonnal folytatódik a figyelés. A lépcső **30 perc stabil
 kapcsolat után** nullázódik, így egy instabil routernél a második kiesés már
 router resetet kap. Rossz jelszónál bármelyik fokon azonnal AP mód. Az
 újraindulás előtt a fok és a kiesés hossza RTC memóriába mentődik (ellenőrző
-értékkel); az áramszünet, a gombok és az alvás törlik. Mérve: a Wi-Fi
+értékkel); az áramszünet, a gombok és az alvás törlik. Ha a kiesés már kapott
+router resetet (a reset után nem jött vissza a Wi-Fi), az ESP-újraindulás után
+a lépcső onnan folytatódik: a következő reset 30 perccel az előző után jön
+(`WFL11`). Mérve: a Wi-Fi
 elvesztésétől a router resetig **5,3 perc** (`WFL2`), az éjszakai csendes
 időszakban **15,3 perc** (`QH6`; az ESP-újraindítás ott is az elején jön).
 
 > **Ha te magad áramtalanítod a routert:** az eszköz ezt **nem tudja
 > megkülönböztetni** attól, hogy a router lefagyott. A türelmi idő a hálózat
 > eltűnésétől az ESP saját router-resetjéig **4,3 perc** (mérve: `PWR3`; közben
-> az ESP egyszer újraindul). Ha ezen belül visszadugod, az ESP **hozzá sem nyúl**
+> az ESP egyszer újraindul), 22:00 és 05:00 között legalább 10 perc. Ha ezen belül visszadugod, az ESP **hozzá sem nyúl**
 > a reléhez (`PWR4`).
 
 ### Áramszünet

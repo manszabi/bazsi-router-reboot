@@ -216,7 +216,7 @@ flowchart TD
     AUTH -->|nem| GIVE{"48 órája nincs Wi-Fi?<br>(WIFI_GIVEUP_MIN)"}
     GIVE -->|igen| AP3["lépcső törlése<br>startConfigPortal(), EV_AP_MODE(3)"]
     GIVE -->|nem| S0{"0. fok, és nem hidegindulás?"}
-    S0 -->|igen| RST["1. fok mentése az RTC-be (magic-kel)<br>EV_WIFI_RESTART, saveEventLog()<br>ESP.restart() – a router érintetlen"]
+    S0 -->|igen| RST["1. fok (ha a kiesés már kapott resetet: resetek + 1) mentése az RTC-be (magic-kel)<br>EV_WIFI_RESTART, saveEventLog()<br>ESP.restart() – a router érintetlen"]
     S0 -->|nem| PEND{"wifiResetWaitMs() > 0?<br>1. fok: 22–05 óráig 10 perc kiesés<br>2+. fok: 30 → 60 → 120 → 240 perc"}
     PEND -->|igen| WAIT["WAIT_STATE: percenként 1 próba"]
     PEND -->|nem| RR["fok++ (legalább 2)<br>startRouterReset(NET DIAG 1)"]
@@ -311,7 +311,7 @@ memóriában túléli:
 | `rtcSavedEvNext` (a legutóbbi fájlmentés pozíciója) | `RTC_NOINIT` | ugyanaz |
 | watchdog számláló (`rtcWdtMagic`, `rtcWdtResets`) | `RTC_NOINIT` | ugyanaz |
 | heap-újraindulások és az átvitel (`rtcHeapMagic`, `rtcHeapRestarts`, `rtcCarryResetEvents`) | `RTC_NOINIT` | ugyanaz |
-| a Wi-Fi-lépcső (`rtcWifiMagic`, `rtcWifiStep`, `rtcWifiOutageMin`) | `RTC_NOINIT` | a saját, a heap miatti és a watchdog-újraindulást – az áramszünet, a gombok és az alvás törlik |
+| a Wi-Fi-lépcső (`rtcWifiMagic`, `rtcWifiStep`, `rtcWifiOutageMin`, `rtcWifiResetAgoMin`) | `RTC_NOINIT` | a saját, a heap miatti és a watchdog-újraindulást – az áramszünet, a gombok és az alvás törlik |
 
 A **valós idő** (`gettimeofday()`) szintén túléli a deep sleepet – az RTC
 órából jön –, míg a `millis()` minden ébredéskor nulláról indul.
@@ -320,4 +320,4 @@ A **valós idő** (`gettimeofday()`) szintén túléli a deep sleepet – az RTC
 
 *Az ábrák a `bazsi_router_reboot.ino` aktuális állapotát dokumentálják.
 Módosításkor a kóddal együtt frissítendők – a viselkedést a `test/` alatti
-377 forgatókönyves (2232 ellenőrzéses) tesztkészlet rögzíti.*
+379 forgatókönyves (2242 ellenőrzéses) tesztkészlet rögzíti.*

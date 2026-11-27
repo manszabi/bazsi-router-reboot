@@ -257,7 +257,7 @@ a státusz LED marad **be**). Utána:
 | Fok | Mikor | Mit csinál |
 |:-:|---|---|
 | 0 → 1 | 3 újracsatlakozási próba (köztük 30 mp) sem segít | **az ESP újraindítja magát**, a router érintetlen; utána nincs 10 perces türelmi idő |
-| 1 → 2 | az újraindulás után ismét 3 próba sem segít | **router reset** (`NET DIAG` 1), legfeljebb 10 perc várakozás a bootra, utána 3 próba |
+| 1 → 2 | az újraindulás után ismét 3 próba sem segít | **router reset** (`NET DIAG` 1), legfeljebb 10 perc várakozás a bootra, utána 3 próba; 22:00–05:00 között csak legalább 10 perc kiesés után |
 | 2 → 3 … | még mindig nincs Wi-Fi | **30 perc**, majd **1 óra**, **2 óra**, onnan **4 óránként** újabb router reset |
 | – | **48 órája** nincs Wi-Fi (`WIFI_GIVEUP_MIN`) | **AP beállító mód** (`AP MODE` 3) |
 
@@ -266,12 +266,19 @@ a státusz LED marad **be**). Utána:
 - **A várakozás ébren történik**: közben percenként egy csatlakozási próba fut
   (nem három), és ha a Wi-Fi visszajön, azonnal folytatódik a figyelés.
 - **Hidegindulásnál** (áramszünet után) a 0. fok kimarad: az ESP épp most indult.
+- **Ha a kiesés már kapott router resetet** (pl. a router sem válaszolt, a reset
+  után pedig nem jött vissza a Wi-Fi), az ESP ugyanúgy újraindul, de a lépcső
+  onnan folytatódik: a következő reset az előző után 30 perccel (majd 1 / 2 /
+  4 óra) jön, nem rögtön az újraindulás után (`WFL11`, `WFL12`; korábban ~15 perc volt).
 - **Nullázás**: ha a Wi-Fi **30 percig** folyamatosan megvan (`WIFI_STABLE_MS`).
   Így egy instabil routernél a második kiesés már router resetet kap, nem újabb
   ESP-újraindítást (`WFL5`).
 
 **Mit őriz meg az újraindulás:** a fokot és a kiesés eddigi hosszát
-(`rtcWifiStep`, `rtcWifiOutageMin`, `RTC_NOINIT`, ellenőrző értékkel). Ez a
+és az utolsó router reset óta eltelt percet (`rtcWifiStep`, `rtcWifiOutageMin`,
+`rtcWifiResetAgoMin`, `RTC_NOINIT`, ellenőrző értékkel). Indulás után a
+2+. fok az internet-ág reset-számlálóját is beállítja, így ha a Wi-Fi visszajön,
+de az internet nem, ott sem jön idő előtt újabb reset. Ez a
 saját, a heap miatti és a watchdog-újraindulást túléli. **Törli** az
 áramszünet, a reset és a wifireset gomb, a mentés utáni újraindulás és minden
 alvás – ezek emberi beavatkozások, tehát tiszta lap.
@@ -290,7 +297,7 @@ hálózat mindkét esetben ugyanúgy eltűnik.
 
 | | mért érték |
 |---|---|
-| **Türelmi idő** a hálózat eltűnésétől az ESP saját router-resetjéig | **4,3 perc** (`PWR3`; közben az ESP egyszer újraindul) |
+| **Türelmi idő** a hálózat eltűnésétől az ESP saját router-resetjéig | **4,3 perc** (`PWR3`; közben az ESP egyszer újraindul); 22:00–05:00 között legalább 10 perc |
 | Ha a router ezen belül visszajön | az ESP **hozzá sem nyúl** a reléhez, csendben visszacsatlakozik (`PWR4`) |
 
 ---
@@ -732,7 +739,7 @@ hossza percre pontosan mentődik. Gombnyomás viszont törli: ott tiszta lap kel
 | Változó | Mi lesz vele | Miért rendben |
 |---|---|---|
 | `testState.resetEvents` | **átvisszük** | enélkül a reset-lépcső elölről kezdődne |
-| `rtcWifiStep`, `rtcWifiOutageMin` (Wi-Fi-lépcső) | eleve `RTC_NOINIT`, a kiesés hossza előtte mentődik | lásd fent |
+| `rtcWifiStep`, `rtcWifiOutageMin`, `rtcWifiResetAgoMin` (Wi-Fi-lépcső) | eleve `RTC_NOINIT`, a kiesés hossza előtte mentődik | lásd fent |
 | `testState.outage`, `outageStart`, `lastResetAt` | újraszámolódik | ha volt reset, a kiesés az indulástól folytatódik (`GWH3`) |
 | `testState.endpointIndex` | elvész | csak azt mondja meg, melyik HTTP végpont jön |
 | `dnsState` (DNS-gyanú, DNS-lépcső) | elvész | a DNS-ellenőrzés újraindul; legfeljebb egy korábbi DNS-reset jön |

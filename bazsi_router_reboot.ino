@@ -203,6 +203,7 @@ constexpr uint32_t WIFI_LADDER_MAGIC = 0x42415A57UL;
 RTC_NOINIT_ATTR uint32_t rtcWifiMagic;
 RTC_NOINIT_ATTR uint8_t  rtcWifiStep;
 RTC_NOINIT_ATTR uint32_t rtcWifiOutageMin;
+RTC_NOINIT_ATTR uint32_t rtcWifiResetAgoMin;
 
 // A lépcső RAM-beli órái: a kiesés kezdete, az utolsó router reset, a stabil kapcsolat kezdete.
 uint32_t wifiOutageSince = 0;
@@ -879,6 +880,7 @@ void wifiLadderPersist() {
     return;
   }
   rtcWifiOutageMin = wifiOutageMinutes();
+  rtcWifiResetAgoMin = (rtcWifiStep >= 2) ? (millis() - wifiLastResetAt) / 60000 : 0;
   wifiOutageSince = millis();
 }
 
@@ -886,6 +888,7 @@ void wifiLadderClear() {
   rtcWifiMagic = WIFI_LADDER_MAGIC;
   rtcWifiStep = 0;
   rtcWifiOutageMin = 0;
+  rtcWifiResetAgoMin = 0;
   wifiConnectedSince = 0;
 }
 
@@ -895,8 +898,15 @@ void initWifiLadder() {
     wifiLadderClear();
   }
   wifiOutageSince = millis();
-  wifiLastResetAt = wifiOutageSince;
+  wifiLastResetAt = wifiOutageSince - rtcWifiResetAgoMin * 60000;
   wifiConnectedSince = 0;
+  // A Wi-Fi miatti router reset az internet-ágnak is számít: a lépcső onnan folytatódik.
+  if (rtcWifiStep >= 2 && testState.resetEvents < rtcWifiStep - 1) {
+    testState.resetEvents = (uint8_t)(rtcWifiStep - 1);
+    testState.outage = true;
+    testState.outageStart = wifiLastResetAt;
+    testState.lastResetAt = wifiLastResetAt;
+  }
   if (rtcWifiStep > 0) {
     printUptime();
     Serial.print("Wi-Fi lepcso folytatodik: ");
@@ -968,7 +978,9 @@ void wifiFailed(bool coldStart) {
     rtcWifiOutageMin = 0;
   }
   if (rtcWifiStep == 0 && !coldStart) {
-    rtcWifiStep = 1;
+    // Ha a kiesés már kapott router resetet, az ESP-újraindulás után a lépcső onnan folytatódik.
+    rtcWifiStep = (testState.resetEvents > 0) ? (uint8_t)(testState.resetEvents < 254 ? testState.resetEvents + 1 : 255) : 1;
+    wifiLastResetAt = testState.lastResetAt;
     wifiLadderPersist();
     Serial.println("A Wi-Fi nem jott vissza - elobb az ESP indul ujra (a router erintetlen).");
     logEvent(EV_WIFI_RESTART, (uint16_t)WiFi.status());

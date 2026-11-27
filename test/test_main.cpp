@@ -63,6 +63,7 @@ extern volatile uint32_t apDeadline;
 extern uint32_t rtcWifiMagic;
 extern uint8_t  rtcWifiStep;
 extern uint32_t rtcWifiOutageMin;
+extern uint32_t rtcWifiResetAgoMin;
 extern uint32_t wifiOutageSince, wifiLastResetAt, wifiConnectedSince;
 extern uint32_t rtcEvMagic;
 extern uint32_t rtcEvNext;
@@ -310,7 +311,8 @@ static int futtat(uint32_t maxMs, F kesz) {
 
 // Szoftveres ujraindulas: az RTC_NOINIT tartalom es a fajlrendszer marad, minden mas elolrol.
 static void softReboot(bool willConnect) {
-  const uint32_t wm = rtcWifiMagic, wo = rtcWifiOutageMin; const uint8_t ws = rtcWifiStep;
+  const uint32_t wm = rtcWifiMagic, wo = rtcWifiOutageMin, wa = rtcWifiResetAgoMin;
+  const uint8_t ws = rtcWifiStep;
   const auto fs = g_fs;
   const uint32_t evm = rtcEvMagic, evn = rtcEvNext, ora = g_millis;
   const uint32_t ep = g_epochNow, epTick = g_epochTickFrom;
@@ -318,7 +320,7 @@ static void softReboot(bool willConnect) {
   g_epochNow = ep; g_epochTickFrom = epTick;  // az RTC ora a szoftveres ujrainditast tuleli
   g_millis = ora + 300;  // a szimulalt ido folytonos marad, hogy a teszt merhessen
   g_fs = fs;
-  rtcWifiMagic = wm; rtcWifiStep = ws; rtcWifiOutageMin = wo;
+  rtcWifiMagic = wm; rtcWifiStep = ws; rtcWifiOutageMin = wo; rtcWifiResetAgoMin = wa;
   rtcEvMagic = evm; rtcEvNext = evn;
   g_resetReason = ESP_RST_SW;
   setup();
@@ -3657,7 +3659,7 @@ static void scWF11() {
   const int r = futtat(30u * 60 * 1000, [] { return false; });
   CHECK(serialHas("A router reset utan sem jott vissza a WiFi."),
         "a hibaag lefutott es meg is mondja");
-  CHECK(r == 2 && rtcWifiStep == 1, "es a Wi-Fi lepcso dontott: ESP-ujrainditas");
+  CHECK(r == 2 && rtcWifiStep == 2, "es a Wi-Fi lepcso dontott: ESP-ujrainditas, a reset beszamitva (2. fok)");
 }
 
 static void scNV2() {
@@ -7477,6 +7479,59 @@ static void scQH7() {
   CHECK(relayPulses() == 0, "a router erintetlen maradt");
 }
 
+
+static void scWFL11() {
+  // A router reset utan nem jon vissza a Wi-Fi: az ESP ujraindul, de a kovetkezo reset a lepcso szerint.
+  ftIndit();
+  auto r = ftJatszik(5, [](uint32_t) { return FtPerc{ false, false, false }; });
+  CHECK(r.size() == 1, "elso reset (a router sem valaszolt)");
+  const double elso = r.empty() ? 0 : r[0];
+  wifiSim.willConnect = false; wifiSim.begun = false;
+  const uint32_t t1 = g_millis;
+  std::vector<double> rs;
+  int ujra = 0;
+  while (g_millis - t1 < 110u * 60000) {
+    try {
+      const size_t n = g_log.size();
+      loop();
+      for (size_t i = n; i < g_log.size(); i++)
+        if (g_log[i] == RELAY_HIGH) rs.push_back(5.0 + (g_millis - t1) / 60000.0);
+    } catch (RestartSignal&) { ujra++; softReboot(false); }
+  }
+  ftKiir("a Wi-Fi a reset utan nem jon vissza, tovabbi", rs);
+  CHECK(ujra == 1, "az ESP egyszer ujraindult");
+  CHECK(!rs.empty() && rs[0] - elso >= 30.0 && rs[0] - elso < 33.0,
+        "a masodik reset 30 perccel az elso utan, nem ~15 perccel");
+  CHECK(rs.size() == 2 && rs[1] - rs[0] >= 60.0 - 0.1, "a harmadik ujabb 1 oraval kesobb");
+}
+
+static void scWFL12() {
+  // Mint a WFL11, de az ESP-ujraindulas utan visszajon a Wi-Fi, az internet nem: a lepcso ott is el.
+  ftIndit();
+  auto r = ftJatszik(5, [](uint32_t) { return FtPerc{ false, false, false }; });
+  const double elso = r.empty() ? 0 : r[0];
+  wifiSim.willConnect = false; wifiSim.begun = false;
+  const uint32_t t1 = g_millis;
+  std::vector<double> rs;
+  int ujra = 0;
+  while (g_millis - t1 < 60u * 60000) {
+    try {
+      const size_t n = g_log.size();
+      loop();
+      for (size_t i = n; i < g_log.size(); i++)
+        if (g_log[i] == RELAY_HIGH) rs.push_back(5.0 + (g_millis - t1) / 60000.0);
+    } catch (RestartSignal&) {
+      ujra++;
+      softReboot(true);
+      pingSim = PingSim(); pingSim.ok = false; g_httpCode = -11;
+    }
+  }
+  ftKiir("ujraindulas utan Wi-Fi van, internet nincs, tovabbi", rs);
+  CHECK(ujra == 1, "az ESP egyszer ujraindult");
+  CHECK(!rs.empty() && rs[0] - elso >= 30.0 && rs[0] - elso < 33.0,
+        "a kovetkezo reset 30 perccel az elso utan, nem 2 perccel a visszacsatlakozas utan");
+}
+
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
   { "W2: sikeres csatlakozás -> monitor mód, DHCP (nincs statikus IP)", sc1 },
@@ -7837,6 +7892,8 @@ static const Scenario kScenarios[] = {
   { "WFL7: aramszunet torli a lepcsot, hidegindulasnal nincs ujrainditas", scWFL7 },
   { "WFL8: heap-ujraindulas: a lepcso es a kieses hossza atjon", scWFL8 },
   { "WFL9: a kieses nullazza a stabil kapcsolat orajat", scWFL9 },
+  { "WFL11: a reset utan sem jon vissza a Wi-Fi: az ESP ujraindul, a lepcso folytatodik", scWFL11 },
+  { "WFL12: a reset utan Wi-Fi igen, internet nem: a lepcso az internet-agon is el", scWFL12 },
   { "WFL10: a wifireset, a mentes utani ujraindulas es az alvas torli a lepcsot", scWFL10 },
   { "DN1: a router DNS-e hallgat, a ping megy: reset legkesobb ~16 perc", scDN1 },
   { "DN2: a kulso DNS is hallgat: nincs reset", scDN2 },
