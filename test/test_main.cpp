@@ -4308,10 +4308,11 @@ static void scGWH5() {
   CHECK(rtcCarryResetEvents == 0xFF,
         "gombnyomasnal NINCS atvitel - a felhasznaloi beavatkozas tiszta lap");
 
-  const uint32_t hm = rtcHeapMagic;
-  const uint8_t ce = rtcCarryResetEvents;
+  const uint32_t hm = rtcHeapMagic, wm = rtcWifiMagic, wo = rtcWifiOutageMin;
+  const uint8_t ce = rtcCarryResetEvents, ws = rtcWifiStep;
   coldBoot(true, "TestNet", "pw", "", "");
   rtcHeapMagic = hm; rtcCarryResetEvents = ce;
+  rtcWifiMagic = wm; rtcWifiStep = ws; rtcWifiOutageMin = wo;
   setup();
   CHECK(rtcWifiStep == 0 && rtcWifiOutageMin == 0,
         "gombnyomas utan a Wi-Fi lepcso elolrol indul (szandekolt)");
@@ -7353,6 +7354,24 @@ static void scWFL9() {
   CHECK(rtcWifiStep == 0, "30 perc utan igen");
 }
 
+
+static void scWFL10() {
+  // A wifireset gomb, a mentes utani ujraindulas es az alvas is torli a lepcsot.
+  for (int ut = 0; ut < 3; ut++) {
+    coldBoot(true, "TestNet", "pw", "", "");
+    setup();
+    rtcWifiStep = 3; rtcWifiOutageMin = 100;
+    bool kesz = false;
+    try {
+      if (ut == 0) doWifiReset();
+      if (ut == 1) { requestRestart(0); for (int i = 0; i < 1000; i++) { loop(); } }
+      if (ut == 2) apSleep();
+    } catch (RestartSignal&) { kesz = true; } catch (DeepSleepSignal&) { kesz = true; }
+    CHECK(kesz && rtcWifiStep == 0 && rtcWifiOutageMin == 0,
+          ut == 0 ? "wifireset: torolve" : ut == 1 ? "mentes utani ujraindulas: torolve" : "alvas: torolve");
+  }
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -7714,6 +7733,7 @@ static const Scenario kScenarios[] = {
   { "WFL7: aramszunet torli a lepcsot, hidegindulasnal nincs ujrainditas", scWFL7 },
   { "WFL8: heap-ujraindulas: a lepcso es a kieses hossza atjon", scWFL8 },
   { "WFL9: a kieses nullazza a stabil kapcsolat orajat", scWFL9 },
+  { "WFL10: a wifireset, a mentes utani ujraindulas es az alvas torli a lepcsot", scWFL10 },
   { "DN1: a router DNS-e hallgat, a ping megy: reset legkesobb ~31 perc", scDN1 },
   { "DN2: a kulso DNS is hallgat: nincs reset", scDN2 },
   { "DN3: 9 perces DNS-zavar: nincs reset", scDN3 },
