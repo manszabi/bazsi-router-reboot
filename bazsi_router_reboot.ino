@@ -204,6 +204,13 @@ RTC_NOINIT_ATTR uint32_t rtcWifiMagic;
 RTC_NOINIT_ATTR uint8_t  rtcWifiRestarted;
 RTC_NOINIT_ATTR uint32_t rtcWifiOutageMin;
 
+// Mentés utáni első indulás (RTC_NOINIT, induláskor egyszer felhasználva): ha a mentett hálózat nem érhető el, AP mód, nem router reset.
+constexpr uint32_t CONFIG_PROBE_MAGIC = 0x42415A43UL;
+RTC_NOINIT_ATTR uint32_t rtcConfigProbe;
+bool configProbe = false;
+// Az AP mód a mentés utáni sikertelen csatlakozás miatt indult: lejártakor újraindul figyelni, nem alszik el.
+bool apFromProbe = false;
+
 // A RAM-beli órák: a kiesés kezdete (az indulás óta) és a stabil kapcsolat kezdete.
 uint32_t wifiOutageSince = 0;
 uint32_t wifiConnectedSince = 0;
@@ -247,6 +254,7 @@ void feedWatchdog();
 void wifiFailed(bool coldStart);
 void wifiLadderClear();
 void persistBeforeRestart();
+void configProbeOk();
 uint8_t wifiLadderLevel();
 uint32_t wifiOutageMinutes();
 void ladderBegin(ResetLadder& l, uint32_t now);
@@ -975,10 +983,21 @@ void wifiFailed(bool coldStart) {
   printUptime();
   Serial.print("WiFi status a probalkozasok utan: ");
   Serial.println((int)WiFi.status());
+  const bool mentesUtan = configProbe;
+  configProbe = false;
   if (wifiAuthFailed()) {
     Serial.println("Hitelesitesi hiba - valoszinuleg rossz a jelszo. AP mod.");
     wifiLadderClear();
+    apFromProbe = mentesUtan;
     logEvent(EV_AP_MODE, 2);
+    startConfigPortal();
+    return;
+  }
+  if (mentesUtan) {
+    Serial.println("A mentett halozat nem erheto el - vissza AP modba (router reset nelkul).");
+    wifiLadderClear();
+    apFromProbe = true;
+    logEvent(EV_AP_MODE, 5);
     startConfigPortal();
     return;
   }
@@ -1269,6 +1288,9 @@ void startConfigPortal() {
 void setup() {
   timing.startMillis = millis();
   wifiDownLogged = false;
+  configProbe = (rtcConfigProbe == CONFIG_PROBE_MAGIC);
+  rtcConfigProbe = 0;
+  apFromProbe = false;
 
   firstStartProbeLast = timing.startMillis - CHECK_INTERVAL_MS;
 
@@ -1335,9 +1357,13 @@ void setup() {
   applyTimezone();
   applyLadderCarry();
   initWifiLadder();
-  // Saját Wi-Fi miatti újraindulás után a router nem kapcsolt le: nincs mire várni.
-  if (rtcWifiRestarted != 0) {
+  // Saját Wi-Fi miatti vagy mentés utáni újraindulás után a router nem kapcsolt le: nincs mire várni.
+  if (rtcWifiRestarted != 0 || configProbe) {
     uiFlags.firstStart = false;
+  }
+  if (configProbe) {
+    printUptime();
+    Serial.println("Mentes utani elso indulas: ha a halozat nem erheto el, AP mod (router reset nelkul).");
   }
 
   Serial.println("Init LittleFS.");
@@ -1391,6 +1417,7 @@ void setup() {
   if (deviceMode != MODE_FATAL) {
     if (initWiFi()) {
       Serial.println("WIFI OK!");
+      configProbeOk();
       logEvent(EV_WIFI_OK, (uint16_t)wifiLadderLevel());
       wifiConnectedTick();
       deviceMode = MODE_MONITOR;
@@ -1401,7 +1428,8 @@ void setup() {
     } else {
       printUptime();
       Serial.println(uiFlags.firstStart ? "Nem sikerult csatlakozni - first start varakozas kovetkezik."
-                                        : "Nem sikerult csatlakozni - ujraprobalkozas, utana router reset.");
+                     : configProbe ? "Nem sikerult csatlakozni - ujraprobalkozas, utana AP mod."
+                                   : "Nem sikerult csatlakozni - ujraprobalkozas, utana router reset.");
       deviceMode = MODE_MONITOR;
       digitalWrite(wifiledPin, LOW);
       // Az induláskori sikertelen csatlakozás is kiesés: a visszatérése WIFI OK-t kap.
@@ -1463,6 +1491,16 @@ void handleConfigMode(uint32_t currentMillis) {
 
   if (!configWriteInProgress() && !restartRequested() &&
       (int32_t)(currentMillis - apDeadline) >= 0) {
+    if (apFromProbe) {
+      // A mentés utáni hibás adat miatti AP-ból nem alszunk el: újraindulás, és a megszokott figyelés.
+      printUptime();
+      Serial.println("Az AP mod lejart - ujraindulas, figyeles a mentett beallitasokkal.");
+      saveEventLog("AP lejart, figyeles elott");
+      lockConfigBeforeShutdown();
+      Serial.flush();
+      ESP.restart();
+      return;
+    }
     apSleep();
   }
   delay(BUTTON_POLL_MS);
@@ -1595,6 +1633,16 @@ bool routerDnsCheck() {
   return true;
 }
 
+// Sikerült csatlakozni: a mentés utáni próba lezárult, innen a megszokott szabályok élnek.
+void configProbeOk() {
+  if (!configProbe) {
+    return;
+  }
+  configProbe = false;
+  printUptime();
+  Serial.println("A mentett halozat elerheto - a megszokott szabalyok szerint figyel tovabb.");
+}
+
 // A Wi-Fi visszajött: ha a kiesést naplóztuk, a visszatérés is bekerül (a lépcső fokával).
 void noteWifiUp() {
   if (!wifiDownLogged) {
@@ -1620,6 +1668,7 @@ void runCheckState() {
     const bool siker = wifiResetPending() ? initWiFi() : reconnectWifi();
     if (siker) {
       digitalWrite(wifiledPin, HIGH);
+      configProbeOk();
       noteWifiUp();
       timing.stateStart = millis();
       return;
@@ -1630,6 +1679,7 @@ void runCheckState() {
   }
 
   digitalWrite(wifiledPin, HIGH);
+  configProbeOk();
   noteWifiUp();
   stopOutageAp();
   wifiConnectedTick();
@@ -1737,6 +1787,7 @@ void loop() {
     lockConfigBeforeShutdown();
     clearRestartRequest();
     wifiLadderClear();
+    rtcConfigProbe = CONFIG_PROBE_MAGIC;
     Serial.println("RESTART!");
     Serial.flush();
     ESP.restart();

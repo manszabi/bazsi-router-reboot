@@ -131,6 +131,8 @@ void stopOutageAp();
 void startOutageAp();
 bool outageApActive();
 extern bool outageApEnabled;
+extern uint32_t rtcConfigProbe;
+extern bool configProbe, apFromProbe;
 void doWifiReset();
 extern int g_ntpStarts;
 void enterFatal(const char* reason);
@@ -248,6 +250,7 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   if (!deepSleepWake) {
     rtcWifiMagic = 0;
     rtcHeapMagic = 0;  // bekapcsolaskor az RTC tartalma ervenytelen
+    rtcConfigProbe = 0;
   }
   wifiOutageSince = wifiConnectedSince = 0;
 
@@ -287,6 +290,7 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
 }
 
 static const uint8_t EVC_TEST_FAIL = 4, EVC_HTTP_ERROR = 15, EVC_NET_DIAG = 16;
+static const uint8_t EVC_AP_MODE = 6;
 
 static int evCount(uint8_t code, int param = -1) {
   const uint32_t db = (rtcEvNext < 32) ? rtcEvNext : 32;
@@ -319,7 +323,7 @@ static int futtat(uint32_t maxMs, F kesz) {
 static void softReboot(bool willConnect) {
   const uint32_t wm = rtcWifiMagic, wo = rtcWifiOutageMin;
   const uint8_t ws = rtcWifiRestarted;
-  const uint32_t hm = rtcHeapMagic;
+  const uint32_t hm = rtcHeapMagic, cp = rtcConfigProbe;
   const auto fs = g_fs;
   const uint32_t evm = rtcEvMagic, evn = rtcEvNext, ora = g_millis;
   const uint32_t ep = g_epochNow, epTick = g_epochTickFrom;
@@ -327,7 +331,7 @@ static void softReboot(bool willConnect) {
   g_epochNow = ep; g_epochTickFrom = epTick;  // az RTC ora a szoftveres ujrainditast tuleli
   g_millis = ora + 300;  // a szimulalt ido folytonos marad, hogy a teszt merhessen
   g_fs = fs;
-  rtcWifiMagic = wm; rtcWifiRestarted = ws; rtcWifiOutageMin = wo; rtcHeapMagic = hm;
+  rtcWifiMagic = wm; rtcWifiRestarted = ws; rtcWifiOutageMin = wo; rtcHeapMagic = hm; rtcConfigProbe = cp;
   rtcEvMagic = evm; rtcEvNext = evn;
   g_resetReason = ESP_RST_SW;
   setup();
@@ -7840,6 +7844,81 @@ static void scST7() {
   CHECK(b.find("<td>Internet</td><td>rendben</td><td>0</td>") != std::string::npos, "az Internet sor: rendben, 0 reset");
 }
 
+// AP modban ment, majd az ujraindulasig fut; a mentett allapottal szoftveresen ujraindul.
+static void mentesEsUjraindulas(const char* ssidV, const char* passV, bool csatlakozik) {
+  AsyncWebServerRequest req;
+  req.addParam("ssid", ssidV);
+  req.addParam("pass", passV);
+  g_handlers["/#2"](&req);
+  CHECK(req._code == 200, "a mentes sikerult");
+  const bool ujra = futtat(10u * 1000, [] { return false; }) == 2;
+  CHECK(ujra && rtcConfigProbe != 0, "a mentes utan az ESP ujraindul, a probajelzo az RTC-ben");
+  softReboot(csatlakozik);
+}
+
+static void scCP1() {
+  // Mentes utan a halozat nem erheto el: vissza AP modba (AP MODE 5), router reset nelkul, ~2 perc alatt.
+  coldBoot(false, "", "", "", "");
+  setup();
+  CHECK(deviceMode == (DeviceMode)1, "AP modban indul");
+  mentesEsUjraindulas("ElirtHalozat", "jelszo123", false);
+  CHECK(configProbe && rtcConfigProbe == 0 && !uiFlags.firstStart, "a probajelzot felhasznalta, nincs 10 perces varakozas");
+  const uint32_t t0 = g_millis;
+  futtatUjraindulassal(20u * 60 * 1000, false, [] { return deviceMode == (DeviceMode)1; });
+  printf("     [info] a mentes utani indulastol az AP modig: %.1f perc\n", (g_millis - t0) / 60000.0);
+  CHECK(deviceMode == (DeviceMode)1 && evCount(EVC_AP_MODE, 5) == 1, "vissza AP modba, AP MODE 5");
+  CHECK(relayPulses() == 0 && evCount(EVC_NET_DIAG) == 0, "a routerhez nem nyult");
+  CHECK(g_millis - t0 < 4u * 60 * 1000, "nem kell 10+ percet varni");
+  CHECK(serialHas("A mentett halozat nem erheto el"), "a soros porton is kimondja");
+}
+
+static void scCP2() {
+  // Mentes utan sikerul csatlakozni: a jelzo torlodik, egy kesobbi kieses mar a megszokott lepcso (ESP-ujrainditas, reset).
+  coldBoot(false, "", "", "", "");
+  setup();
+  mentesEsUjraindulas("TestNet", "jelszo123", true);
+  CHECK(deviceMode == (DeviceMode)0 && !configProbe, "csatlakozott, a jelzo torolve");
+  CHECK(serialHas("a megszokott szabalyok szerint figyel tovabb"), "kimondja");
+  monitorUzembe();
+  wifiSim.willConnect = false; wifiSim.begun = false;
+  futtatUjraindulassal(20u * 60 * 1000, false, [] { return relayPulses() > 0; });
+  CHECK(evCount(18) == 1 && relayPulses() > 0 && evCount(EVC_AP_MODE, 5) == 0, "kesobbi kieses: ESP-ujrainditas, majd router reset, nem AP");
+}
+
+static void scCP3() {
+  // A mentes utani AP-ban senki nem ment: lejartakor nem alszik el, hanem ujraindul es a megszokott szabaly szerint figyel.
+  coldBoot(false, "", "", "", "");
+  setup();
+  mentesEsUjraindulas("ElirtHalozat", "jelszo123", false);
+  futtatUjraindulassal(20u * 60 * 1000, false, [] { return deviceMode == (DeviceMode)1; });
+  CHECK(apFromProbe, "az AP a mentes utani hiba miatt indult");
+  const int lett = futtat(10u * 60 * 1000, [] { return false; });
+  CHECK(lett == 2, "az AP lejartakor ujraindul, nem alszik el");
+  softReboot(false);
+  CHECK(!configProbe && uiFlags.firstStart, "normal indulas: nincs probajelzo, van 10 perces turelem");
+  futtatUjraindulassal(20u * 60 * 1000, false, [] { return relayPulses() > 0; });
+  CHECK(relayPulses() > 0, "es a megszokott szabaly szerint vegul resetel");
+}
+
+static void scCP4() {
+  // Mentes utan rossz jelszo: AP MODE 2, es lejartakor szinten ujraindul (nem alszik el).
+  coldBoot(false, "", "", "", "");
+  setup();
+  mentesEsUjraindulas("TestNet", "rosszjelszo", false);
+  wifiSim.authFail = true; wifiSim.willConnect = false;
+  futtatUjraindulassal(20u * 60 * 1000, false, [] { return deviceMode == (DeviceMode)1; });
+  CHECK(evCount(EVC_AP_MODE, 2) == 1 && apFromProbe && relayPulses() == 0, "rossz jelszo: AP MODE 2, reset nelkul, ujraindulo AP");
+}
+
+static void scCP5() {
+  // Aramszunet vagy gombos ujrainditas utan nincs probajelzo (csak a mentes allitja).
+  coldBoot(false, "TestNet", "pw", "", "");
+  rtcConfigProbe = 0x42415A43UL;
+  coldBoot(false, "TestNet", "pw", "", "");
+  setup();
+  CHECK(!configProbe && uiFlags.firstStart, "bekapcsolaskor a jelzo ervenytelen, normal indulas");
+}
+
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
   { "W2: sikeres csatlakozás -> monitor mód, DHCP (nincs statikus IP)", sc1 },
@@ -8232,6 +8311,11 @@ static const Scenario kScenarios[] = {
   { "OA6: hidegindulas halott routerrel: a turelmi ido utan AP", scOA6 },
   { "OA7: ha a sajat halozat nem indul el, a lepcso fut tovabb", scOA7 },
   { "ST7: allapotoldal: Wi-Fi kieses kozben a sajat halozatrol; Internet sor DNS-reset utan", scST7 },
+  { "CP1: mentes utan nem erheto el a halozat: AP mod, reset nelkul", scCP1 },
+  { "CP2: mentes utan csatlakozik: a megszokott szabalyok", scCP2 },
+  { "CP3: a mentes utani AP lejartakor ujraindul, nem alszik", scCP3 },
+  { "CP4: mentes utan rossz jelszo: AP 2, nem alszik", scCP4 },
+  { "CP5: aramszunet utan nincs probajelzo", scCP5 },
   { "QH1: a csendes idoszak hatarai (22:00-05:00, CET es CEST)", scQH1 },
   { "QH2: ejjel a router sem valaszol: reset 10 perc utan", scQH2 },
   { "QH3: 8 perces router-kieses: ejjel nincs reset, nappal van", scQH3 },

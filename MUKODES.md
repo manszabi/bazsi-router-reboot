@@ -50,6 +50,25 @@ A 3 próba után a **hiba oka** dönt:
 | `WL_CONNECT_FAILED` | hitelesítési hiba → rossz jelszó | **Azonnal AP mód** |
 | bármi más | a hálózat nem látszik | a **Wi-Fi-lépcső** (5. fejezet) – hidegindulásnál az ESP-újraindítás kimarad, az első lépés a router reset |
 
+### A mentés utáni első indulás
+
+A beállító oldalon mentett adatokkal az első csatlakozás **próba**: ha nem
+sikerül, a hiba szinte biztosan a beírt adatban van (elírt hálózatnév, 5 GHz-es
+hálózat, rossz jelszó), nem a routerben. Ezért:
+
+| Lépés | Viselkedés |
+|---|---|
+| Mentés | az újraindulás előtt egy jelző kerül az RTC memóriába (`rtcConfigProbe`, ellenőrző értékkel); csak ez az út állítja |
+| Indulás | a jelzőt **azonnal felhasználja** (törli), és ehhez az induláshoz megjegyzi; a 10 perces türelmi idő kimarad, mert a mentés a routert nem kapcsolta le |
+| Sikerül csatlakozni | a próba lezárul, innen **minden a megszokott szabályok szerint** megy (`CP2`) |
+| A hálózat nem látszik | 20 mp + 3 próba után **vissza AP módba**, router reset nélkül (`AP MODE` 5; mérve 2,0 perc, `CP1`) |
+| Rossz jelszó | ugyanígy AP mód (`AP MODE` 2), reset nélkül (`CP4`) |
+| Az így indult AP módban senki nem ment | lejártakor **nem alszik el**, hanem újraindul, és a mentett adatokkal a megszokott szabály szerint figyel (10 perc türelem, majd a lépcső) – így egy félbehagyott beállítás sem hagyja felügyelet nélkül a routert (`CP3`) |
+
+Áramszünet, gombos újraindítás vagy bármely más újraindulás után nincs jelző
+(`CP5`). Mivel a jelzőt az indulás azonnal törli, egy próba közbeni lefagyás
+után is a megszokott szabályok élnek.
+
 Az ESP32 core megkülönbözteti a kettőt (`STA.cpp`): `WIFI_REASON_NO_AP_FOUND` →
 `WL_NO_SSID_AVAIL`, `WIFI_REASON_AUTH_FAIL` → `WL_CONNECT_FAILED`. Konzervatívan
 döntünk: **csak** az explicit hitelesítési hiba küld AP módba, mert a téves
@@ -787,7 +806,7 @@ el, akkor minősül beragadásnak:
 | Kiváltó ok | Hossz | Magától ébred? |
 |---|---|:---:|
 | Beragadt gomb induláskor | 60 mp | **igen** |
-| AP mód tétlenség | örökre | **nem** – csak gomb |
+| AP mód tétlenség (kivéve a mentés utáni sikertelen első indulás AP-ját: az újraindul, nem alszik – 2. fejezet) | örökre | **nem** – csak gomb |
 | Végzetes hiba (LittleFS / konfig / watchdog) | örökre | **nem** – csak gomb |
 
 Minden alvás előtt a **relé `LOW`**, tehát a router kap áramot.
@@ -1121,7 +1140,7 @@ Minden bejegyzés uptime bélyeget, egy eseménykódot és egy paramétert tarta
 | `HTTP ERROR` | a tartalék HTTP teszt kódja, közvetlenül a `TEST FAIL` után: 200/204/403/5xx változatlan (200 = jött válasz, de nem a várt szöveg); kliens hibánál 1000 + \|kód\|: **1001** = nem sikerült kapcsolódni vagy a nevet feloldani, **1011** = nem jött válasz időben, **1100** = a kérés el sem indult |
 | `NET DIAG` | a router reset oka, közvetlenül a reset előtt: 1 = a router sem válaszol (vagy nincs Wi-Fi / gateway), 2 = a router válaszol, az internet nem, 3 = az internet él, de a router DNS-e 10 perce hallgat |
 | `ROUTER RESET` | hányadik reset ebben a kiesésben |
-| `AP MODE` | 1 = nincs mentett SSID, 2 = hitelesítési hiba, 3 = 48 órája nincs Wi-Fi, 4 = a gateway sem érhető el |
+| `AP MODE` | 1 = nincs mentett SSID, 2 = hitelesítési hiba, 3 = 48 órája nincs Wi-Fi, 4 = a gateway sem érhető el, 5 = a mentés utáni első indulásnál a mentett hálózat nem érhető el |
 | `GW UNREACH` | 1 = a router reset előtt, 2 = a reset után is |
 | `CONFIG SAVED` | 0 |
 | `SLEEP` | 3 = AP időtúllépés, 4 = végzetes hiba |
@@ -1489,7 +1508,7 @@ bazsi-router-reboot/
 ├── webportal.h/.cpp          # az AP beállító portál és a normál üzemű állapotoldal
 │
 ├── partitions_custom.csv     # Egyedi partíciós tábla: OTA nélkül, 512 KiB LittleFS
-├── test/                     # host tesztkészlet (396 forgatókönyv)
+├── test/                     # host tesztkészlet (401 forgatókönyv)
 │
 ├── README.md                 # belépő: mi ez, és hol mi van
 ├── ATTEKINTES.md             # egyoldalas összefoglaló
@@ -2163,4 +2182,4 @@ A **valós idő** (`gettimeofday()`) szintén túléli a deep sleepet – az RTC
 
 *Az ábrák a `bazsi_router_reboot.ino` aktuális állapotát dokumentálják.
 Módosításkor a kóddal együtt frissítendők – a viselkedést a `test/` alatti
-396 forgatókönyves (2342 ellenőrzéses) tesztkészlet rögzíti.*
+401 forgatókönyves (2375 ellenőrzéses) tesztkészlet rögzíti.*
