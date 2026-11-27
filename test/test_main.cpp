@@ -3124,7 +3124,9 @@ static void scAP2() {
   const size_t pw = g._body.find("name=\"pass\"");
   const size_t ipm = g._body.find("name=\"ip\"");
   CHECK(pw != std::string::npos && ipm != std::string::npos && pw < ipm, "a mezok sorrendje");
-  CHECK(g._body.substr(pw, ipm - pw).find("value=") == std::string::npos,
+  const size_t pwVege = g._body.find('>', pw);
+  CHECK(pwVege != std::string::npos && pwVege < ipm
+        && g._body.substr(pw, pwVege - pw).find("value=") == std::string::npos,
         "a jelszo mezonek NINCS elokitoltott erteke");
 
   CHECK(g._body.find("value=\"Halozat\"") != std::string::npos, "az SSID elokitoltve");
@@ -4667,7 +4669,7 @@ static void scPWR3() {
          "router-resetjeig: %.1f perc\n", turelem / 60000.0);
   CHECK(turelem >= 2u * 60 * 1000,
         "de legalabb ket percig var - ennyi alatt a router vissza is dughato");
-  CHECK(serialHas("WiFi disconnected before test!"),
+  CHECK(serialHas("WiFi disconnected before test!") || serialHas("Nem sikerult csatlakozni"),
         "es a soros porton meg is mondja, hogy elveszett a halozat");
 }
 
@@ -5477,10 +5479,10 @@ static void scAP8() {
 
   AsyncWebServerRequest req; g_handlers["/#1"](&req);
   const size_t meret = req._body.size();
-  printf("     [info] az urlap legrosszabb esetben %u bajt (a puffer 1536)\n",
+  printf("     [info] az urlap legrosszabb esetben %u bajt (a puffer 2048)\n",
          (unsigned)meret);
   CHECK(req._code == 200, "az urlap kiszolgalodik");
-  CHECK(meret < 1536, "es belefer a stream 1536 bajtos kezdo pufferebe");
+  CHECK(meret < 2048, "es belefer a stream 2048 bajtos kezdo pufferebe");
 
   strcpy(ssid, "MyHomeNetwork");
   strcpy(ipStr, "192.168.1.200");

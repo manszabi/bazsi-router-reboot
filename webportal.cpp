@@ -150,7 +150,7 @@ static void printHtmlEscaped(AsyncResponseStream* r, const char* s) {
 
 // A jelszót soha nem töltjük elő.
 static void sendConfigForm(AsyncWebServerRequest* request) {
-  AsyncResponseStream* r = request->beginResponseStream("text/html", 1536);
+  AsyncResponseStream* r = request->beginResponseStream("text/html", 2048);
   r->print(FORM_HEAD);
 
   r->print(F("SSID <input name=\"ssid\" maxlength=\"32\" required value=\""));
