@@ -75,8 +75,6 @@ extern int g_randomCalls;
 extern uint32_t g_randomState;
 extern uint64_t g_efuseMac;
 bool gatewayPingOk();
-void wifiLadderPersist();
-static void wifiLadderPersistT() { wifiLadderPersist(); }
 void ensureFallbackDns();
 int lastHttpCode();
 uint16_t httpCodeLogParam(int code);
@@ -7322,13 +7320,21 @@ static void scWFL7() {
 }
 
 static void scWFL8() {
-  // Heap-ujraindulas a lepcso kozben: a fok es a kieses hossza atjon.
+  // Valodi heap-ujraindulas a lepcso kozben: a fok es a kieses hossza percre pontosan atjon.
   wflIndit();
   futtatUjraindulassal(20u * 60 * 1000, false, [] { return rtcWifiStep == 2 && serialHas("perc mulva"); });
   futtat(20u * 60 * 1000, [] { return false; });
-  wifiLadderPersistT();
-  const uint32_t perc = rtcWifiOutageMin; const uint8_t fok = rtcWifiStep;
-  CHECK(perc >= 25, "a mentett kieses hossza percben");
+  futtat(20u * 60 * 1000, [] { return currentState == (State)1; });
+  const uint8_t fok = rtcWifiStep;
+  g_freeHeap = 5000; g_maxAllocHeap = 4000;
+  bool restarted = false; int guard = 0;
+  try { while (!restarted && ++guard < 200000) { checkHeap(g_millis); g_millis += 1000; } }
+  catch (RestartSignal&) { restarted = true; }
+  CHECK(restarted, "a heap miatt ujraindult");
+  const uint32_t perc = rtcWifiOutageMin;
+  printf("     [info] mentett kieses: %u perc, fok %u\n", (unsigned)perc, (unsigned)fok);
+  CHECK(perc >= 25, "a heap-ujraindulas elott a kieses hossza percre pontosan mentodott");
+  g_freeHeap = 180000; g_maxAllocHeap = 110000;
   softReboot(false);
   CHECK(fok >= 2 && rtcWifiStep == fok && rtcWifiOutageMin == perc, "a fok es a kieses hossza atjott");
   CHECK(serialHas("Wi-Fi lepcso folytatodik"), "a soros porton is latszik");
