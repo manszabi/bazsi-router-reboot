@@ -16,6 +16,10 @@ extern const char passPath[];
 extern const char ipPath[];
 extern const char gatewayPath[];
 
+// Opcionális kapcsoló ("1"/"0"): Wi-Fi-kiesés alatt saját hálózat az állapotoldallal; hiányzó fájl = ki.
+extern const char outageApPath[];
+extern bool outageApEnabled;
+
 // A hiányzó fájl nem hiba (első indulás, wifireset után).
 enum ConfigStatus : uint8_t {
   CONFIG_OK = 0,

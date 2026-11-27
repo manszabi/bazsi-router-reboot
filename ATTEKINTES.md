@@ -67,6 +67,9 @@ routernél. Ha a router DNS-e 10 percig hallgat, miközben egy külső DNS
 
 - Normál üzemben: `http://<az eszköz IP-je>/` – csak olvasható állapotoldal
   (lépcsők, resetek, utolsó 20 esemény), csak a helyi hálózatról.
+- Wi-Fi-kiesés alatt: ha a beállító oldalon bekapcsolod („Wi-Fi-kiesés alatt
+  saját hálózat”, alapból ki), az ESP saját hálózatot indít, és ugyanez az oldal
+  a `192.168.4.1` címen érhető el.
 - Soros porton: `LOG` (vagy `/log`) – a teljes eseménynapló.
 - Beállító módban: a `192.168.4.1/log` oldal.
 - A legfontosabb bejegyzések: `TEST FAIL` + `HTTP ERROR` (a kiesés kezdete),

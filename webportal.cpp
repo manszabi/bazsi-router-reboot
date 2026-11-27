@@ -29,6 +29,8 @@ static_assert(SECRET_ENC_MAX >= SECRET_PREFIX_LEN + 2 * (sizeof(ConfigDraft::pas
               "a parseConfigPost() 'nem fert a pufferbe' aga elerhetove valna");
   char ip[IPSTR_MAX_LEN + 1]       = { 0 };
   char gateway[IPSTR_MAX_LEN + 1]  = { 0 };
+  bool outageAp     = false;
+  bool outageApSet  = false;
   bool ssidProvided = false;
   bool passSet      = false;
   bool ipSet        = false;
@@ -51,6 +53,7 @@ const char PARAM_SSID[]    = "ssid";
 const char PARAM_PASS[]    = "pass";
 const char PARAM_IP[]      = "ip";
 const char PARAM_GATEWAY[] = "gateway";
+const char PARAM_OUTAGE_AP[] = "outageap";
 
 #define KEEPALIVE_JS_LIT \
   "<script>f=()=>fetch('/ping?'+Date.now());setInterval(f,6e4);" \
@@ -107,7 +110,7 @@ void announceApPassword() {
   }
 }
 
-// Betölti, vagy generál és ment egyet; csak WiFi.mode(WIFI_AP) után (az esp_random() így valódi véletlen).
+// Betölti, vagy generál és ment egyet; csak bekapcsolt AP-mód után (az esp_random() így valódi véletlen).
 static void ensureApPassword() {
   if (loadApPassword()) {
     return;
@@ -162,6 +165,14 @@ static void sendConfigForm(AsyncWebServerRequest* request) {
   r->print(F("Gateway <input name=\"gateway\" maxlength=\"15\" placeholder=\"opcionalis\" value=\""));
   printHtmlEscaped(r, gatewayStr);
   r->print(F("\"><br>"));
+
+  // A rejtett 0 akkor is elmegy, ha a jelolonegyzet ures; bejelolve az utana kuldott 1 gyoz.
+  r->print(F("<label><input type=\"hidden\" name=\"outageap\" value=\"0\">"
+             "<input type=\"checkbox\" name=\"outageap\" value=\"1\""));
+  if (outageApEnabled) {
+    r->print(F(" checked"));
+  }
+  r->print(F("> Wi-Fi-kieses alatt sajat halozat az allapotoldallal (192.168.4.1)</label><br>"));
 
   r->print(FORM_TAIL);
   request->send(r);
@@ -230,6 +241,14 @@ static bool parseConfigPost(AsyncWebServerRequest* request, ConfigDraft& d,
         Serial.println("Invalid IP format!");
         saveOk = false;
         if (failReason == nullptr) failReason = "Ervenytelen IP cim (csak IPv4, nem 0.0.0.0).";
+      }
+    } else if (name == PARAM_OUTAGE_AP) {
+      if (val == "0" || val == "1") {
+        d.outageApSet = true;
+        d.outageAp = (val == "1");
+      } else {
+        saveOk = false;
+        if (failReason == nullptr) failReason = "Ervenytelen kapcsolo-ertek (0 vagy 1).";
       }
     } else if (name == PARAM_GATEWAY) {
       strlcpy(candidate, val.c_str(), sizeof(candidate));
@@ -323,6 +342,12 @@ static bool commitConfigDraft(const ConfigDraft& d) {
       Serial.println(gatewayStr);
     }
     saveOk &= writeConfigValue(LittleFS, gatewayPath, gatewayStr);
+  }
+  if (d.outageApSet) {
+    outageApEnabled = d.outageAp;
+    Serial.print("Kieses alatti AP: ");
+    Serial.println(outageApEnabled ? "be" : "ki");
+    saveOk &= writeConfigValue(LittleFS, outageApPath, outageApEnabled ? "1" : "0");
   }
   return saveOk;
 }
@@ -537,12 +562,19 @@ static void sendDiagnosticLog(AsyncWebServerRequest* request) {
   request->send(r);
 }
 
-// Csak a saját alhálózatról érkező kérést szolgáljuk ki (a router mögül), máshonnan 403.
+static bool outageAp = false;
+
+// Csak a saját alhálózatról (a router mögül) vagy a kiesés alatti saját hálózatunkról szolgálunk ki, máshonnan 403.
 static bool fromLocalNet(AsyncWebServerRequest* request) {
+  const uint32_t tav = (uint32_t)request->client()->remoteIP();
   const uint32_t sajat = (uint32_t)WiFi.localIP();
   const uint32_t maszk = (uint32_t)WiFi.subnetMask();
-  const uint32_t tav = (uint32_t)request->client()->remoteIP();
-  return sajat != 0 && maszk != 0 && (tav & maszk) == (sajat & maszk);
+  if (sajat != 0 && maszk != 0 && (tav & maszk) == (sajat & maszk)) {
+    return true;
+  }
+  const uint32_t apCim = (uint32_t)WiFi.softAPIP();
+  const uint32_t apMaszk = (uint32_t)WiFi.softAPSubnetMask();
+  return outageAp && apCim != 0 && apMaszk != 0 && (tav & apMaszk) == (apCim & apMaszk);
 }
 
 static void printYesNoMin(AsyncResponseStream* r, const char* mi, bool aktiv,
@@ -635,14 +667,53 @@ void stopStatusPage() {
   statusRunning = false;
 }
 
+static void makeApName(char* out, size_t outSize) {
+  const uint64_t mac = ESP.getEfuseMac();
+  snprintf(out, outSize, "ESP-%s-%02X%02X", ESP.getChipModel(),
+           (unsigned)((mac >> 32) & 0xFF), (unsigned)((mac >> 40) & 0xFF));
+}
+
+bool outageApActive() {
+  return outageAp;
+}
+
+// A router keresése mellett (AP+STA) saját hálózat; csak az állapotoldal érhető el rajta.
+void startOutageAp() {
+  if (outageAp) {
+    return;
+  }
+  char apName[32];
+  makeApName(apName, sizeof(apName));
+  WiFi.mode(WIFI_AP_STA);
+  ensureApPassword();
+  if (!WiFi.softAP(apName, apPass)) {
+    Serial.println("A kieses alatti AP nem indult el.");
+    WiFi.mode(WIFI_STA);
+    return;
+  }
+  outageAp = true;
+  Serial.print("Kieses alatti AP: ");
+  Serial.print(apName);
+  Serial.print(", allapotoldal: http://");
+  Serial.println(WiFi.softAPIP());
+}
+
+void stopOutageAp() {
+  if (!outageAp) {
+    return;
+  }
+  WiFi.softAPdisconnect(true);
+  outageAp = false;
+  Serial.println("A Wi-Fi visszajott - a kieses alatti AP leallt.");
+}
+
 // A LittleFS-ről semmit nem szolgálunk ki (a /pass.txt-t is kiadná).
 void startWebPortal() {
   Serial.println("Setting AP (Access Point)");
 
   char apName[32];
-  const uint64_t mac = ESP.getEfuseMac();
-  snprintf(apName, sizeof(apName), "ESP-%s-%02X%02X", ESP.getChipModel(),
-           (unsigned)((mac >> 32) & 0xFF), (unsigned)((mac >> 40) & 0xFF));
+  makeApName(apName, sizeof(apName));
+  outageAp = false;
   WiFi.mode(WIFI_AP);
   ensureApPassword();
   WiFi.softAP(apName, apPass);

@@ -291,6 +291,13 @@ a státusz LED marad **be**). Utána:
   után pedig nem jött vissza a Wi-Fi), az ESP ugyanúgy újraindul, de a lépcső
   onnan folytatódik: a következő reset az előző után 30 perccel (majd 1 / 2 /
   4 óra) jön, nem rögtön az újraindulás után (`WFL11`, `WFL12`; korábban ~15 perc volt).
+- **Kiesés alatti saját hálózat** (ha a beállító oldalon be van kapcsolva):
+  az ESP-újraindítás után (hidegindulásnál a türelmi idő után) az ESP AP+STA
+  módba vált, és a router keresése mellett a saját hálózatát
+  (`ESP-ESP32-C3-XXXX`, az eszközönkénti AP jelszóval) is fenntartja; rajta a
+  csak olvasható állapotoldal a `192.168.4.1` címen érhető el. A Wi-Fi
+  visszatérésekor leáll. A lépcsőn nem változtat (mérve: az AP 3,3 perccel a
+  kiesés után jön fel, a router reset ugyanúgy 5,3 percnél; `OA4`).
 - **Nullázás**: ha a Wi-Fi **30 percig** folyamatosan megvan (`WIFI_STABLE_MS`).
   Így egy instabil routernél a második kiesés már router resetet kap, nem újabb
   ESP-újraindítást (`WFL5`).
@@ -338,7 +345,8 @@ hálózat mindkét esetben ugyanúgy eltűnik.
 |---|---|
 | Portál elérhető: `192.168.4.1` | |
 | Jelzés: **Wi-Fi LED villog 1 Hz**, státusz LED végig **be** | azonnal |
-| Az űrlap előkitöltése | SSID, IP, gateway a mentett értékkel (HTML-escape-elve); **a jelszó soha** |
+| Az űrlap előkitöltése | SSID, IP, gateway a mentett értékkel (HTML-escape-elve), a kiesés-AP kapcsoló a mentett állással; **a jelszó soha** |
+| Kiesés-AP kapcsoló | jelölőnégyzet: „Wi-Fi-kiesés alatt saját hálózat az állapotoldallal”, **alapból ki**; `/outageap.txt` (`"1"`/`"0"`), a wifireset gomb nem törli; csak `0` vagy `1` fogadható el (`OA1`) |
 | A beállító űrlap forrása | a programba fordítva (`FORM_HEAD` / `FORM_TAIL` + `sendConfigForm()`), nincs feltöltendő `data/` mappa – a portál a LittleFS-ről semmit nem szolgál ki |
 | Tétlenség után deep sleep | **5 perc** (`AP_TIMEOUT_MS`) az utolsó kéréstől |
 | A nyitva lévő lap keep-alive-ja | **60 mp**-enként `GET /ping` (1 bájt válasz) |
@@ -523,7 +531,7 @@ teljes egészében felügyelet alatt van:
 | `pinMode`-ok, relé hold feloldása, `Serial.begin()` + max. 3 mp várakozás | nem | ide még nem megy ki soros üzenet, tehát az `initWatchdog()` hibajelzése is elveszne |
 | gombellenőrzés, `checkWatchdogResets()` | **igen** | 3 mp türelem az elengedésre, aztán 3 mp villogás és deep sleep |
 | LittleFS csatolás / **formázás** | **igen** | lásd lent |
-| konfiguráció beolvasása | **igen** | négy rövid fájl |
+| konfiguráció beolvasása | **igen** | öt rövid fájl |
 | `WiFi.persistent()`, `initWiFi()`, AP portál indítása | **igen** | a Wi-Fi init a legvalószínűbb lefagyási pont; a 20 mp-es várakozás magától etet |
 | `loop()` | **igen** | a core minden `loop()` körben etet (`loopTaskWDTEnabled`) |
 
@@ -1218,8 +1226,17 @@ portot.
 | az utolsó **20** esemény | az RTC napló (fájlt nem olvas) |
 
 **Biztonság:** csak a saját alhálózatról érkező kérést szolgálja ki (a kliens
-címe a `WiFi.localIP()` / `WiFi.subnetMask()` hálózatába esik), máshonnan –
-például egy továbbított portról – `403`. Nincs űrlap, nincs POST, nincs
+címe a `WiFi.localIP()` / `WiFi.subnetMask()` hálózatába esik, vagy – amíg a
+kiesés alatti saját hálózat fut – a `WiFi.softAPIP()` / `softAPSubnetMask()`
+hálózatába), máshonnan – például egy továbbított portról – `403`.
+
+**Wi-Fi-kiesés alatt** az oldal alapból nem érhető el, mert az eszköznek nincs
+címe a router hálózatán. Ha a beállító oldalon a kiesés-AP kapcsoló be van
+kapcsolva, az ESP a kiesés idejére saját hálózatot indít (5. fejezet), és az
+oldal ott, a `192.168.4.1` címen látszik (`OA4`). Ára: az ESP32-C3 egyetlen
+rádióján a saját hálózat a router csatornáját követi, ezért amíg az ESP a
+routert keresi, a telefon pillanatokra leválhat; ezt csak valódi eszközön lehet
+lemérni. Nincs űrlap, nincs POST, nincs
 fájl-kiszolgálás, és sem az SSID, sem a jelszó nem szerepel rajta (`ST1`–`ST5`).
 A teljes napló és a beállítások továbbra is csak AP módban érhetők el. Aki a
 helyi hálózaton van, látja az eszköz állapotát – ez a tudatos ár.
@@ -1465,13 +1482,13 @@ bazsi-router-reboot/
 ├── strutil.h/.cpp            # tiszta szöveg-segédek
 ├── secret.h/.cpp             # a mentett jelszó összekeverése
 ├── sync.h/.cpp               # a két task közti osztott állapot
-├── configstore.h/.cpp        # a négy mentett érték + LittleFS
+├── configstore.h/.cpp        # a mentett beállítások + LittleFS
 ├── eventlog.h/.cpp           # diagnosztikai napló + valós idő (NTP)
 ├── netprobe.h/.cpp           # HTTP végpont-tesztek, ICMP ping, DNS-kérdés
 ├── webportal.h/.cpp          # az AP beállító portál és a normál üzemű állapotoldal
 │
 ├── partitions_custom.csv     # Egyedi partíciós tábla: OTA nélkül, 512 KiB LittleFS
-├── test/                     # host tesztkészlet (387 forgatókönyv)
+├── test/                     # host tesztkészlet (394 forgatókönyv)
 │
 ├── README.md                 # belépő: mi ez, és hol mi van
 ├── ATTEKINTES.md             # egyoldalas összefoglaló
@@ -1482,8 +1499,8 @@ bazsi-router-reboot/
 A Wi-Fi beállító weboldal a programba van fordítva (`FORM_HEAD` / `FORM_TAIL`
 konstansok + a `sendConfigForm()` generálja a mezőket), a flash `.rodata`
 szekciójában – nincs külön feltöltendő `data/` mappa. A LittleFS-re így csak a
-négy konfigurációs fájl, az AP jelszó és a mentett napló kerül (`/ssid.txt`,
-`/pass.txt`, `/ip.txt`, `/gateway.txt`, `/appass.txt`, `/evlog.bin` – ez
+négy konfigurációs fájl, a kiesés-AP kapcsoló, az AP jelszó és a mentett napló kerül (`/ssid.txt`,
+`/pass.txt`, `/ip.txt`, `/gateway.txt`, `/outageap.txt`, `/appass.txt`, `/evlog.bin` – ez
 utóbbi ~1,5 KB, 128 bejegyzés).
 
 ### A modulok
@@ -1497,10 +1514,10 @@ Fentről lefelé: minden modul csak a nála lentebb állóktól függ. A `config
 | **`strutil`** | 24 | `trimInPlace()` | 1 függvény |
 | **`secret`** | 86 | a jelszó elfedése a flashben | `encodeSecret()`, `decodeSecretInPlace()` |
 | **`sync`** | 88 | a két task közti osztott állapot | 7 függvény + `evLogMux`, `apDeadline` |
-| **`configstore`** | 230 | a négy mentett érték, a fájljaik, a LittleFS | a négy puffer, `readConfigValue()`, `readSecretValue()`, `writeConfigValue()`, `clearConfigValue()`, `staticPairValid()`, `initLittleFS()`, `filesystemReady()` |
+| **`configstore`** | 236 | a négy mentett érték és a kiesés-AP kapcsoló, a fájljaik, a LittleFS | a négy puffer, `outageApEnabled`, `readConfigValue()`, `readSecretValue()`, `writeConfigValue()`, `clearConfigValue()`, `staticPairValid()`, `initLittleFS()`, `filesystemReady()` |
 | **`eventlog`** | 517 | a diagnosztikai napló **és** a valós idő (NTP) | `logEvent()`, `saveEventLog()`, `loadEventLogHeader()`, `loadEventLogRange()`, `printEventLogs()`, `eventName()`, `formatEpoch()`, `ensureNtp()`, `applyTimezone()`, `localHour()` |
 | **`netprobe`** | 331 | HTTP végpont-tesztek, ICMP ping, DNS-kérdés | `testInternetHTTP()`, `lastHttpCode()`, `httpCodeLogParam()`, `testInternetPing()`, `buildDnsQuery()`, `dnsResponseOk()`, `testDnsServer()` |
-| **`webportal`** | 702 | az AP beállító portál, az eszközönkénti AP jelszó és a normál üzemű állapotoldal | `startWebPortal()`, `stopWebPortal()`, `startStatusPage()`, `stopStatusPage()`, `touchApDeadline()`, `announceApPassword()` |
+| **`webportal`** | 783 | az AP beállító portál, az eszközönkénti AP jelszó, a normál üzemű állapotoldal és a kiesés alatti saját hálózat | `startWebPortal()`, `stopWebPortal()`, `startStatusPage()`, `stopStatusPage()`, `startOutageAp()`, `stopOutageAp()`, `outageApActive()`, `touchApDeadline()`, `announceApPassword()` |
 | **`app_hooks.h`** | 30 | amit a főmodul ad a moduloknak | `feedWatchdog()`, `resetbutton()`, `wifiresetbutton()`, `waitWithButtons()`, `printUptime()`, `diagCounters()` |
 
 > A `webportal` kapta a legszorosabb határt, mert ez a program
@@ -1727,6 +1744,10 @@ forrásában lettek ellenőrizve (a stubokat a `make stubcheck` is igazolja):
   fájlrendszerről semmit nem szolgál ki, a `/` és a `/log` tartalma is a
   programból megy ki. A normál üzemű állapotoldal csak olvasható, és csak a
   helyi alhálózatról érhető el (15. fejezet).
+- **A kiesés alatti saját hálózat alapból ki van kapcsolva.** Bekapcsolva csak
+  Wi-Fi-kiesés idejére jelenik meg, ugyanazzal az eszközönkénti jelszóval, mint
+  a beállító mód, és rajta csak a csak olvasható állapotoldal érhető el – a
+  beállító űrlap és a teljes napló nem.
 - A jelszó soha nem kerül ki nyílt szövegként a soros portra, csak a hossza.
 - **A mentett jelszó semmilyen weboldalon nem érhető el**: sem az űrlap
   előkitöltésében (`AP2`), sem a naplóoldalon (`LOG2`), sem a hibaüzenetekben –
@@ -2141,4 +2162,4 @@ A **valós idő** (`gettimeofday()`) szintén túléli a deep sleepet – az RTC
 
 *Az ábrák a `bazsi_router_reboot.ino` aktuális állapotát dokumentálják.
 Módosításkor a kóddal együtt frissítendők – a viselkedést a `test/` alatti
-387 forgatókönyves (2287 ellenőrzéses) tesztkészlet rögzíti.*
+394 forgatókönyves (2330 ellenőrzéses) tesztkészlet rögzíti.*

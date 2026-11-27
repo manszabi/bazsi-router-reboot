@@ -16,6 +16,13 @@ void startStatusPage();
 
 void stopStatusPage();
 
+// Wi-Fi-kiesés alatt (ha a kapcsoló be van kapcsolva) saját hálózat az állapotoldallal; mindkettő idempotens.
+void startOutageAp();
+
+void stopOutageAp();
+
+bool outageApActive();
+
 // Az eszközönkénti AP jelszó kiírása a soros portra (ha már van).
 void announceApPassword();
 

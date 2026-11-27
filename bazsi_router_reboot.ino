@@ -735,7 +735,7 @@ bool initWiFi() {
     return true;
   }
 
-  WiFi.mode(WIFI_STA);
+  WiFi.mode(outageApActive() ? WIFI_AP_STA : WIFI_STA);
 
   WiFi.setSleep(false);
 
@@ -1003,6 +1003,10 @@ void wifiFailed(bool coldStart) {
       ESP.restart();
       return;
     }
+  }
+  // Az újraindítás előtt értelmetlen volna: utána a setup() indítja, ha kimarad, itt.
+  if (outageApEnabled) {
+    startOutageAp();
   }
   const uint32_t varni = ladderWaitMs(testState, now, wifiFirstWindowMs());
   if (varni > 0) {
@@ -1357,6 +1361,12 @@ void setup() {
     }
     if (readConfigValue(LittleFS, ipPath, ipStr, sizeof(ipStr)) == CONFIG_ERROR) st = CONFIG_ERROR;
     if (readConfigValue(LittleFS, gatewayPath, gatewayStr, sizeof(gatewayStr)) == CONFIG_ERROR) st = CONFIG_ERROR;
+    {
+      char kapcsolo[4];
+      const ConfigStatus os = readConfigValue(LittleFS, outageApPath, kapcsolo, sizeof(kapcsolo));
+      if (os == CONFIG_ERROR) st = CONFIG_ERROR;
+      outageApEnabled = (os == CONFIG_OK && strcmp(kapcsolo, "1") == 0);
+    }
 
     if (st == CONFIG_ERROR && deviceMode != MODE_FATAL) {
       logEvent(EV_FATAL, 2);
@@ -1390,6 +1400,9 @@ void setup() {
                                         : "Nem sikerult csatlakozni - ujraprobalkozas, utana router reset.");
       deviceMode = MODE_MONITOR;
       digitalWrite(wifiledPin, LOW);
+      if (rtcWifiRestarted != 0 && outageApEnabled) {
+        startOutageAp();
+      }
     }
   }
   if (deviceMode == MODE_MONITOR) {
@@ -1599,6 +1612,7 @@ void runCheckState() {
   }
 
   digitalWrite(wifiledPin, HIGH);
+  stopOutageAp();
   wifiConnectedTick();
   printUptime();
   Serial.println("Internet ellenorzes.");
