@@ -123,10 +123,13 @@ forgatókönyv védelmét gyengítené.
 A DNS-ág 11 mutánsa (kitartás, kontrollkérdés, nullázás, saját lépcső, nem
 router DNS, gyorsítás gyanúnál, NXDOMAIN, azonosító, forrás, válaszbit, próbák
 száma) mind legalább egy tesztet buktat; kettőt csak a `DN1` és a `DN9`
-megerősítése után.
+megerősítése után. A Wi-Fi-lépcső 12 mutánsa (ESP-újraindítás elsőként, a
+türelmi idő kihagyása, a stabil ablak, a lépcső, a 48 órás határ, a törlési és
+mentési utak, a magic-ellenőrzés) is mind elbukik; négyet csak a `WFL8`–`WFL10`
+és a `GWH5` megerősítése után.
 
 Mutációval igazolva: a `startRouterReset()` pulzus-ciklusából kivett
-`feedWatchdog()` **MUTWDT** forgatókönyvet buktat meg.
+`feedWatchdog()` **57** forgatókönyvet buktat meg.
 Az `initWiFi()` 20 s-es várakozásából kivéve *nem* bukik – és ez helyes:
 20 s < 90 s, az nem watchdog-reset.
 
@@ -199,7 +202,7 @@ helyes eszköz – egy rossz globális küszöb csak zajt adna.
 | `FS1`–`FS10` | LittleFS hibák: csatolás, írásvédettség, megtelt tár, **néma írási hiba**, csonka olvasás, törlés tartalék útvonala |
 | `FT1`–`FT8` | Végzetes hiba: betölthetetlen konfig vs. „nincs még konfig", LED-villogás, gombok |
 | `WF1`–`WF6` | Csatlakozási hiba: hidegindulásnál 10 perc türelem + 3 próba, majd router reset (12 perc); működés közben 3 próba, majd ESP-újraindítás |
-| `WFL1`–`WFL8` | **A Wi-Fi-lépcső**: az újraindítás után visszajövő Wi-Fi → nincs router reset, nincs 10 perces türelmi idő; ha nem jön vissza → router reset 5,3 perc után; tartós hiány → 30 perc / 1 / 2 / 4 óra lépcső, 48 óra után AP, alvás nélkül; várakozás közben percenként 1 próba, a visszajövő Wi-Fi-t azonnal észreveszi; instabil Wi-Fi → a második kiesésre router reset; rossz jelszó → AP; áramszünet törli a lépcsőt; heap-újraindulás átviszi |
+| `WFL1`–`WFL10` | **A Wi-Fi-lépcső**: az újraindítás után visszajövő Wi-Fi → nincs router reset, nincs 10 perces türelmi idő; ha nem jön vissza → router reset 5,3 perc után; tartós hiány → 30 perc / 1 / 2 / 4 óra lépcső, 48 óra után AP, alvás nélkül; várakozás közben percenként 1 próba, a visszajövő Wi-Fi-t azonnal észreveszi; instabil Wi-Fi → a második kiesésre router reset; rossz jelszó → AP; áramszünet törli a lépcsőt; a valódi heap-újraindulás percre pontosan átviszi; a kiesés nullázza a stabil kapcsolat óráját; a wifireset, a mentés utáni újraindulás és az alvás törli |
 | `WD1`–`WD13` | Ismétlődő watchdog újraindulás; a leghosszabb etetés nélküli szakasz minden üzemmódban, a **halott DNS** legrosszabb esetét is beleértve |
 | `WDT14`–`WDT15` | **Az „1 óra hibátlan működés” mihez képest mér**: a mostani indulás kezdetéhez, nem abszolút `millis()` értékhez – nagy kezdő `millis()` mellett és a **körbefordulás** átlépésekor is (mindkét mérés elbukik, ha valaki visszanézi abszolút alakra) |
 | `HP1`–`HP9` | **Heap felügyelet**: az állapotsor félóránként megy ki (nem körönként), a figyelmeztetés csak a küszöb átlépésekor; egyetlen mélypont **nem** indít újra, tartós kritikus szint igen; a router reset számláló **túléli** az újraindulást és pontosan egyszer használódik fel; AP módban, relé-impulzus és fájlírás közben nincs újraindulás; három sikertelen kör után `MODE_FATAL`, nem boot loop; és egy valódi lassú szivárgás végponttól végpontig |

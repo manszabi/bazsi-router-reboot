@@ -47,15 +47,12 @@ enum DeviceMode : uint8_t;
 extern DeviceMode deviceMode;
 extern State currentState;
 bool initWiFi(); bool reconnectWifi(); bool reset_device();
-void trimInPlace(char*);
 bool testInternetHTTP(const char* url, const char* expected);
-void initWatchdog();
 bool testInternetPing(const IPAddress& target, const char* name);
 enum ConfigStatus : uint8_t;
 ConfigStatus readConfigValue(fs::FS& fs, const char* path, char* out, size_t outSize);
 bool writeConfigValue(fs::FS& fs, const char* path, const char* msg);
 bool clearConfigValue(fs::FS& fs, const char* path);
-bool initLittleFS();
 bool fileMatches(fs::FS& fs, const char* path, const char* value, size_t len);
 bool filesystemReady();
 void setFilesystemReady(bool ready);
@@ -75,7 +72,6 @@ extern int g_randomCalls;
 extern uint32_t g_randomState;
 extern uint64_t g_efuseMac;
 bool gatewayPingOk();
-void ensureFallbackDns();
 int lastHttpCode();
 uint16_t httpCodeLogParam(int code);
 bool staticPairValid(const IPAddress& ip, const IPAddress& gateway);
@@ -7166,7 +7162,6 @@ static void scDN12() {
 }
 
 
-static const uint32_t WIFI_MAGIC_C = 0x42415A57UL;
 
 // Monitor uzem, mukodo Wi-Fi-vel; utana a Wi-Fi tartosan eltunik.
 static void wflIndit() {
