@@ -240,11 +240,11 @@ fő lépcsőt minden sikeres ping nullázza.
 2. legfeljebb **10 perc** várakozás (`RESET_DELAY`), ami korán véget ér, ha a
    hálózat és az internet visszajött;
 3. Wi-Fi újracsatlakozás, majd újra ellenőrzés. Ha a Wi-Fi nem jön vissza: a
-   Wi-Fi-hiba ága (alvás és újrapróbálkozás, lásd lent).
+   Wi-Fi-lépcső veszi át (lásd lent).
 
-Ha működés közben a **Wi-Fi** vész el és 3 próbára sem jön vissza, a reset
-azonnal jön (rossz jelszónál helyette AP mód) – kivéve, ha a kiesés már kapott
-resetet: ekkor a lépcső szerint vár.
+Ha működés közben a **Wi-Fi** vész el és 3 próbára sem jön vissza, előbb az ESP
+indul újra, és csak ha az sem segít, jön a router reset (rossz jelszónál
+helyette AP mód); utána a lépcső szerint ritkul.
 
 A stabil méréshez a Wi-Fi modem-alvás ki van kapcsolva, és DHCP mellett is van
 tartalék DNS (`1.1.1.1`, a router DNS-e után).
