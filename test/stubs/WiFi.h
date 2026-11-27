@@ -118,6 +118,7 @@ public:
   }
   String SSID() { return String("TestNet"); }
   IPAddress localIP() { return wifiSim.staticApplied ? wifiSim.cfgIp : IPAddress(192,168,1,77); }
+  IPAddress subnetMask() { return status() == WL_CONNECTED ? IPAddress(255,255,255,0) : IPAddress(); }
   int RSSI() { return -50; }
   bool config(IPAddress ip, IPAddress gw, IPAddress sn, IPAddress d1 = IPAddress(), IPAddress d2 = IPAddress()) {
     (void)sn;

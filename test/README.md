@@ -90,7 +90,7 @@ Egyetlen forgatókönyv futtatása név-előtag alapján (a bináris a `make` ut
 
 ## Lefedett esetek
 
-**368 forgatókönyv, 2178 ellenőrzés. Sorlefedettség: 99,54%.**
+**387 forgatókönyv, 2287 ellenőrzés. Sorlefedettség: 99,52%.**
 
 ### A watchdog-etetés globális invariánsa
 
@@ -123,11 +123,20 @@ forgatókönyv védelmét gyengítené.
 A DNS-ág 11 mutánsa (kitartás, kontrollkérdés, nullázás, saját lépcső, nem
 router DNS, gyorsítás gyanúnál, NXDOMAIN, azonosító, forrás, válaszbit, próbák
 száma) mind legalább egy tesztet buktat; kettőt csak a `DN1` és a `DN9`
-megerősítése után.
+megerősítése után. A Wi-Fi-lépcső 12 mutánsa (ESP-újraindítás elsőként, a
+türelmi idő kihagyása, a stabil ablak, a lépcső, a 48 órás határ, a törlési és
+mentési utak, a magic-ellenőrzés) is mind elbukik; négyet csak a `WFL8`–`WFL10`
+és a `GWH5` megerősítése után.
+
+A közös reset-lépcső és az állapotoldal 18 mutánsa (az első türelmi idő, a
+nullázás, a lépcső-átvitel három adata és egyszeri felhasználása, a Wi-Fi-ág
+kezdete és szintje, a csendes időszak mindkét ágon, a DNS-ág nullázása, az
+állapotoldal címszűrése, indítása, leállítása és számlálói) mind elbukik; kettőt
+csak az `RD15` és a `QH8` hozzáadása után, egy harmadik pedig egyenértékűnek
+bizonyult, ezért a feltételt kivettük a kódból.
 
 Mutációval igazolva: a `startRouterReset()` pulzus-ciklusából kivett
-`feedWatchdog()` **44**, a `routerResetAndRetry()`-ből kivett **11**
-forgatókönyvet buktat meg.
+`feedWatchdog()` **57** forgatókönyvet buktat meg.
 Az `initWiFi()` 20 s-es várakozásából kivéve *nem* bukik – és ez helyes:
 20 s < 90 s, az nem watchdog-reset.
 
@@ -165,8 +174,8 @@ bevárása, ahol a watchdog még nem is él) – **mindkettő indoklással a for
 #### Amit szándékosan *nem* tettem globális invariánssá
 
 A **naplóelárasztás** és a **soros kiírás rátája** nem fordítható értelmes
-globális szabállyá: a hosszú forgatókönyvek jogosan lépik túl (az `R8` 33 kör
-alatt 99 bejegyzést ír a 32 elemű gyűrűbe), és az alvás a harness-ben azonnali,
+globális szabállyá: a hosszú forgatókönyvek jogosan lépik túl (a `WFL3` két nap
+alatt több tucat bejegyzést ír a 32 elemű gyűrűbe), és az alvás a harness-ben azonnali,
 ami a percre vetített rátát torzítja. Ott a célzott `LOG*` és `SER*` tesztek a
 helyes eszköz – egy rossz globális küszöb csak zajt adna.
 
@@ -175,7 +184,7 @@ helyes eszköz – egy rossz globális küszöb csak zajt adna.
 | `W1`–`W9` | Wi-Fi: konfig portál, DHCP vs. statikus IP, DNS, timeout, újracsatlakozás, netif-elvesztés |
 | `S1`–`S6` | Deep sleep: beragadt gomb, kimenetek állapota alvás előtt, ébresztőforrások, RTC-láb megkötés, **a relé láb (`D10` = GPIO10) hold-ja alvás alatt és a feloldása ébredéskor** |
 | `RL1` | Relé: a 90 másodperces reset pulzus hossza |
-| `R6`–`R8` | **A dokumentált idők mérése**: egy újrapróbálkozási kör ébren töltött 25,5 perce, a felismerési idő router hibánál 150 mp (élő DNS) / 168 mp (halott DNS), és mind a 33 kör végigjátszása (46,0 óra türelem) |
+| `R5`, `R7` | **A dokumentált idők mérése**: a rossz jelszó csak a 2. próbától látszik; a felismerési idő router hibánál 150 mp (élő DNS) / 168 mp (halott DNS) |
 | `H1`–`H8` | HTTP teszt: CR/LF vágás, hibás státusz, captive portal, Content-Length nélküli válasz, beragadt szerver, **204-es ellenőrzés**, a tartalék HTTP teszt végpont-sorrendje |
 | `CH1`–`CH5` | **Chunked keretezés**: egy és több darab, darab-kiterjesztés, nagybetűs hexa, szabálytalan és túlcsorduló méret, 50 kB-os darabfolyam |
 | `PG1`–`PG3` | Ping: 2-a-4-ből szabály és korai kilépés; az **ESPping 1.0.5 fantom-sikere** (el sem küldött csomagra igaz) bukásnak számít |
@@ -187,10 +196,10 @@ helyes eszköz – egy rossz globális küszöb csak zajt adna.
 | `WDT1`–`WDT8` | Watchdog: konfiguráció, etetés a hosszú blokkolások alatt, `delay()` vs. CPU-pörgetés, a feliratkozás tényleges ellenőrzése |
 | `SN1`–`SN2` | Biztonsági háló: ha a gomb-ébresztés armolása hibázik, időzítő |
 | `SH1`–`SH3` | **Alvás és újraindulás**: a leállás nem csak megvárja a fájlírást, hanem **meg is szerzi a zárat** (az utolsó pillanatban érkező mentés 503-at kap, nem csonka fájlt) – a határidős kilépés mellett; az öt alvási út előfeltételei egymás mellett (időzítő csak oda, ahol a hiba magától elmúlhat; gombébresztés mindenhova a beragadt gombot kivéve); és hogy a **felébresztő gombnyomást nem nézzük beragadt gombnak** (a küszöb mérve) |
-| `PWR1`–`PWR4` | **Áramszünet és kézi router-áramtalanítás**: 3 perces router-boot alatt az ESP hozzá sem nyúl a reléhez és 3:21-kor kezd tesztelni; ha a router egyáltalán nem áll fel, az első reset 12 perckor; üzem közbeni kézi áramtalanításnál a türelmi idő **2,0 perc**, és a 90 mp-en belül visszadugott routernél nincs relé-impulzus |
+| `PWR1`–`PWR4` | **Áramszünet és kézi router-áramtalanítás**: 3 perces router-boot alatt az ESP hozzá sem nyúl a reléhez és 3:21-kor kezd tesztelni; ha a router egyáltalán nem áll fel, az első reset 12 perckor; üzem közbeni kézi áramtalanításnál a türelmi idő **4,3 perc** (közben az ESP egyszer újraindul), és a 90 mp-en belül visszadugott routernél nincs relé-impulzus |
 | `BNC1`–`BNC4` | **Gombpattogás**: a pattogó nyomás egyszer reteszel és nem hagy hátra „félig lenyomott" állapotot (különben egy későbbi magányos felfutó él spontán újraindítást okozna); a pattogó tüske nem kerüli meg a debounce-t; a folyamatosan recsegő, kopott gomb **nem** indít újra; a beragadt-gomb ellenőrzés egyetlen beolvasásból dönt |
 | `SER6`–`SER7` | **A soros port életciklusa**: 115200 baud, az első sor csak a CDC beállása után megy ki, alvás előtt `flush` majd `end` **a legvégén**, és a lezárás után egyetlen sort sem írunk – a beragadt gomb ágát is beleértve |
-| `SER8`–`SER10` | **Ellenséges soros terhelés**: a küszöb körül ingadozó heap (13 sor/perc), a mindig bukó naplómentés tartós kiesés alatt (22 sor/perc), és a 33 körös kétnapos létra – mind a 30 sor/perces költségvetés alatt |
+| `SER8`–`SER9` | **Ellenséges soros terhelés**: a küszöb körül ingadozó heap (13 sor/perc) és a mindig bukó naplómentés tartós kiesés alatt (22 sor/perc) – mindkettő a 30 sor/perces költségvetés alatt |
 | `HP10` | **A `LOW HEAP` bejegyzés spam-védelme**: a küszöb körüli ingadozás védelem nélkül 30 perc alatt **32 bejegyzést** írt (a teljes körpuffert kisöpörve), a `lastEventWas()` után **1** |
 | `AP1`–`AP4` | **AP portál űrlap**: az üres címmező törlést jelent (a DHCP-re váltás útja); az előkitöltés **soha nem tartalmazza a jelszót**; az SSID **HTML-escape-elve** kerül a lapra (XSS ellen); az előkitöltéssel a statikus IP megmarad jelszócserénél |
 | `LOG1`–`LOG3` | **Naplóoldal**: emberi olvasásra készül (szöveges reset ok, nap/óra/perc/mp uptime, `Param` jelmagyarázat, ami nem ütközik a táblázatcella-mintával); **semmilyen konfigurációs érték nem jelenik meg**; a körpuffer körbefordulása után is pontosan 32 sor |
@@ -199,11 +208,12 @@ helyes eszköz – egy rossz globális küszöb csak zajt adna.
 | `FS11`–`FS14` | **Fájlkezelés hibainjektálással**: sorvégek (CRLF) és csupa-whitespace tartalom, bináris szemét és beágyazott NUL, a puffernél hosszabb fájl (csonkolás túlcsordulás nélkül), menet közben megtelő fájlrendszer (a **zár felszabadul**, a gombok tovább működnek), és a félbeszakadt mentés rögzített viselkedése |
 | `FS1`–`FS10` | LittleFS hibák: csatolás, írásvédettség, megtelt tár, **néma írási hiba**, csonka olvasás, törlés tartalék útvonala |
 | `FT1`–`FT8` | Végzetes hiba: betölthetetlen konfig vs. „nincs még konfig", LED-villogás, gombok |
-| `WF1`–`WF6` | Csatlakozási hiba: újrapróbálkozás vs. AP portál, RTC-számláló |
+| `WF1`–`WF6` | Csatlakozási hiba: hidegindulásnál 10 perc türelem + 3 próba, majd router reset (12 perc); működés közben 3 próba, majd ESP-újraindítás |
+| `WFL1`–`WFL12` | **A Wi-Fi-lépcső**: az újraindítás után visszajövő Wi-Fi → nincs router reset, nincs 10 perces türelmi idő; ha nem jön vissza → router reset 5,3 perc után; tartós hiány → 30 perc / 1 / 2 / 4 óra lépcső, 48 óra után AP, alvás nélkül; várakozás közben percenként 1 próba, a visszajövő Wi-Fi-t azonnal észreveszi; instabil Wi-Fi → a második kiesésre router reset; rossz jelszó → AP; áramszünet törli a lépcsőt; a valódi heap-újraindulás percre pontosan átviszi; a kiesés nullázza a stabil kapcsolat óráját; a wifireset, a mentés utáni újraindulás és az alvás törli; ha a reset után sem jön vissza a Wi-Fi, az ESP-újraindulás után a lépcső folytatódik (a második reset 30 perc után, nem ~15 perc után), és ha ott a Wi-Fi visszajön, de az internet nem, az internet-ág sem resetel idő előtt |
 | `WD1`–`WD13` | Ismétlődő watchdog újraindulás; a leghosszabb etetés nélküli szakasz minden üzemmódban, a **halott DNS** legrosszabb esetét is beleértve |
 | `WDT14`–`WDT15` | **Az „1 óra hibátlan működés” mihez képest mér**: a mostani indulás kezdetéhez, nem abszolút `millis()` értékhez – nagy kezdő `millis()` mellett és a **körbefordulás** átlépésekor is (mindkét mérés elbukik, ha valaki visszanézi abszolút alakra) |
 | `HP1`–`HP9` | **Heap felügyelet**: az állapotsor félóránként megy ki (nem körönként), a figyelmeztetés csak a küszöb átlépésekor; egyetlen mélypont **nem** indít újra, tartós kritikus szint igen; a router reset számláló **túléli** az újraindulást és pontosan egyszer használódik fel; AP módban, relé-impulzus és fájlírás közben nincs újraindulás; három sikertelen kör után `MODE_FATAL`, nem boot loop; és egy valódi lassú szivárgás végponttól végpontig |
-| `GWH1`–`GWH5` | **Mi marad meg egy heap-újraindulás után**: a router reset utáni **ellenőrző ablakban** nincs önkéntes újraindulás (a gateway-eszkaláció kétfázisú, és a fázisokat összekötő állapot nem vinne át) – mutációval ellenőrizve; az ablak végén a döntés rendesen megszületik (AP mód a helyes indoklással); a teljes leltár arról, mi vész el, és miért olcsó újraszámolni; és a **2 napos ablak** számlálója (`RTC_DATA_ATTR`, tehát szoftveres resetre nullázódna) szintén átmegy – de csak a saját újraindulásunkon, gombnyomásnál marad a tiszta lap |
+| `GWH1`–`GWH5` | **Mi marad meg egy heap-újraindulás után**: a router reset utáni **ellenőrző ablakban** nincs önkéntes újraindulás (a gateway-eszkaláció kétfázisú, és a fázisokat összekötő állapot nem vinne át) – mutációval ellenőrizve; az ablak végén a döntés rendesen megszületik (AP mód a helyes indoklással); a teljes leltár arról, mi vész el, és miért olcsó újraszámolni; gombnyomásnál a Wi-Fi-lépcső is tiszta lappal indul |
 | `NV1`–`NV11` | **A napló mentése a fájlrendszerre**: kimegy a három fontos pillanatban (és a relé kapcsolása **előtt**); az írás sikerességét visszaolvasás ellenőrzi, a néma írási hibát is elkapva; a mentés atomikusan szerzi meg a zárat és fel is oldja, foglalt zárnál kimarad; mentés közben nincs gombos újraindulás és másik írás; a lap a **frissebbet** tölti be (élő RTC → RTC, áramszünet után → fájl); hiányzó, üres, csonka, rossz magic-ű és hazudós fejlécű fájl **egyike sem okoz gondot**, mindkettő üresnél nincs napló a lapon; NTP időbélyeg; a félúton bukó betöltés nem hagy kevert puffert; **minden alvás** menti a naplót (nem csak az időzített), és csatolatlan fájlrendszernél magától kimarad; végül az **óraszinkron minden kapcsolati úton elindul** – a korai kilépéseken is, ahol az `initWiFi()` nem fut le; és **sikertelen NTP mellett** a teljes eszkaláció végigfut, a `/log` a darabszám-alapú szabályra esik vissza, `-` áll az Idő oszlopban, és sehol nincs hamis 1970-es dátum |
 | `NV12`–`NV16` | **A naplómentés hibaútjai**: megtelt fájlrendszer (rövid írás), a **flash kímélése** (változás nélkül nem írunk újra), a „mentve: …" időbélyeg, és az olvashatatlan fájlrendszer három ága – írás után lehetetlen visszaolvasás, megnyithatatlan naplófájl a lapon, félbeszakadó fejléc-átugrás |
 | `NV15`, `AP5`–`AP7`, `WF11` | **A lefedettség-mérésből előkerült vakfoltok**: mind a **10 indulási ok** emberi neve a `/log` oldalon (plusz a nem nevesített `ESP_RST_USB`); **aposztróf** és társai az SSID-ben (a HTML-escape ezen ága sosem futott le); mentés csatolatlan fájlrendszerrel → tiszta 500; a „router reset után sem jött vissza a WiFi" hibaág; és hogy **mind a négy mező egyformán tűri** a beillesztett szóközöket (a határértékes érték záró szóközzel is mentődik, a túlméretes viszont továbbra is hiba) |
@@ -214,7 +224,7 @@ helyes eszköz – egy rossz globális küszöb csak zajt adna.
 | `CPU1`–`CPU2` | A loop() nem pörgeti a CPU-t a várakozó állapotokban |
 | `X1`–`X14` | Határesetek: gomb a relé pulzus közben, nyílt hálózat, SSID/jelszó határértékek, wifireset törlési sorrend és **sikertelen törlés → végzetes hiba**, query-paraméter, 1 napnál hosszabb uptime |
 | `PO1`–`PO3` | Áramszünet: mekkora router-indulási késést tolerál |
-| `R1`–`R4` | Újrapróbálkozási politika: rossz jelszó vs. hiányzó hálózat, 2 napos határ |
+| `R1` | Rossz jelszó → AP mód router reset nélkül, a lépcső el sem indul |
 | `L1`–`L7` | Diagnosztikai napló: rögzítés, /log oldal, körpuffer, spam-védelem, esemény-kódok, **mind a 17 címke**, üres napló |
 | `SB1`–`SB5` | Beragadt gomb: mindkét gomb, váltakozó LED-villogás, naplózás, **az ismétlődő kör spam-védelme** |
 | `SER1`–`SER5` | Soros kimenet: terhelés (nem árasztja el a konzolt), kiesésnél az eltelt és a hátralévő perc, sikernél csak `Successful Test`, eltérésnél a kapott törzs is |
@@ -223,8 +233,10 @@ helyes eszköz – egy rossz globális küszöb csak zajt adna.
 | `LED4`–`LED6` | **LED-ek őszintesége**: a Wi-Fi LED legfeljebb egy percet késhet (mérve: 58 mp), a státusz LED normál üzemben végig világít, AP módban a mentés utáni türelmi idő alatt is villog |
 | `WDT8b` | **A LittleFS formázása** is belefér a watchdog ablakába: 7,5 mp tipikus és 51,5 mp rossz eset, mindkettő a 90 mp alatt |
 | `RR3` | egyetlen sikeres ellenőrzés nullázza a reset-számlálót és a kiesést |
-| `RD1`–`RD14` | **A reset-döntés** (funkcióteszt, percre bontott menetrenddel): router hiba → reset kb. 2 perc után; 5–14 perces szolgáltatói kiesés → nincs reset; 6 órás kiesés → 4 reset a 15 perc / 30 perc / 1 óra / 2 óra lépcsőn; **a 2026-11-22-i terepi nap → 0 reset**; pingre nem válaszoló router → router hibának látszik; szűrt ping, működő HTTP → nincs reset, az öt végpont sorra kerül; gyógyulás után a lépcső elölről; egy napig halott router → 9 reset, alvás nélkül; heap-átvitel; gateway-cím nélkül nincs vak ping; Wi-Fi-vesztés a kiesésen belül a lépcsőt követi; reset után rossz jelszó → AP mód; az 1.1.1.1 hallgat, a 8.8.8.8 válaszol → nincs reset; percenként pontosan egy ellenőrzés |
-| `DN1`–`DN12` | **A router DNS-ének ellenőrzése**: a router DNS-e hallgat, a ping és az `1.1.1.1` DNS megy → reset legkésőbb ~31 perc; a külső DNS is hallgat → nincs reset; 9 perces zavar → nincs reset; a 11-22-i nap DNS-zavarral → 0 reset; tartós hiba → saját lépcső (a ping nem nullázza); ha a DNS nem a router → kimarad; a válasz ellenőrzése (azonosító, forrás, SERVFAIL, NXDOMAIN, csonka, hallgatás: pontosan 2 × 3 mp); a kérdés formátuma az lwIP szerint; gyógyulás után elölről; statikus IP; 15 percenként egy kérdés; ping nélkül szünetel |
+| `RD1`–`RD15` | **A reset-döntés** (funkcióteszt, percre bontott menetrenddel): router hiba → reset kb. 2 perc után; 5–14 perces szolgáltatói kiesés → nincs reset; 6 órás kiesés → 4 reset a 15 perc / 30 perc / 1 óra / 2 óra lépcsőn; **a 2026-11-22-i terepi nap → 0 reset**; pingre nem válaszoló router → router hibának látszik; szűrt ping, működő HTTP → nincs reset, az öt végpont sorra kerül; gyógyulás után a lépcső elölről; egy napig halott router → 9 reset, alvás nélkül; heap-átvitel; gateway-cím nélkül nincs vak ping; Wi-Fi-vesztés a kiesésen belül a lépcsőt követi; reset után rossz jelszó → AP mód; az 1.1.1.1 hallgat, a 8.8.8.8 válaszol → nincs reset; percenként pontosan egy ellenőrzés; heap-újraindulás az első reset előtt → a türelmi idő folytatódik, nem indul elölről |
+| `ST1`–`ST6` | **Az állapotoldal**: normál üzemben fut, a helyi hálózatról 200 (számlálók, események, se SSID, se jelszó, se űrlap, se POST); más alhálózatról és Wi-Fi nélkül 403; kiesés közben a hiba és a resetszám látszik; AP módban leáll, ismeretlen út 404; csak az utolsó 20 esemény, ~2,5 kB; Wi-Fi-kiesés közben elérhetetlen (403), utána „rendben (nemrég kiesett)”, 30 perc stabil kapcsolat után „rendben” |
+| `QH1`–`QH8` | **Éjszakai csendes időszak**: a 22:00 és 05:00 határ téli és nyári időben, a setup() a magyar időzónát állítja be, érvényes idő nélkül nappali szabály; éjjel router hiba → reset 10 perc után; 8 perces router-kiesés → éjjel nincs reset, nappal van; 05:00 után újra 2 perc; a szolgáltatói kiesés éjjel is 15 perc; éjjel a Wi-Fi miatti router reset legalább 10 perc kiesés után (az ESP-újraindítás előtte); a várakozás alatt visszajövő Wi-Fi → nincs reset; hidegindulásnál (érvényes idővel) a Wi-Fi miatti reset is vár |
+| `DN1`–`DN12` | **A router DNS-ének ellenőrzése**: a router DNS-e hallgat, a ping és az `1.1.1.1` DNS megy → reset legkésőbb ~16 perc; a külső DNS is hallgat → nincs reset; 9 perces zavar → nincs reset; a 11-22-i nap DNS-zavarral → 0 reset; tartós hiba → saját lépcső (a ping nem nullázza); ha a DNS nem a router → kimarad; a válasz ellenőrzése (azonosító, forrás, SERVFAIL, NXDOMAIN, csonka, hallgatás: pontosan 2 × 3 mp); a kérdés formátuma az lwIP szerint; gyógyulás után elölről; statikus IP; 5 percenként egy kérdés; ping nélkül szünetel |
 | `HC1`–`HC2` | A **HTTP hibakód** naplózható alakja (1000 + \|kód\|) és az első bukáskor a naplóba kerül |
 | `FB1`, `SL1` | DHCP mellett **tartalék DNS** (1.1.1.1 a fallback helyen, a router DNS-ét nem írja felül); a Wi-Fi **modem-alvás kikapcsolva** a csatlakozás előtt |
 | `WL1`–`WL2` | Wi-Fi-vesztés **rossz jelszóval** → AP mód, router reset nélkül; jelszóhiba nélkül marad a reset |
@@ -278,7 +290,7 @@ hogy MI TÖRTÉNJEN, hanem hogy mi **nem történhet soha**:
 |---|---|
 | P1 | a relé sosem marad behúzva a pulzusnál tovább (a router áram nélkül) |
 | P2 | az `endpointIndex` sosem lép ki a `TEST_ENDPOINTS[]` táblából |
-| P3 | az `rtcRetryRounds` a saját korlátja alatt |
+| P3 | a Wi-Fi-lépcső nem éli túl a 48 órás határt (addigra AP mód) |
 | P4 | az eseménynaplóban csak érvényes eseménykód áll |
 | P5 | a nyílt szövegű jelszó soha nincs egyetlen fájlban sem |
 | P6 | a nyílt szövegű jelszó soha nem kerül a soros kimenetre |
@@ -418,7 +430,7 @@ réteget rögzíti, és külön ellenőrzi, hogy az ablak tényleg **nyitva volt
 
 ## A stubok igazolása: `make stubcheck`
 
-**A teljes host-tesztkészlet érvényessége ezen áll.** Mind a 2178 ellenőrzés a
+**A teljes host-tesztkészlet érvényessége ezen áll.** Mind a 2287 ellenőrzés a
 `test/stubs/` alatti modelleken keresztül lát: ha egy stub téved, a teszt
 **zöld**, az eszköz meg hibázik – és semmi nem szólna.
 

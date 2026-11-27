@@ -23,7 +23,9 @@ enum EventCode : uint8_t {
   EV_LOW_HEAP = 13,
   EV_HEAP_RESTART = 14,
   EV_HTTP_ERROR = 15,
-  EV_NET_DIAG = 16
+  EV_NET_DIAG = 16,
+  // A 17-es kód a régi firmware RESET SKIPPED eseménye volt: a régi naplók miatt szabad marad.
+  EV_WIFI_RESTART = 18
 };
 
 // 12 bájt: a fájlformátum része.
@@ -69,6 +71,10 @@ constexpr char NTP_TZ[] = "CET-1CEST,M3.5.0,M10.5.0/3";
 constexpr uint32_t NTP_MIN_VALID_EPOCH = 1735689600UL;
 
 void ensureNtp();
+
+void applyTimezone();
+
+int localHour();
 
 // Csak a host tesztek hívják (egy processzben több bekapcsolás).
 void ntpResetForColdBoot();

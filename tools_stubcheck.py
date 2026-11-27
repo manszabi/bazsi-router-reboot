@@ -195,6 +195,18 @@ def main():
     allit("IPAddress::operator== es operator!= letezik",
           bool(re.search(r'bool operator==\(const IPAddress &addr\) const;', ia) and re.search(r'bool operator!=\(const IPAddress &addr\) const', ia)), True)
 
+    aw = szoveg(keres(gyokerek, 'src/ESPAsyncWebServer.h'))
+    allit("AsyncWebServerRequest::client() -> AsyncClient* (az allapotoldal cimszurese)",
+          bool(re.search(r'AsyncClient \*client\(\) \{', aw)),
+          bool(re.search(r'AsyncClient\* client\(\)', stub_aws)))
+    at = szoveg(keres(gyokerek, 'src/AsyncTCP.h'))
+    allit("AsyncClient::remoteIP() const -> IPAddress",
+          bool(re.search(r'IPAddress remoteIP\(\) const;', at)),
+          bool(re.search(r'IPAddress remoteIP\(\) const', stub_aws)))
+    allit("WiFiSTAClass::subnetMask() -> IPAddress",
+          bool(re.search(r'IPAddress subnetMask\(\);', szoveg(keres(gyokerek, 'libraries/WiFi/src/WiFiSTA.h')))),
+          bool(re.search(r'IPAddress subnetMask\(\)', stub_wifi)))
+
     if hibak:
         print("\nA STUB-IGAZOLAS MEGBUKOTT:")
         for h in hibak:

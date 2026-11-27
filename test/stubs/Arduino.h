@@ -151,7 +151,6 @@ extern int g_gpioWakeResult;
 #define BIT(n) (1ULL << (n))
 #define F(x) (x)
 
-#define RTC_DATA_ATTR
 extern uint64_t g_wakeupUs;
 extern uint64_t g_gpioWakeMask;
 extern int g_gpioWakeMode;
@@ -316,6 +315,8 @@ public:
 extern EspClass ESP;
 
 extern uint32_t g_epochNow;
+// Ha nem 0: az óra a millis()-szel együtt jár, ettől a millis()-től számítva.
+extern uint32_t g_epochTickFrom;
 extern int      g_ntpStarts;
 void configTzTime(const char* tz, const char* server);
 

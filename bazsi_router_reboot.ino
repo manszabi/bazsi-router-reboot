@@ -39,14 +39,19 @@ constexpr uint32_t CHECK_INTERVAL_MS = 60 * 1000;
 constexpr uint32_t ROUTER_DOWN_WINDOW_MS = 2 * 60 * 1000;
 constexpr uint32_t WAN_DOWN_WINDOW_MS = 15 * 60 * 1000;
 
+// Éjszakai csendes időszak (helyi idő, pl. firmware-frissítés): a router-hiba miatti reset csak 10 perc után.
+constexpr int QUIET_START_HOUR = 22;
+constexpr int QUIET_END_HOUR = 5;
+constexpr uint32_t QUIET_WINDOW_MS = 10 * 60 * 1000;
+
 // Ha a reset nem segített, a következő ennyivel az előző után jön (az utolsó ismétlődik).
 constexpr uint32_t RETRY_BACKOFF_MS[] = { 30 * 60 * 1000, 60 * 60 * 1000,
                                           120 * 60 * 1000, 240 * 60 * 1000 };
 constexpr uint8_t RETRY_BACKOFF_STEPS = sizeof(RETRY_BACKOFF_MS) / sizeof(RETRY_BACKOFF_MS[0]);
 
-// A router DNS-e: 15 percenként, gyanúnál percenként; 15 perc folyamatos hiba után reset.
-constexpr uint32_t DNS_CHECK_INTERVAL_MS = 15 * 60 * 1000;
-constexpr uint32_t DNS_FAIL_WINDOW_MS = 15 * 60 * 1000;
+// A router DNS-e: 5 percenként, gyanúnál percenként; 10 perc folyamatos hiba után reset.
+constexpr uint32_t DNS_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+constexpr uint32_t DNS_FAIL_WINDOW_MS = 10 * 60 * 1000;
 constexpr char DNS_PROBE_NAME[] = "connectivitycheck.gstatic.com";
 // Várakozás a router bootolására (korábban véget ér, ha a hálózat visszajött).
 constexpr uint32_t RESET_DELAY = 10 * 60 * 1000;
@@ -57,8 +62,9 @@ constexpr uint32_t firstStartDelay = 10 * 60 * 1000;
 constexpr uint8_t wifi_maxRetries = 3;
 constexpr uint32_t wifiInterval = 30 * 1000;
 
-// Ennyi alvás-kör után (~46 óra) Wi-Fi nélkül AP beállító mód.
-constexpr uint32_t MAX_RETRY_ROUNDS = 33;
+// Wi-Fi-kiesés: 30 perc stabil kapcsolat nullázza a lépcsőt, 48 óra után AP beállító mód.
+constexpr uint32_t WIFI_STABLE_MS = 30 * 60 * 1000;
+constexpr uint32_t WIFI_GIVEUP_MIN = 48 * 60;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 50;
 constexpr uint32_t BUTTON_POLL_MS = 10;
 
@@ -76,7 +82,7 @@ constexpr uint32_t WDT_TIMEOUT_MS = 90 * 1000;
 constexpr uint32_t MAX_WDT_RESETS = 3;
 constexpr uint32_t WDT_COUNTER_CLEAR_MS = 60 * 60 * 1000;
 
-// Alvások hossza.
+// Alvás: biztonsági időzítő, ha a gombos ébresztés nem élesíthető; beragadt gombnál 60 mp.
 constexpr uint64_t SLEEP_DURATION_US = 3600ULL * 1000000ULL;
 constexpr uint64_t STUCK_BUTTON_SLEEP_US = 60ULL * 1000000ULL;
 
@@ -110,14 +116,18 @@ constexpr TestEndpoint TEST_ENDPOINTS[] = {
 };
 constexpr uint8_t ENDPOINT_COUNT = sizeof(TEST_ENDPOINTS) / sizeof(TEST_ENDPOINTS[0]);
 
-// A folyamatban lévő kiesés: kezdete, az eddigi resetek száma és az utolsó reset ideje.
-struct TestState {
-  uint8_t endpointIndex = 0;
+// Egy hiba reset-lépcsője (internet és DNS): a kezdete, az eddigi resetek és az utolsó reset ideje.
+struct ResetLadder {
   uint8_t resetEvents = 0;
-  uint8_t resetStep = 0;
   bool outage = false;
   uint32_t outageStart = 0;
   uint32_t lastResetAt = 0;
+};
+
+// Az internet-ág: a lépcső mellett a tartalék HTTP teszt sorszáma és a relé pulzus állapota.
+struct TestState : ResetLadder {
+  uint8_t endpointIndex = 0;
+  uint8_t resetStep = 0;
 };
 
 struct TimingState {
@@ -136,14 +146,10 @@ struct UIFlags {
   bool blinkOn = false;
 };
 
-// A router DNS-ének állapota; saját reset-lépcső, mert a ping közben végig sikeres.
-struct DnsState {
+// A router DNS-e: saját lépcső (outage = gyanú), mert a ping közben végig sikeres.
+struct DnsState : ResetLadder {
   bool checked = false;
   uint32_t lastCheck = 0;
-  bool suspect = false;
-  uint32_t suspectSince = 0;
-  uint8_t resetEvents = 0;
-  uint32_t lastResetAt = 0;
   bool skipLogged = false;
 };
 
@@ -192,8 +198,15 @@ constexpr uint32_t WDT_COUNTER_MAGIC = 0x42415A53UL;
 RTC_NOINIT_ATTR uint32_t rtcWdtMagic;
 RTC_NOINIT_ATTR uint32_t rtcWdtResets;
 
-// RTC_DATA: a deep sleepet túléli, bekapcsoláskor és szoftveres resetnél nullázódik.
-RTC_DATA_ATTR uint32_t rtcRetryRounds = 0;
+// A Wi-Fi-kiesés (RTC_NOINIT): volt-e már ESP-újraindítás, és a kiesés hossza; áramszünet, gomb és alvás törli.
+constexpr uint32_t WIFI_LADDER_MAGIC = 0x42415A57UL;
+RTC_NOINIT_ATTR uint32_t rtcWifiMagic;
+RTC_NOINIT_ATTR uint8_t  rtcWifiRestarted;
+RTC_NOINIT_ATTR uint32_t rtcWifiOutageMin;
+
+// A RAM-beli órák: a kiesés kezdete (az indulás óta) és a stabil kapcsolat kezdete.
+uint32_t wifiOutageSince = 0;
+uint32_t wifiConnectedSince = 0;
 
 // A reset oka (a NET DIAG esemény paramétere).
 enum NetDiag : uint8_t {
@@ -202,17 +215,16 @@ enum NetDiag : uint8_t {
   DIAG_DNS = 3
 };
 
-DiagCounters diagCounters() {
-  return DiagCounters{ rtcWdtResets, MAX_WDT_RESETS, rtcRetryRounds, MAX_RETRY_ROUNDS };
-}
 
-// Heap miatti újraindulásnál átvitt állapot (RTC_NOINIT, egyszer használjuk fel).
+// Szándékos (heap, Wi-Fi) újraindulásnál átvitt internet-lépcső (RTC_NOINIT, egyszer használjuk fel).
 constexpr uint32_t HEAP_MAGIC = 0x42415A48UL;
 constexpr uint8_t  CARRY_NONE = 0xFF;
+constexpr uint32_t CARRY_NO_OUTAGE = 0xFFFFFFFFUL;
 RTC_NOINIT_ATTR uint32_t rtcHeapMagic;
 RTC_NOINIT_ATTR uint32_t rtcHeapRestarts;
 RTC_NOINIT_ATTR uint8_t  rtcCarryResetEvents;
-RTC_NOINIT_ATTR uint32_t rtcCarryRetryRounds;
+RTC_NOINIT_ATTR uint32_t rtcCarryOutageAgoMin;
+RTC_NOINIT_ATTR uint32_t rtcCarryResetAgoMin;
 
 // Előre deklarációk.
 void printUptime();
@@ -223,7 +235,6 @@ void restartFromButton(const char* reason);
 void doWifiReset();
 void blockingDelay(uint32_t duration);
 void waitWithButtons(uint32_t duration);
-bool waitWithButtonsUntilOnline(uint32_t duration);
 bool onlineProbe();
 bool internetOk();
 bool onlineProbeDue(uint32_t& lastProbe, uint32_t now);
@@ -231,8 +242,17 @@ void lockConfigBeforeShutdown();
 void fatalSleep();
 void apSleep();
 void feedWatchdog();
-void wifiGiveUp();
-bool routerResetAndRetry();
+void wifiFailed(bool coldStart);
+void wifiLadderClear();
+void persistBeforeRestart();
+uint8_t wifiLadderLevel();
+uint32_t wifiOutageMinutes();
+void ladderBegin(ResetLadder& l, uint32_t now);
+void ladderCountReset(ResetLadder& l, uint32_t now);
+uint32_t ladderWaitMs(const ResetLadder& l, uint32_t now, uint32_t firstWindowMs);
+void startRouterReset(uint8_t diag);
+uint32_t backoffMs(uint8_t resetek);
+bool quietHours();
 bool wifiAuthFailed();
 bool reset_device();
 void startConfigPortal();
@@ -243,7 +263,7 @@ void holdRelayForSleep();
 int pressedButtonNow();
 void checkHeap(uint32_t now);
 void initHeapState();
-void applyHeapCarry();
+void applyLadderCarry();
 bool initWiFi();
 bool reconnectWifi();
 bool gatewayUnreachable();
@@ -264,37 +284,57 @@ void enterFatal(const char* reason) {
   Serial.println(" perc mulva az eszkoz elalszik (magatol nem ebred fel).");
 }
 
+DiagCounters diagCounters() {
+  const uint32_t now = millis();
+  DiagCounters d{};
+  d.wdtResets = rtcWdtResets;
+  d.wdtLimit = MAX_WDT_RESETS;
+  d.wifiStep = wifiLadderLevel();
+  d.wifiOutageMin = (rtcWifiRestarted != 0) ? wifiOutageMinutes() : 0;
+  d.heapRestarts = rtcHeapRestarts;
+  d.netOutage = testState.outage;
+  d.netOutageMin = testState.outage ? (now - testState.outageStart) / 60000 : 0;
+  d.netResets = testState.resetEvents;
+  d.dnsSuspect = dnsState.outage;
+  d.dnsSuspectMin = dnsState.outage ? (now - dnsState.outageStart) / 60000 : 0;
+  d.dnsResets = dnsState.resetEvents;
+  d.resetRunning = (currentState == RESET_STATE) || testState.resetStep != 0;
+  return d;
+}
+
 // A heap-átvitel RTC blokkjának inicializálása bekapcsolás után.
 void initHeapState() {
   if (rtcHeapMagic != HEAP_MAGIC) {
     rtcHeapMagic = HEAP_MAGIC;
     rtcHeapRestarts = 0;
     rtcCarryResetEvents = CARRY_NONE;
-    rtcCarryRetryRounds = 0;
   }
 }
 
-// Az átvitt állapot visszaállítása - pontosan egyszer.
-void applyHeapCarry() {
+// Szándékos újraindulás előtt: az internet-lépcső mentése (a percek a mentés pillanatától).
+void carryLadder() {
+  const uint32_t now = millis();
+  rtcCarryResetEvents = testState.resetEvents;
+  rtcCarryOutageAgoMin = testState.outage ? (now - testState.outageStart) / 60000 : CARRY_NO_OUTAGE;
+  rtcCarryResetAgoMin = (now - testState.lastResetAt) / 60000;
+}
+
+// Az átvitt lépcső visszaállítása - pontosan egyszer; az órák az indulás előtti percekre állnak.
+void applyLadderCarry() {
   if (rtcCarryResetEvents == CARRY_NONE) {
     return;
   }
+  const uint32_t now = millis();
   testState.resetEvents = rtcCarryResetEvents;
-  rtcRetryRounds = rtcCarryRetryRounds;
   rtcCarryResetEvents = CARRY_NONE;
-  // Ha a kiesés már kapott resetet, a következő a lépcső szerint az indulástól számít.
-  if (testState.resetEvents > 0) {
-    testState.outage = true;
-    testState.outageStart = millis();
-    testState.lastResetAt = testState.outageStart;
+  testState.outage = (rtcCarryOutageAgoMin != CARRY_NO_OUTAGE);
+  if (testState.outage) {
+    testState.outageStart = now - rtcCarryOutageAgoMin * 60000;
   }
+  testState.lastResetAt = now - rtcCarryResetAgoMin * 60000;
   printUptime();
-  Serial.print("Heap miatti ujraindulas utan folytatjuk: router reset szamlalo = ");
-  Serial.print(testState.resetEvents);
-  Serial.print(", ujraprobalkozasi kor = ");
-  Serial.print(rtcRetryRounds);
-  Serial.print(" / ");
-  Serial.println(MAX_RETRY_ROUNDS);
+  Serial.print("Ujraindulas utan folytatjuk: router reset szamlalo = ");
+  Serial.println(testState.resetEvents);
 }
 
 // Heap mérése, ritkított kiírás, tartósan kritikus szintnél önkéntes újraindulás.
@@ -351,12 +391,11 @@ void checkHeap(uint32_t now) {
     return;
   }
 
-  rtcCarryResetEvents = testState.resetEvents;
-  rtcCarryRetryRounds = rtcRetryRounds;
   rtcHeapRestarts++;
   logEvent(EV_HEAP_RESTART, (uint16_t)(szabad / 1024));
 
   saveEventLog("heap miatti ujraindulas elott");
+  persistBeforeRestart();
 
   printUptime();
   Serial.printf("KRITIKUS: a szabad heap %u B (legnagyobb tomb %u B) %u meresen at.\n",
@@ -588,24 +627,6 @@ bool onlineProbeDue(uint32_t& lastProbe, uint32_t now) {
   return onlineProbe();
 }
 
-// Várakozás, ami korán véget ér, ha a hálózat és az internet visszajött.
-bool waitWithButtonsUntilOnline(uint32_t duration) {
-  const uint32_t start = millis();
-  uint32_t lastProbe = start;
-  while (millis() - start < duration) {
-    if (onlineProbeDue(lastProbe, millis())) {
-      printUptime();
-      Serial.println("A varakozas korabban veget er: halozat es internet OK.");
-      return true;
-    }
-    resetbutton();
-    wifiresetbutton();
-    feedWatchdog();
-    delay(BUTTON_POLL_MS);
-  }
-  return false;
-}
-
 // Alvás/újraindulás előtt ennyit várunk egy folyamatban lévő mentésre.
 constexpr uint32_t SAVE_WAIT_MAX_MS = 5000;
 
@@ -788,10 +809,7 @@ bool initWiFi() {
 // A router áramtalanítása RESET_PULSE-ig; igazat ad, amikor a pulzus véget ért.
 bool reset_device() {
   if (testState.resetStep == 0) {
-    if (testState.resetEvents < 255) {
-      testState.resetEvents++;
-    }
-    testState.lastResetAt = millis();
+    ladderCountReset(testState, millis());
     logEvent(EV_ROUTER_RESET, (uint16_t)testState.resetEvents);
 
     saveEventLog("router reset elott");
@@ -835,6 +853,7 @@ bool reset_device() {
 // Közös elalvás: napló mentése, zár, relé LOW-n rögzítve; timerUs = 0 -> csak a reset gomb ébreszt.
 void enterDeepSleep(uint64_t timerUs) {
   saveEventLog("alvas elott");
+  wifiLadderClear();
 
   lockConfigBeforeShutdown();
   digitalWrite(ledPin, LOW);
@@ -871,67 +890,132 @@ void enterDeepSleep(uint64_t timerUs) {
   esp_deep_sleep_start();
 }
 
-// Wi-Fi nélkül indulva: router reset, várakozás, újracsatlakozás.
-bool routerResetAndRetry() {
-  printUptime();
-  Serial.println("A halozat nem latszik - router ujrainditas kovetkezik.");
-  while (!reset_device()) {
-    resetbutton();
-    wifiresetbutton();
-    feedWatchdog();
-    delay(BUTTON_POLL_MS);
-  }
-  printUptime();
-  Serial.println("Router reset kesz, varakozas a bootolasra.");
-
-  if (waitWithButtonsUntilOnline(RESET_DELAY)) {
-    digitalWrite(wifiledPin, HIGH);
-    return true;
-  }
-  return reconnectWifi();
-}
-
 bool wifiAuthFailed() {
   return WiFi.status() == WL_CONNECT_FAILED;
 }
 
-void retrySleep() {
-  printUptime();
-  Serial.print("A halozat nem elerheto. Ujraprobalkozasi kor: ");
-  Serial.print(rtcRetryRounds);
-  Serial.print(" / ");
-  Serial.println(MAX_RETRY_ROUNDS);
-
-  Serial.print("Alvas ");
-  Serial.print((unsigned long)(SLEEP_DURATION_US / 60000000ULL));
-  Serial.println(" percre, utana automatikus ujraprobalkozas.");
-  logEvent(EV_SLEEP, 1);
-  enterDeepSleep(SLEEP_DURATION_US);
+// A kiesés eddigi hossza percben (a mentett rész + az aktuális indulás óta eltelt).
+uint32_t wifiOutageMinutes() {
+  return rtcWifiOutageMin + (millis() - wifiOutageSince) / 60000;
 }
 
-// A Wi-Fi próbák után: rossz jelszó -> AP mód, különben alvás, 33 kör után AP mód.
-void wifiGiveUp() {
-  const wl_status_t st = WiFi.status();
+// Szándékos újraindulás előtt: a Wi-Fi-kiesés hossza és az internet-lépcső az RTC-be.
+void persistBeforeRestart() {
+  if (rtcWifiRestarted != 0) {
+    rtcWifiOutageMin = wifiOutageMinutes();
+    wifiOutageSince = millis();
+  }
+  carryLadder();
+}
+
+void wifiLadderClear() {
+  rtcWifiMagic = WIFI_LADDER_MAGIC;
+  rtcWifiRestarted = 0;
+  rtcWifiOutageMin = 0;
+  wifiConnectedSince = 0;
+}
+
+// A Wi-Fi-lépcső foka (napló, /log): 0 = nincs kiesés, 1 = ESP-újraindítás, 2+ = utána N-1 router reset.
+uint8_t wifiLadderLevel() {
+  if (rtcWifiRestarted == 0) {
+    return 0;
+  }
+  return (uint8_t)(testState.resetEvents < 254 ? testState.resetEvents + 1 : 255);
+}
+
+// Indulás: a mentett állapot csak érvényes magic mellett él; az órák az indulástól számítanak.
+void initWifiLadder() {
+  if (rtcWifiMagic != WIFI_LADDER_MAGIC) {
+    wifiLadderClear();
+  }
+  wifiOutageSince = millis();
+  wifiConnectedSince = 0;
+  if (rtcWifiRestarted != 0) {
+    printUptime();
+    Serial.print("Wi-Fi kieses folytatodik: ");
+    Serial.print(wifiLadderLevel());
+    Serial.print(". fok, kieses ");
+    Serial.print(rtcWifiOutageMin);
+    Serial.println(" perce.");
+  }
+}
+
+// Van Wi-Fi: 30 perc stabil kapcsolat után a Wi-Fi-kiesés lezárul.
+void wifiConnectedTick() {
+  if (rtcWifiRestarted == 0) {
+    return;
+  }
+  const uint32_t now = millis();
+  if (wifiConnectedSince == 0) {
+    wifiConnectedSince = (now != 0) ? now : 1;
+    return;
+  }
+  if (now - wifiConnectedSince >= WIFI_STABLE_MS) {
+    printUptime();
+    Serial.println("A Wi-Fi 30 perce stabil - a Wi-Fi lepcso nullazva.");
+    wifiLadderClear();
+  }
+}
+
+// Az első Wi-Fi miatti router reset türelmi ideje: nappal azonnal, a csendes időszakban 10 perc.
+uint32_t wifiFirstWindowMs() {
+  return quietHours() ? QUIET_WINDOW_MS : 0;
+}
+
+// Kell-e még várni a következő Wi-Fi miatti router resettel (a közös internet-lépcső szerint).
+bool wifiResetPending() {
+  return rtcWifiRestarted != 0 && ladderWaitMs(testState, millis(), wifiFirstWindowMs()) > 0;
+}
+
+// A Wi-Fi próbák után: rossz jelszó -> AP; előbb ESP-újraindítás, aztán router reset a közös lépcsőn; 48 óra után AP.
+void wifiFailed(bool coldStart) {
   printUptime();
   Serial.print("WiFi status a probalkozasok utan: ");
-  Serial.println((int)st);
-
-  if (st == WL_CONNECT_FAILED) {
+  Serial.println((int)WiFi.status());
+  if (wifiAuthFailed()) {
     Serial.println("Hitelesitesi hiba - valoszinuleg rossz a jelszo. AP mod.");
+    wifiLadderClear();
     logEvent(EV_AP_MODE, 2);
     startConfigPortal();
     return;
   }
-
-  rtcRetryRounds++;
-  if (rtcRetryRounds >= MAX_RETRY_ROUNDS) {
-    Serial.println("Ket napja nincs halozat - AP beallito mod.");
-    rtcRetryRounds = 0;
+  wifiConnectedSince = 0;
+  if (rtcWifiRestarted != 0 && wifiOutageMinutes() >= WIFI_GIVEUP_MIN) {
+    Serial.println("Ket napja nincs Wi-Fi - AP beallito mod.");
+    wifiLadderClear();
     logEvent(EV_AP_MODE, 3);
     startConfigPortal();
     return;
   }
-  retrySleep();
+  const uint32_t now = millis();
+  ladderBegin(testState, now);
+  if (rtcWifiRestarted == 0) {
+    rtcWifiRestarted = 1;
+    wifiOutageSince = now;
+    rtcWifiOutageMin = 0;
+    if (!coldStart) {
+      persistBeforeRestart();
+      Serial.println("A Wi-Fi nem jott vissza - elobb az ESP indul ujra (a router erintetlen).");
+      logEvent(EV_WIFI_RESTART, (uint16_t)WiFi.status());
+      saveEventLog("Wi-Fi miatti ujraindulas elott");
+      lockConfigBeforeShutdown();
+      Serial.flush();
+      ESP.restart();
+      return;
+    }
+  }
+  const uint32_t varni = ladderWaitMs(testState, now, wifiFirstWindowMs());
+  if (varni > 0) {
+    Serial.print("A kovetkezo Wi-Fi miatti router reset ");
+    Serial.print((varni + 59999) / 60000);
+    Serial.println(testState.resetEvents == 0 ? " perc mulva (ejszakai csendes idoszak)." : " perc mulva.");
+    currentState = WAIT_STATE;
+    return;
+  }
+  Serial.print("WiFi nem jott vissza - router ujrainditas (Wi-Fi lepcso ");
+  Serial.print(testState.resetEvents + 2);
+  Serial.println(").");
+  startRouterReset(DIAG_ROUTER);
 }
 
 void apSleep() {
@@ -978,6 +1062,7 @@ void restartFromButton(const char* reason) {
   if (!beginConfigWrite()) {
     return;
   }
+  wifiLadderClear();
   Serial.println(reason);
   Serial.println("RESTART ESP32C3 device.");
   Serial.flush();
@@ -1031,6 +1116,7 @@ void doWifiReset() {
     endConfigWrite();
     fatalHalt("A mentett wifi adatok nem torolhetok - serult fajlrendszer.");
   }
+  wifiLadderClear();
   Serial.println("RESTART ESP32C3 device.");
   Serial.flush();
   ESP.restart();
@@ -1142,15 +1228,9 @@ void handleFirstStart(uint32_t currentMillis) {
     Serial.println("First start wait end.");
 
     if (!reconnectWifi()) {
-      if (wifiAuthFailed()) {
-        wifiGiveUp();
-        return;
-      }
-
-      if (!routerResetAndRetry()) {
-        wifiGiveUp();
-        return;
-      }
+      uiFlags.firstStart = false;
+      wifiFailed(true);
+      return;
     }
   } else {
     printUptime();
@@ -1167,6 +1247,7 @@ void startConfigPortal() {
   }
 
   saveEventLog("AP modba valtas elott");
+  stopStatusPage();
   deviceMode = MODE_CONFIG;
   touchApDeadline();
 
@@ -1243,7 +1324,13 @@ void setup() {
 
   checkWatchdogResets();
   initHeapState();
-  applyHeapCarry();
+  applyTimezone();
+  applyLadderCarry();
+  initWifiLadder();
+  // Saját Wi-Fi miatti újraindulás után a router nem kapcsolt le: nincs mire várni.
+  if (rtcWifiRestarted != 0) {
+    uiFlags.firstStart = false;
+  }
 
   Serial.println("Init LittleFS.");
   initLittleFS();
@@ -1290,8 +1377,8 @@ void setup() {
   if (deviceMode != MODE_FATAL) {
     if (initWiFi()) {
       Serial.println("WIFI OK!");
-      logEvent(EV_WIFI_OK, (uint16_t)rtcRetryRounds);
-      rtcRetryRounds = 0;
+      logEvent(EV_WIFI_OK, (uint16_t)wifiLadderLevel());
+      wifiConnectedTick();
       deviceMode = MODE_MONITOR;
       digitalWrite(wifiledPin, HIGH);
     } else if (ssid[0] == '\0') {
@@ -1299,10 +1386,14 @@ void setup() {
       startConfigPortal();
     } else {
       printUptime();
-      Serial.println("Nem sikerult csatlakozni - first start varakozas kovetkezik.");
+      Serial.println(uiFlags.firstStart ? "Nem sikerult csatlakozni - first start varakozas kovetkezik."
+                                        : "Nem sikerult csatlakozni - ujraprobalkozas, utana router reset.");
       deviceMode = MODE_MONITOR;
       digitalWrite(wifiledPin, LOW);
     }
+  }
+  if (deviceMode == MODE_MONITOR) {
+    startStatusPage();
   }
 }
 
@@ -1382,6 +1473,12 @@ void startRouterReset(uint8_t diag) {
   resetDelayProbeLast = timing.stateStart;
 }
 
+// Csendes időszak: 22:00-05:00 helyi idő szerint; érvényes idő nélkül (NTP előtt) nem az.
+bool quietHours() {
+  const int ora = localHour();
+  return ora >= 0 && (ora >= QUIET_START_HOUR || ora < QUIET_END_HOUR);
+}
+
 // A lépcső: az n. sikertelen reset után ennyit várunk a következővel (n >= 1).
 uint32_t backoffMs(uint8_t resetek) {
   const uint8_t lepcso = (resetek <= RETRY_BACKOFF_STEPS) ? (uint8_t)(resetek - 1)
@@ -1389,18 +1486,47 @@ uint32_t backoffMs(uint8_t resetek) {
   return RETRY_BACKOFF_MS[lepcso];
 }
 
-// A kiesés kezdete (első reset előtt) vagy az utolsó reset óta ennyit várunk a resettel.
-uint32_t resetWaitMs(bool routerOk) {
-  if (testState.resetEvents == 0) {
-    return routerOk ? WAN_DOWN_WINDOW_MS : ROUTER_DOWN_WINDOW_MS;
+// A hiba kezdete: az első reset türelmi ideje innen számít.
+void ladderBegin(ResetLadder& l, uint32_t now) {
+  if (!l.outage) {
+    l.outage = true;
+    l.outageStart = now;
   }
-  return backoffMs(testState.resetEvents);
+}
+
+// A hiba elmúlt: a lépcső elölről indul.
+void ladderEnd(ResetLadder& l) {
+  l.outage = false;
+  l.resetEvents = 0;
+}
+
+void ladderCountReset(ResetLadder& l, uint32_t now) {
+  if (l.resetEvents < 255) {
+    l.resetEvents++;
+  }
+  l.lastResetAt = now;
+}
+
+// Ennyi ms múlva jöhet a következő reset (0 = most): az első a hiba kezdetétől, a többi az előzőtől.
+uint32_t ladderWaitMs(const ResetLadder& l, uint32_t now, uint32_t firstWindowMs) {
+  const uint32_t kezdet = (l.resetEvents == 0) ? l.outageStart : l.lastResetAt;
+  const uint32_t varni = (l.resetEvents == 0) ? firstWindowMs : backoffMs(l.resetEvents);
+  const uint32_t eltelt = now - kezdet;
+  return (eltelt < varni) ? varni - eltelt : 0;
+}
+
+// Az internet-ág első resetjének türelmi ideje: a router él 15 perc, különben 2 (csendes időszakban 10) perc.
+uint32_t netFirstWindowMs(bool routerOk) {
+  if (routerOk) {
+    return WAN_DOWN_WINDOW_MS;
+  }
+  return quietHours() ? QUIET_WINDOW_MS : ROUTER_DOWN_WINDOW_MS;
 }
 
 // Él a ping: hallgat-e tartósan a router DNS-e, miközben egy külső DNS válaszol? Igaz, ha reset indult.
 bool routerDnsCheck() {
   const uint32_t now = millis();
-  const uint32_t utem = dnsState.suspect ? CHECK_INTERVAL_MS : DNS_CHECK_INTERVAL_MS;
+  const uint32_t utem = dnsState.outage ? CHECK_INTERVAL_MS : DNS_CHECK_INTERVAL_MS;
   if (dnsState.checked && now - dnsState.lastCheck < utem) {
     return false;
   }
@@ -1415,47 +1541,36 @@ bool routerDnsCheck() {
       Serial.println("A DNS szerver nem a router - a router DNS ellenorzese kimarad.");
       dnsState.skipLogged = true;
     }
-    dnsState.suspect = false;
+    dnsState.outage = false;
     return false;
   }
   if (testDnsServer(dns, DNS_PROBE_NAME, "router")) {
-    if (dnsState.suspect) {
+    if (dnsState.outage) {
       printUptime();
       Serial.println("A router DNS-e ujra valaszol.");
     }
-    dnsState.suspect = false;
-    dnsState.resetEvents = 0;
+    ladderEnd(dnsState);
     return false;
   }
   if (!testDnsServer(IPAddress(1, 1, 1, 1), DNS_PROBE_NAME, "kulso")) {
     printUptime();
     Serial.println("A kulso DNS sem valaszol - nem a router hibaja, nincs reset.");
-    dnsState.suspect = false;
+    dnsState.outage = false;
     return false;
   }
-  if (!dnsState.suspect) {
-    dnsState.suspect = true;
-    dnsState.suspectSince = now;
-  }
-  const uint32_t kezdet = (dnsState.resetEvents == 0) ? dnsState.suspectSince
-                                                       : dnsState.lastResetAt;
-  const uint32_t varni = (dnsState.resetEvents == 0) ? DNS_FAIL_WINDOW_MS
-                                                      : backoffMs(dnsState.resetEvents);
-  const uint32_t eltelt = now - kezdet;
+  ladderBegin(dnsState, now);
+  const uint32_t varni = ladderWaitMs(dnsState, now, DNS_FAIL_WINDOW_MS);
   printUptime();
   Serial.print("A router DNS-e hallgat ");
-  Serial.print((now - dnsState.suspectSince) / 60000);
+  Serial.print((now - dnsState.outageStart) / 60000);
   Serial.println(" perce, a kulso DNS valaszol.");
-  if (eltelt < varni) {
+  if (varni > 0) {
     Serial.print("Router reset legkorabban ");
-    Serial.print((varni - eltelt + 59999) / 60000);
+    Serial.print((varni + 59999) / 60000);
     Serial.println(" perc mulva.");
     return false;
   }
-  if (dnsState.resetEvents < 255) {
-    dnsState.resetEvents++;
-  }
-  dnsState.lastResetAt = now;
+  ladderCountReset(dnsState, now);
   startRouterReset(DIAG_DNS);
   return true;
 }
@@ -1471,35 +1586,20 @@ void runCheckState() {
     }
     digitalWrite(wifiledPin, LOW);
 
-    if (reconnectWifi()) {
+    // A lépcső várakozása alatt percenként egy próba, különben a szokásos 3.
+    const bool siker = wifiResetPending() ? initWiFi() : reconnectWifi();
+    if (siker) {
+      digitalWrite(wifiledPin, HIGH);
       timing.stateStart = millis();
       return;
     }
-
-    if (wifiAuthFailed()) {
-      printUptime();
-      Serial.println("WiFi hitelesitesi hiba - router reset helyett AP mod.");
-      wifiGiveUp();
-      return;
-    }
-
-    if (!testState.outage) {
-      testState.outage = true;
-      testState.outageStart = timing.stateStart;
-    }
-    printUptime();
-    if (testState.resetEvents > 0 && millis() - testState.lastResetAt < resetWaitMs(false)) {
-      Serial.println("WiFi nem jott vissza - a kovetkezo router reset meg nem esedekes.");
-      currentState = WAIT_STATE;
-      return;
-    }
-    Serial.println("WiFi nem jott vissza - router ujrainditas kovetkezik.");
-    startRouterReset(DIAG_ROUTER);
+    ladderBegin(testState, timing.stateStart);
+    wifiFailed(false);
     return;
   }
 
   digitalWrite(wifiledPin, HIGH);
-  rtcRetryRounds = 0;
+  wifiConnectedTick();
   printUptime();
   Serial.println("Internet ellenorzes.");
 
@@ -1510,8 +1610,7 @@ void runCheckState() {
       Serial.print((millis() - testState.outageStart) / 60000);
       Serial.println(" perc.");
     }
-    testState.outage = false;
-    testState.resetEvents = 0;
+    ladderEnd(testState);
     Serial.println("Successful Test");
     if (!routerDnsCheck()) {
       currentState = WAIT_STATE;
@@ -1520,18 +1619,14 @@ void runCheckState() {
   }
 
   if (!testState.outage) {
-    testState.outage = true;
-    testState.outageStart = timing.stateStart;
+    ladderBegin(testState, timing.stateStart);
     logEvent(EV_TEST_FAIL, (uint16_t)(testState.endpointIndex == 0 ? ENDPOINT_COUNT
                                                                     : testState.endpointIndex));
     logEvent(EV_HTTP_ERROR, httpCodeLogParam(lastHttpCode()));
   }
 
   const bool routerOk = gatewayPingOk();
-  const uint32_t kezdet = (testState.resetEvents == 0) ? testState.outageStart
-                                                        : testState.lastResetAt;
-  const uint32_t eltelt = timing.stateStart - kezdet;
-  const uint32_t varni = resetWaitMs(routerOk);
+  const uint32_t varni = ladderWaitMs(testState, timing.stateStart, netFirstWindowMs(routerOk));
 
   printUptime();
   Serial.print("Nincs internet ");
@@ -1539,12 +1634,12 @@ void runCheckState() {
   Serial.print(" perce, a router ");
   Serial.println(routerOk ? "valaszol." : "sem valaszol.");
 
-  if (eltelt >= varni) {
+  if (varni == 0) {
     startRouterReset(routerOk ? DIAG_WAN : DIAG_ROUTER);
     return;
   }
   Serial.print("Router reset legkorabban ");
-  Serial.print((varni - eltelt + 59999) / 60000);
+  Serial.print((varni + 59999) / 60000);
   Serial.println(" perc mulva.");
   currentState = WAIT_STATE;
 }
@@ -1567,7 +1662,7 @@ void runResetState(uint32_t currentMillis) {
       printUptime();
       Serial.println("A router reset utan sem jott vissza a WiFi.");
       digitalWrite(wifiledPin, LOW);
-      wifiGiveUp();
+      wifiFailed(false);
       return;
     }
   }
@@ -1608,6 +1703,7 @@ void loop() {
   if (restartRequestDue(currentMillis)) {
     lockConfigBeforeShutdown();
     clearRestartRequest();
+    wifiLadderClear();
     Serial.println("RESTART!");
     Serial.flush();
     ESP.restart();

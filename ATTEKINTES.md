@@ -35,7 +35,7 @@ Minden körben a router pingjét is megnézi:
 
 | Helyzet | Router reset |
 |---|---|
-| a router **sem** válaszol (vagy nincs Wi-Fi) | **2 perc** után |
+| a router **sem** válaszol (vagy nincs Wi-Fi) | **2 perc** után; **22:00–05:00 között 10 perc** (éjszakai firmware-frissítés) |
 | a router válaszol, az internet nem (szolgáltatói hiba) | **15 perc** után |
 | a reset nem segített | a következő **30 perc → 1 óra → 2 óra → 4 óra** múlva, onnan 4 óránként |
 
@@ -46,31 +46,38 @@ Alvás ezen az ágon nincs: az eszköz végig figyel.
 Ha a router pingre sosem válaszol, a szolgáltatói kiesés is 2 perc után kap
 resetet; reset-hurok ebből sem lesz, mert a lépcső ritkítja.
 
-**A router DNS-e:** ha a ping megy, 15 percenként egy névfeloldás közvetlenül a
-routernél. Ha a router DNS-e 15 percig hallgat, miközben egy külső DNS
+**A router DNS-e:** ha a ping megy, 5 percenként egy névfeloldás közvetlenül a
+routernél. Ha a router DNS-e 10 percig hallgat, miközben egy külső DNS
 (`1.1.1.1`) válaszol, reset. Ha a külső sem válaszol, nincs reset.
 
 ## Ha nincs Wi-Fi
 
 - 3 csatlakozási próba, köztük 30 mp.
 - Rossz jelszó → beállító mód (AP), router reset nélkül.
-- A hálózat nem látszik → router reset, majd 1 óra alvás és új kör; kb.
-  46 óra után beállító mód.
+- Ha így sem jön vissza: **előbb az ESP indul újra** (a router érintetlen), és
+  ha az sem segít, **router reset** (22:00–05:00 között legalább 10 perc
+  kiesés után). Utána egyre ritkábban: 30 perc → 1 óra →
+  2 óra → 4 óránként. Közben percenként próbálkozik, alvás nincs.
+- 48 óra Wi-Fi nélkül → beállító mód. A resetek ugyanazon a lépcsőn lépnek, mint
+  az internetnél; az ESP-újraindítás csak 30 perc stabil kapcsolat után jöhet újra.
+- Áramszünet után 10 perc türelmi idő (a router lassabban bootol), az
+  ESP-újraindítás ott kimarad.
 
 ## Napló
 
+- Normál üzemben: `http://<az eszköz IP-je>/` – csak olvasható állapotoldal
+  (lépcsők, resetek, utolsó 20 esemény), csak a helyi hálózatról.
 - Soros porton: `LOG` (vagy `/log`) – a teljes eseménynapló.
 - Beállító módban: a `192.168.4.1/log` oldal.
 - A legfontosabb bejegyzések: `TEST FAIL` + `HTTP ERROR` (a kiesés kezdete),
   `NET DIAG` (1 = a router sem válaszolt, 2 = szolgáltatói hiba,
   3 = a router DNS-e hallgatott),
-  `ROUTER RESET` (hányadik ebben a kiesésben).
+  `ROUTER RESET` (hányadik ebben a kiesésben), `WIFI RESTART` (az ESP a Wi-Fi
+  miatt indult újra).
 
 ## Tovább
 
 | Dokumentum | Miről szól |
 |---|---|
-| [README.md](README.md) | telepítés, hardver, részletes működés |
-| [MUKODES.md](MUKODES.md) | minden időzítés és döntés táblázatban |
-| [FOLYAMATABRA.md](FOLYAMATABRA.md) | folyamatábrák |
+| [MUKODES.md](MUKODES.md) | a teljes leírás: minden időzítés és döntés, hardver, telepítés, biztonság, folyamatábrák |
 | [test/README.md](test/README.md) | a tesztkészlet |
