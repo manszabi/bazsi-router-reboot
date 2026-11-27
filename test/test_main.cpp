@@ -1233,11 +1233,34 @@ static void scX2() {
   AsyncWebServerRequest req;
   req.addParam("ssid", "NyiltHalozat");
   req.addParam("pass", "");
+  req.addParam("open", "1");
   req.addParam("ip", ""); req.addParam("gateway", "");
   g_handlers["/#2"](&req);
-  CHECK(req._code == 200, "üres jelszó elfogadva (nyílt hálózat)");
+  CHECK(req._code == 200, "üres jelszó + nyílt hálózat jelölő elfogadva");
   CHECK(g_fs["/ssid.txt"] == "NyiltHalozat", "SSID mentve");
   CHECK(g_fs.count("/pass.txt") && storedPass().empty(), "üres jelszó mentve");
+}
+
+static void scX2b() {
+  // Az üres jelszómező a mentett jelszót megtartja; nyílt hálózat jelszóval: hiba.
+  coldBoot(false, "", "", "", "");
+  setup();
+  CHECK(postConfig("Otthon", "TitkosJelszo1", "", "") == 200, "első mentés jelszóval");
+  clearRestartRequest();
+  const std::string elotte = g_fs["/pass.txt"];
+  CHECK(postConfig("Otthon", "", "", "") == 200, "újramentés üres jelszómezővel");
+  CHECK(g_fs["/pass.txt"] == elotte && storedPass() == "TitkosJelszo1", "a mentett jelszó megmaradt");
+  clearRestartRequest();
+  AsyncWebServerRequest req;
+  req.addParam("ssid", "Otthon"); req.addParam("pass", "valami"); req.addParam("open", "1");
+  g_handlers["/#2"](&req);
+  CHECK(req._code == 500 && req._body.find("Nyilt halozathoz hagyd uresen") != std::string::npos,
+        "nyílt hálózat + jelszó: 500, magyarázattal");
+  CHECK(storedPass() == "TitkosJelszo1", "és nem írt semmit");
+  AsyncWebServerRequest req2;
+  req2.addParam("ssid", "Otthon"); req2.addParam("open", "2");
+  g_handlers["/#2"](&req2);
+  CHECK(req2._code == 500, "hibás nyílt-hálózat érték: 500");
 }
 
 static void scX3() {
@@ -7722,7 +7745,7 @@ static void scOA2() {
   coldBoot(true, "TestNet", "pw", "", "");
   g_fs["/outageap.txt"] = ""; g_fsDirs.insert("/outageap.txt");
   setup();
-  CHECK(deviceMode == (DeviceMode)2, "olvashatatlan kapcsolo-fajl: MODE_FATAL, mint a tobbi beallitasnal");
+  CHECK(deviceMode != (DeviceMode)2 && !outageApEnabled, "olvashatatlan kapcsolo-fajl: ki, nem vegzetes hiba");
   g_fsDirs.erase("/outageap.txt");
 }
 
@@ -7802,6 +7825,19 @@ static void scOA7() {
   CHECK(outageApActive(), "a kovetkezo hivas ujra megprobalja, es most sikerul");
 }
 
+static void scST7() {
+  // A sajat halozatrol nezve kieses kozben: Wi-Fi "nincs kapcsolat, N perce"; DNS-reset utan az Internet sor 0 resetet mutat.
+  wflIndit();
+  g_fs["/outageap.txt"] = "1"; outageApEnabled = true;
+  futtatUjraindulassal(10u * 60 * 1000, false, [] { return outageApActive() && relayPulses() > 0; });
+  std::string b = allapotLap(IPAddress(192, 168, 4, 2));
+  CHECK(b.find("<td>Wi-Fi</td><td><b>nincs kapcsolat, ") != std::string::npos, "kieses kozben: nincs kapcsolat, N perce");
+  ftIndit();
+  testState.resetEvents = 1; testState.outage = false;  // egy DNS-reset utan, az internet el
+  b = allapotLap(IPAddress(192, 168, 1, 50));
+  CHECK(b.find("<td>Internet</td><td>rendben</td><td>0</td>") != std::string::npos, "az Internet sor: rendben, 0 reset");
+}
+
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
   { "W2: sikeres csatlakozás -> monitor mód, DHCP (nincs statikus IP)", sc1 },
@@ -7875,7 +7911,8 @@ static const Scenario kScenarios[] = {
   { "CPU1: a loop() a várakozó állapotokban nem pörgeti a CPU-t", scCPU1 },
   { "CPU2: a first start várakozás sem pörget", scCPU2 },
   { "X1: reset gomb a relé pulzus közben -> a router visszakapja az áramot", scX1 },
-  { "X2: nyílt hálózat (üres jelszó)", scX2 },
+  { "X2: nyílt hálózat (üres jelszó + jelölő)", scX2 },
+  { "X2b: az üres jelszómező a mentett jelszót megtartja", scX2b },
   { "X3: SSID/jelszó pontos határértékei", scX3 },
   { "X4: fél-konfigurált statikus IP -> DHCP", scX4 },
   { "X5: csak whitespace a konfig fájlban", scX5 },
@@ -8186,12 +8223,13 @@ static const Scenario kScenarios[] = {
   { "ST6: allapotoldal: a Wi-Fi kiesese es visszajotte", scST6 },
   { "QH8: hidegindulasnal ejjel a Wi-Fi miatti reset is var", scQH8 },
   { "OA1: kieses-AP kapcsolo az urlapon: mentes, visszaolvasas, hibas ertek", scOA1 },
-  { "OA2: kieses-AP kapcsolo induláskor; olvashatatlan fajl: FATAL", scOA2 },
+  { "OA2: kieses-AP kapcsolo induláskor; olvashatatlan fajl: ki", scOA2 },
   { "OA3: kikapcsolva a kieses alatt nincs AP", scOA3 },
   { "OA4: bekapcsolva: kieses alatt AP+STA es allapotoldal, a lepcso valtozatlan", scOA4 },
   { "OA5: a beallito AP mod atveszi a radiot", scOA5 },
   { "OA6: hidegindulas halott routerrel: a turelmi ido utan AP", scOA6 },
   { "OA7: ha a sajat halozat nem indul el, a lepcso fut tovabb", scOA7 },
+  { "ST7: allapotoldal: Wi-Fi kieses kozben a sajat halozatrol; Internet sor DNS-reset utan", scST7 },
   { "QH1: a csendes idoszak hatarai (22:00-05:00, CET es CEST)", scQH1 },
   { "QH2: ejjel a router sem valaszol: reset 10 perc utan", scQH2 },
   { "QH3: 8 perces router-kieses: ejjel nincs reset, nappal van", scQH3 },

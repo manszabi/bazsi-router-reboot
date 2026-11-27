@@ -346,12 +346,13 @@ hálózat mindkét esetben ugyanúgy eltűnik.
 | Portál elérhető: `192.168.4.1` | |
 | Jelzés: **Wi-Fi LED villog 1 Hz**, státusz LED végig **be** | azonnal |
 | Az űrlap előkitöltése | SSID, IP, gateway a mentett értékkel (HTML-escape-elve), a kiesés-AP kapcsoló a mentett állással; **a jelszó soha** |
-| Kiesés-AP kapcsoló | jelölőnégyzet: „Wi-Fi-kiesés alatt saját hálózat az állapotoldallal”, **alapból ki**; `/outageap.txt` (`"1"`/`"0"`), a wifireset gomb nem törli; csak `0` vagy `1` fogadható el (`OA1`) |
+| Kiesés-AP kapcsoló | jelölőnégyzet: „Wi-Fi-kiesés alatt saját hálózat az állapotoldallal”, **alapból ki**; `/outageap.txt` (`"1"`/`"0"`), a wifireset gomb nem törli; csak `0` vagy `1` fogadható el (`OA1`); olvashatatlan fájlnál egyszerűen ki, nem végzetes hiba (`OA2`) |
 | A beállító űrlap forrása | a programba fordítva (`FORM_HEAD` / `FORM_TAIL` + `sendConfigForm()`), nincs feltöltendő `data/` mappa – a portál a LittleFS-ről semmit nem szolgál ki |
 | Tétlenség után deep sleep | **5 perc** (`AP_TIMEOUT_MS`) az utolsó kéréstől |
 | A nyitva lévő lap keep-alive-ja | **60 mp**-enként `GET /ping` (1 bájt válasz) |
 | Elfogadott IP / gateway | **csak IPv4**, nem `0.0.0.0`, és csak együtt |
-| SSID / jelszó | mentéskor a szélső szóközök levágódnak |
+| SSID / jelszó | mentéskor a szélső szóközök levágódnak; **az üres jelszómező a mentett jelszót megtartja**, üres jelszót csak a „Nyílt hálózat” jelölő ment (jelszóval együtt bejelölve: hiba) (`X2`, `X2b`) |
+| Az oldalak nyelve | magyar (ékezet nélkül): űrlap, gomb („Mentes”), mentés utáni és hibaüzenetek, 404 |
 | A jelszó tárolása | összekeverve (`v1:` + hexa), az eFuse MAC-hez kötve |
 | Az alvásból ébredés | **csak a reset gombbal** – időzített ébresztés nincs |
 
@@ -439,7 +440,7 @@ A visszaolvasás azért kell, mert a `File::close()` és a `File::flush()` is
 `void` a core-ban – a lezáráskor jelentkező hibát másképp nem lehetne észlelni.
 
 A beállító oldalról mentés hibája korábban a legkellemetlenebb módon jelent
-volna meg: az eszköz „Done"-t válaszol, újraindul, és mivel nem mentett semmit,
+volna meg: az eszköz sikert válaszol, újraindul, és mivel nem mentett semmit,
 ismét AP módban jön fel – a felhasználó pedig végtelen körben próbálkozik
 magyarázat nélkül. Most a hibát megkapja, és az eszköz nem indul újra, tehát a
 beírt adatok sem vesznek el.
@@ -1113,9 +1114,9 @@ Minden bejegyzés uptime bélyeget, egy eseménykódot és egy paramétert tarta
 | Esemény | A paraméter jelentése |
 |---|---|
 | `BOOT` | az indulás oka (`esp_reset_reason()`) |
-| `WIFI OK` | a Wi-Fi-lépcső foka csatlakozáskor: 0 = nem volt kiesés, 1 = az ESP újraindítása segített |
+| `WIFI OK` | a Wi-Fi-lépcső foka csatlakozáskor – induláskor és **minden naplózott kiesés után, a visszatéréskor**: 0 = nem volt kiesés (vagy még az ESP-újraindítás előtt jött vissza), 1 = az ESP újraindítása segített, 2+ = N-1 router reset után |
 | `WIFI RESTART` | az ESP a Wi-Fi miatt indult újra; a param a `WiFi.status()` értéke |
-| `WIFI LOST` | `WiFi.status()` a kiesés pillanatában (csak a kiesés-sorozat **első** tagja) |
+| `WIFI LOST` | `WiFi.status()` a kiesés pillanatában (kiesésenként **egyszer**; induláskor is, ha az első csatlakozás nem sikerül) |
 | `TEST FAIL` | a kiesés kezdete (kiesésenként **egyszer**); a param a bukott tartalék HTTP teszt sorszáma, 1–5 |
 | `HTTP ERROR` | a tartalék HTTP teszt kódja, közvetlenül a `TEST FAIL` után: 200/204/403/5xx változatlan (200 = jött válasz, de nem a várt szöveg); kliens hibánál 1000 + \|kód\|: **1001** = nem sikerült kapcsolódni vagy a nevet feloldani, **1011** = nem jött válasz időben, **1100** = a kérés el sem indult |
 | `NET DIAG` | a router reset oka, közvetlenül a reset előtt: 1 = a router sem válaszol (vagy nincs Wi-Fi / gateway), 2 = a router válaszol, az internet nem, 3 = az internet él, de a router DNS-e 10 perce hallgat |
@@ -1221,7 +1222,7 @@ portot.
 | Mit mutat | Honnan |
 |---|---|
 | uptime, az utolsó indulás oka, szabad heap | a futó rendszer |
-| internet és a router DNS-e: rendben / hiba N perce, és a resetek száma ebben a hibában; Wi-Fi: rendben / nemrég kiesett (Wi-Fi nélkül az oldal el sem érhető) | a lépcsők (`diagCounters()`) |
+| internet és a router DNS-e: rendben / hiba N perce, és a resetek száma ebben a hibában (hiba nélkül 0); Wi-Fi: rendben / rendben, de nemrég kiesett / nincs kapcsolat N perce (ez utóbbi csak a kiesés alatti saját hálózatról látszik) | a lépcsők (`diagCounters()`) |
 | fut-e épp router reset; watchdog- és heap-újraindulások | számlálók |
 | az utolsó **20** esemény | az RTC napló (fájlt nem olvas) |
 
@@ -1430,7 +1431,7 @@ veszítenénk el – azt, ami a diagnózishoz kell. Három helyen van ilyen szű
 |---|---|
 | `TEST FAIL` | csak a kiesés első hibás ellenőrzésénél (`testState.outage`) |
 | `STUCK BUTTON` | `stuckCycleAlreadyLogged` jelző |
-| `WIFI LOST` | `lastEventWas(EV_WIFI_LOST)` – ha az előző bejegyzés is ez volt, kimarad |
+| `WIFI LOST` | `wifiDownLogged` jelző – kiesésenként egy bejegyzés; a visszatérés `WIFI OK`-t kap, ezért a következő kiesés is látszik |
 | `LOW HEAP` | **kettős**: a `heapWarnActive` jelző a soros sort ritkítja (10% hiszterézissel), a naplóba pedig a `lastEventWas(EV_LOW_HEAP)` enged csak egyet |
 
 > A `LOW HEAP` eredetileg **csak** a `heapWarnActive` jelzőn lovagolt, tehát
@@ -2087,7 +2088,7 @@ flowchart TD
     LOCK -->|"foglalt (wifireset töröl)"| E503["503: próbáld újra<br>egy pillanat múlva"]
     LOCK -->|ok| SAVE["2. FÁZIS - commit:<br>globálisok + fájlok írása<br>visszaolvasó ellenőrzéssel<br>(jelszó: v1 + XOR-hexa kódolás)<br>savingConfig = false"]
     SAVE -->|"írási hiba"| E500W["500: LittleFS írási hiba<br>NINCS újraindítás"]
-    SAVE -->|ok| R200["200: Done. ESP will restart...<br>restartPending = true"]
+    SAVE -->|ok| R200["200: Mentve. Az ESP ujraindul...<br>restartPending = true"]
     R200 --> DEF["A loop 2 s türelmi idő után<br>(esetleges 2. mentést megvárva)<br>ESP.restart()"]
 ```
 
@@ -2102,7 +2103,7 @@ sequenceDiagram
     W->>W: savingConfig = true
     W->>W: validálás + 4 fájl írása és visszaolvasása
     W->>W: savingConfig = false
-    W-->>B: 200 "Done. ESP will restart..."
+    W-->>B: 200 "Mentve. Az ESP ujraindul..."
     W->>L: restartPending = true, restartAt = most + 2 s
     Note over L: savingConfig alatt tilos: gombkezelés,<br>alvás, újraindítás (sérült konfig ellen)
     L->>L: 2 s türelmi idő (dupla mentés beérhet)

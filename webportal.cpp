@@ -31,6 +31,7 @@ static_assert(SECRET_ENC_MAX >= SECRET_PREFIX_LEN + 2 * (sizeof(ConfigDraft::pas
   char gateway[IPSTR_MAX_LEN + 1]  = { 0 };
   bool outageAp     = false;
   bool outageApSet  = false;
+  bool openNet      = false;
   bool ssidProvided = false;
   bool passSet      = false;
   bool ipSet        = false;
@@ -54,6 +55,7 @@ const char PARAM_PASS[]    = "pass";
 const char PARAM_IP[]      = "ip";
 const char PARAM_GATEWAY[] = "gateway";
 const char PARAM_OUTAGE_AP[] = "outageap";
+const char PARAM_OPEN[] = "open";
 
 #define KEEPALIVE_JS_LIT \
   "<script>f=()=>fetch('/ping?'+Date.now());setInterval(f,6e4);" \
@@ -63,13 +65,13 @@ const char KEEPALIVE_JS[] = KEEPALIVE_JS_LIT;
 const char FORM_HEAD[] =
   "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
   "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-  "<title>ESP Wi-Fi Manager</title></head><body>"
-  "<h2>ESP Wi-Fi Manager</h2>"
+  "<title>ESP Wi-Fi beallitas</title></head><body>"
+  "<h2>ESP Wi-Fi beallitas</h2>"
   "<form action=\"/\" method=\"POST\">";
 const char FORM_TAIL[] =
   "<small>Statikus IP-hez mindket cimmezot toltsd ki, csak IPv4. "
   "DHCP-hez hagyd mindkettot uresen.</small><br>"
-  "<input type=\"submit\" value=\"Submit\"></form>"
+  "<input type=\"submit\" value=\"Mentes\"></form>"
   "<p><a href=\"/log\">Diagnosztikai naplo</a></p>"
   KEEPALIVE_JS_LIT
   "</body></html>";
@@ -155,14 +157,16 @@ static void sendConfigForm(AsyncWebServerRequest* request) {
   printHtmlEscaped(r, ssid);
   r->print(F("\"><br>"));
 
-  r->print(F("Password <input name=\"pass\" type=\"password\" maxlength=\"63\">"
-             " <small>(ures = nyilt halozat)</small><br>"));
+  r->print(F("Jelszo <input name=\"pass\" type=\"password\" maxlength=\"63\">"
+             " <small>(uresen hagyva a mentett jelszo marad)</small><br>"
+             "<label><input type=\"checkbox\" name=\"open\" value=\"1\"> Nyilt halozat "
+             "(jelszo nelkul)</label><br>"));
 
-  r->print(F("IP <input name=\"ip\" maxlength=\"15\" placeholder=\"opcionalis\" value=\""));
+  r->print(F("IP cim <input name=\"ip\" maxlength=\"15\" placeholder=\"opcionalis\" value=\""));
   printHtmlEscaped(r, ipStr);
   r->print(F("\"><br>"));
 
-  r->print(F("Gateway <input name=\"gateway\" maxlength=\"15\" placeholder=\"opcionalis\" value=\""));
+  r->print(F("Atjaro (gateway) <input name=\"gateway\" maxlength=\"15\" placeholder=\"opcionalis\" value=\""));
   printHtmlEscaped(r, gatewayStr);
   r->print(F("\"><br>"));
 
@@ -242,6 +246,13 @@ static bool parseConfigPost(AsyncWebServerRequest* request, ConfigDraft& d,
         saveOk = false;
         if (failReason == nullptr) failReason = "Ervenytelen IP cim (csak IPv4, nem 0.0.0.0).";
       }
+    } else if (name == PARAM_OPEN) {
+      if (val == "1") {
+        d.openNet = true;
+      } else {
+        saveOk = false;
+        if (failReason == nullptr) failReason = "Ervenytelen kapcsolo-ertek (nyilt halozat).";
+      }
     } else if (name == PARAM_OUTAGE_AP) {
       if (val == "0" || val == "1") {
         d.outageApSet = true;
@@ -274,6 +285,19 @@ static bool parseConfigPost(AsyncWebServerRequest* request, ConfigDraft& d,
     } else if (name == PARAM_SSID || name == PARAM_IP || name == PARAM_GATEWAY) {
       Serial.printf("POST[%s]: %.64s\n", name.c_str(), val.c_str());
     }
+  }
+
+  // Az ures jelszomezo a mentett jelszot hagyja meg; ures jelszot csak a kifejezett nyilt halozat ment.
+  if (d.openNet) {
+    if (d.passSet && d.pass[0] != '\0') {
+      saveOk = false;
+      if (failReason == nullptr) failReason = "Nyilt halozathoz hagyd uresen a jelszot.";
+    } else {
+      d.pass[0] = '\0';
+      d.passSet = encodeSecret(d.pass, d.passEnc, sizeof(d.passEnc));
+    }
+  } else if (d.passSet && d.pass[0] == '\0') {
+    d.passSet = false;
   }
 
   if (!d.ssidProvided) {
@@ -400,10 +424,10 @@ static void handleConfigPost(AsyncWebServerRequest* request) {
   char message[96];
   if (ipStr[0] != '\0') {
     snprintf(message, sizeof(message),
-             "Done. ESP will restart. Then go to IP address: %s", ipStr);
+             "Mentve. Az ESP ujraindul, utana a %s cimen erheto el.", ipStr);
   } else {
     snprintf(message, sizeof(message),
-             "Done. ESP will restart and connect to your router (DHCP).");
+             "Mentve. Az ESP ujraindul, es DHCP-vel csatlakozik a routerhez.");
   }
   request->send(200, "text/plain", message);
 
@@ -525,7 +549,7 @@ static void sendDiagnosticLog(AsyncWebServerRequest* request) {
   r->print(F("<h3>Param jelentese</h3><ul>"
              "<li>BOOT: az indulas oka (lasd fent)</li>"
              "<li>WIFI OK: a Wi-Fi lepcso foka csatlakozaskor (0 = nem volt kieses, "
-             "1 = az ESP ujrainditasa segitett)</li>"
+             "1 = az ESP ujrainditasa segitett, 2 vagy tobb = N-1 router reset utan)</li>"
              "<li>WIFI LOST: a WiFi.status() erteke</li>"
              "<li>TEST FAIL: kieses kezdete; a bukott tartalek HTTP teszt sorszama (1-5)</li>"
              "<li>ROUTER RESET: hanyadik ujrainditas ebben a kiesesben</li>"
@@ -616,12 +640,22 @@ static void sendStatusPage(AsyncWebServerRequest* request) {
             resetReasonName(rr), (int)rr, (unsigned)ESP.getFreeHeap());
   r->print(F("<table border=1 cellpadding=4><tr><th>Mit</th><th>Allapot</th>"
              "<th>Resetek ebben a hibaban</th></tr>"));
-  printYesNoMin(r, "Internet", dc.netOutage, dc.netOutageMin, dc.netResets, "rendben");
+  printYesNoMin(r, "Internet", dc.netOutage, dc.netOutageMin, dc.netOutage ? dc.netResets : 0, "rendben");
   printYesNoMin(r, "A router DNS-e", dc.dnsSuspect, dc.dnsSuspectMin, dc.dnsResets, "rendben");
-  // Wi-Fi nélkül az oldal el sem érhető, ezért itt csak a nemrég lezajlott kiesés látszik.
-  r->printf("<tr><td>Wi-Fi</td><td>%s</td><td>-</td></tr>",
-            dc.wifiStep > 0 ? "rendben (nemreg kiesett, a lepcso 30 perc stabil kapcsolat utan nullazodik)"
-                            : "rendben");
+  // Kieses kozben az oldal csak a sajat halozatrol erheto el; utana meg 30 percig jelzi a lezajlott kiesest.
+  r->print(F("<tr><td>Wi-Fi</td><td>"));
+  if (!dc.wifiUp) {
+    if (dc.wifiStep > 0) {
+      r->printf("<b>nincs kapcsolat, %u perce</b>", (unsigned)dc.wifiOutageMin);
+    } else {
+      r->print(F("<b>nincs kapcsolat</b>"));
+    }
+  } else if (dc.wifiStep > 0) {
+    r->print(F("rendben (nemreg kiesett, a lepcso 30 perc stabil kapcsolat utan nullazodik)"));
+  } else {
+    r->print(F("rendben"));
+  }
+  r->print(F("</td><td>-</td></tr>"));
   r->print(F("</table>"));
   r->printf("<p><b>Router reset most:</b> %s<br><b>Watchdog ujraindulasok:</b> %u / %u<br>"
             "<b>Heap miatti ujraindulasok:</b> %u</p>",
@@ -650,7 +684,7 @@ void startStatusPage() {
   if (!statusHandlersSet) {
     statusServer.on("/", HTTP_GET, [](AsyncWebServerRequest* request) { sendStatusPage(request); });
     statusServer.onNotFound([](AsyncWebServerRequest* request) {
-      request->send(404, "text/plain", "Not found");
+      request->send(404, "text/plain", "Nem talalhato");
     });
     statusHandlersSet = true;
   }
@@ -739,7 +773,7 @@ void startWebPortal() {
 
   server.onNotFound([](AsyncWebServerRequest* request) {
     touchApDeadline();
-    request->send(404, "text/plain", "Not found");
+    request->send(404, "text/plain", "Nem talalhato");
   });
 
   server.on("/", HTTP_POST, [](AsyncWebServerRequest* request) {
