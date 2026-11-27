@@ -7333,6 +7333,26 @@ static void scWFL8() {
   CHECK(serialHas("Wi-Fi lepcso folytatodik"), "a soros porton is latszik");
 }
 
+
+static void scWFL9() {
+  // A kieses nullazza a stabil kapcsolat orajat: a lepcso csak 30 perc UJ stabil kapcsolat utan torlodik.
+  wflIndit();
+  futtat(10u * 60 * 1000, [] { return false; });
+  softReboot(true);
+  futtat(10u * 60 * 1000, [] { return false; });
+  wifiSim.willConnect = false; wifiSim.begun = false;
+  futtat(15u * 60 * 1000, [] { return relayPulses() > 0; });
+  CHECK(relayPulses() == 1 && rtcWifiStep == 2, "masodik kieses: router reset, 2. fok");
+  wifiSim.willConnect = true; wifiSim.begun = false;
+  g_serialLog.clear();
+  futtat(15u * 60 * 1000, [] { return serialHas("Successful Test"); });
+  CHECK(serialHas("Successful Test"), "a reset utan visszajott");
+  futtat(25u * 60 * 1000, [] { return false; });
+  CHECK(rtcWifiStep == 2, "25 perc uj stabil kapcsolat utan meg nem torlodik");
+  futtat(10u * 60 * 1000, [] { return rtcWifiStep == 0; });
+  CHECK(rtcWifiStep == 0, "30 perc utan igen");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -7693,6 +7713,7 @@ static const Scenario kScenarios[] = {
   { "WFL6: rossz jelszo a lepcso kozben: AP mod", scWFL6 },
   { "WFL7: aramszunet torli a lepcsot, hidegindulasnal nincs ujrainditas", scWFL7 },
   { "WFL8: heap-ujraindulas: a lepcso es a kieses hossza atjon", scWFL8 },
+  { "WFL9: a kieses nullazza a stabil kapcsolat orajat", scWFL9 },
   { "DN1: a router DNS-e hallgat, a ping megy: reset legkesobb ~31 perc", scDN1 },
   { "DN2: a kulso DNS is hallgat: nincs reset", scDN2 },
   { "DN3: 9 perces DNS-zavar: nincs reset", scDN3 },
