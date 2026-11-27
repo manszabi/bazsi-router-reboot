@@ -6997,19 +6997,19 @@ static FtPerc dnsPerc(bool router, bool kulso) {
 }
 
 static void scDN1() {
-  // A router DNS-e lefagy, a ping es a kulso DNS megy: reset legkesobb ~31 perc mulva.
+  // A router DNS-e lefagy, a ping es a kulso DNS megy: reset legkesobb ~16 perc mulva.
   ftIndit();
-  auto r = ftJatszik(45, [](uint32_t) { return dnsPerc(false, true); });
+  auto r = ftJatszik(40, [](uint32_t) { return dnsPerc(false, true); });
   ftKiir("a router DNS-e hallgat", r);
   CHECK(r.size() == 1, "egy reset");
-  CHECK(r.size() == 1 && r[0] >= 15.0 && r[0] <= 32.0, "15 perc folyamatos hiba utan, legkesobb ~31 percnel");
+  CHECK(r.size() == 1 && r[0] >= 10.0 && r[0] <= 17.0, "10 perc folyamatos hiba utan, legkesobb ~16 percnel");
   CHECK(evCount(EVC_NET_DIAG, 3) == 1, "NET DIAG 3 (a router DNS-e)");
-  CHECK(dnsState.lastResetAt - dnsState.suspectSince >= 15u * 60 * 1000,
-        "a reset legalabb 15 perccel a gyanu kezdete utan jott");
+  CHECK(dnsState.lastResetAt - dnsState.suspectSince >= 10u * 60 * 1000,
+        "a reset legalabb 10 perccel a gyanu kezdete utan jott");
   const int routerKerdes = (int)std::count(dnsSim.servers.begin(), dnsSim.servers.end(),
                                            std::string("192.168.1.1"));
   printf("     [info] %d kerdes a router DNS-ehez\n", routerKerdes);
-  CHECK(routerKerdes >= 20, "a gyanu alatt percenkent kerdez (15 perc x 2 proba)");
+  CHECK(routerKerdes >= 20, "a gyanu alatt percenkent kerdez (10 perc x 2 proba)");
   CHECK(serialHas("a kulso DNS valaszol"), "a soros porton kimondja");
 }
 
@@ -7123,9 +7123,9 @@ static void scDN9() {
   auto r = ftJatszik(150, [](uint32_t p) { return dnsPerc(!((p < 40) || (p >= 90 && p < 130)), true); });
   ftKiir("ket kulon DNS-hiba", r);
   CHECK(r.size() == 2, "ket hiba: ket reset");
-  CHECK(r.size() == 2 && r[1] - 90.0 <= 32.0, "a masodik is az elso ablakkal (nem 30 perces lepcso)");
-  CHECK(dnsState.lastResetAt - dnsState.suspectSince >= 15u * 60 * 1000,
-        "a gyogyulas nullazta a lepcsot: ujra kivarja a 15 percet");
+  CHECK(r.size() == 2 && r[1] - 90.0 <= 17.0, "a masodik is az elso ablakkal (nem 30 perces lepcso)");
+  CHECK(dnsState.lastResetAt - dnsState.suspectSince >= 10u * 60 * 1000,
+        "a gyogyulas nullazta a lepcsot: ujra kivarja a 10 percet");
 }
 
 static void scDN10() {
@@ -7144,12 +7144,12 @@ static void scDN10() {
 }
 
 static void scDN11() {
-  // Normal uzemben 15 percenkent egy router-DNS kerdes, nem percenkent.
+  // Normal uzemben 5 percenkent egy router-DNS kerdes, nem percenkent.
   ftIndit();
   dnsSim = DnsSim();
   ftJatszik(120, [](uint32_t) { return dnsPerc(true, true); });
   printf("     [info] 2 ora alatt %d DNS kerdes\n", dnsSim.queries);
-  CHECK(dnsSim.queries >= 7 && dnsSim.queries <= 9, "kb. 15 percenkent egy");
+  CHECK(dnsSim.queries >= 23 && dnsSim.queries <= 25, "kb. 5 percenkent egy");
 }
 
 static void scDN12() {
@@ -7735,7 +7735,7 @@ static const Scenario kScenarios[] = {
   { "WFL8: heap-ujraindulas: a lepcso es a kieses hossza atjon", scWFL8 },
   { "WFL9: a kieses nullazza a stabil kapcsolat orajat", scWFL9 },
   { "WFL10: a wifireset, a mentes utani ujraindulas es az alvas torli a lepcsot", scWFL10 },
-  { "DN1: a router DNS-e hallgat, a ping megy: reset legkesobb ~31 perc", scDN1 },
+  { "DN1: a router DNS-e hallgat, a ping megy: reset legkesobb ~16 perc", scDN1 },
   { "DN2: a kulso DNS is hallgat: nincs reset", scDN2 },
   { "DN3: 9 perces DNS-zavar: nincs reset", scDN3 },
   { "DN4: a 11-22-i nap DNS-zavarral: nulla reset", scDN4 },
@@ -7745,7 +7745,7 @@ static const Scenario kScenarios[] = {
   { "DN8: a kerdes formatuma es a hibas nevek", scDN8 },
   { "DN9: gyogyulas utan a DNS-lepcso elolrol indul", scDN9 },
   { "DN10: statikus IP: a gateway a router DNS-e, kontroll az 1.1.1.1", scDN10 },
-  { "DN11: normal uzemben 15 percenkent egy kerdes", scDN11 },
+  { "DN11: normal uzemben 5 percenkent egy kerdes", scDN11 },
   { "DN12: ping nelkul a DNS-ellenorzes szunetel", scDN12 },
 
   { "APP1: az elso portal-inditas egyedi, eros AP jelszot general", scAPP1 },

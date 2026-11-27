@@ -46,8 +46,8 @@ Alvás ezen az ágon nincs: az eszköz végig figyel.
 Ha a router pingre sosem válaszol, a szolgáltatói kiesés is 2 perc után kap
 resetet; reset-hurok ebből sem lesz, mert a lépcső ritkítja.
 
-**A router DNS-e:** ha a ping megy, 15 percenként egy névfeloldás közvetlenül a
-routernél. Ha a router DNS-e 15 percig hallgat, miközben egy külső DNS
+**A router DNS-e:** ha a ping megy, 5 percenként egy névfeloldás közvetlenül a
+routernél. Ha a router DNS-e 10 percig hallgat, miközben egy külső DNS
 (`1.1.1.1`) válaszol, reset. Ha a külső sem válaszol, nincs reset.
 
 ## Ha nincs Wi-Fi

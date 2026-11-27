@@ -169,7 +169,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    IN([a ping szerint van internet]) --> DUE{"esedékes?<br>15 percenként, gyanúnál percenként"}
+    IN([a ping szerint van internet]) --> DUE{"esedékes?<br>5 percenként, gyanúnál percenként"}
     DUE -->|nem| NO([nincs reset])
     DUE -->|igen| ISR{"a DNS szerver<br>a router (gateway)?"}
     ISR -->|nem| SKIP["kimarad (egyszer kiírja)"] --> NO
@@ -178,7 +178,7 @@ flowchart TD
     Q1 -->|"hallgat / hibás válasz"| Q2{"testDnsServer(1.1.1.1)<br>kontroll"}
     Q2 -->|hallgat| NOTR["nem a router hibája"] --> NO
     Q2 -->|válaszol| SUS["gyanú (kezdete rögzítve)"]
-    SUS --> WIN{"letelt?<br>1. reset: 15 perc folyamatos gyanú<br>utána: 30 → 60 → 120 → 240 perc"}
+    SUS --> WIN{"letelt?<br>1. reset: 10 perc folyamatos gyanú<br>utána: 30 → 60 → 120 → 240 perc"}
     WIN -->|nem| NO
     WIN -->|igen| RST["dnsState.resetEvents++<br>startRouterReset(NET DIAG 3)"]
 ```

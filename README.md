@@ -8,7 +8,7 @@ ESP32-C3 alapú automatikus router újraindító rendszer. Az eszköz folyamatos
 
 - **Internetfigyelés percenként** – ping az `1.1.1.1`-re és a `8.8.8.8`-ra, tartalékként HTTP teszt öt üzemeltető felé
 - **Automatikus router újraindítás** – relével áramtalanítja a routert, ha 2 percig (a router sem válaszol) vagy 15 percig (szolgáltatói hiba) nincs internet; sikertelen reset után egyre ritkábban
-- **A router DNS-ének figyelése** – 15 percenként egy közvetlen DNS-kérdés; ha a router DNS-e 15 percig hallgat, miközben egy külső DNS válaszol, reset
+- **A router DNS-ének figyelése** – 5 percenként egy közvetlen DNS-kérdés; ha a router DNS-e 10 percig hallgat, miközben egy külső DNS válaszol, reset
 - **Wi-Fi Manager** – böngészőből konfigurálható SSID, jelszó, IP-cím és gateway
 - **Beépített beállító weboldal** – a programba fordítva, nincs feltöltendő fájlrendszer-tartalom
 - **LittleFS** – a beállítások áramszünet után is megmaradnak
@@ -214,15 +214,15 @@ viszont nem nyílik meg semmi. Ezt egy külön, ritka ellenőrzés fogja meg:
 
 | Lépés | Mit csinál |
 |---|---|
-| 15 percenként, ha a ping megy | egy DNS-kérdés (`connectivitycheck.gstatic.com`) **közvetlenül a router 53-as portjára** – 2 próba, 3 mp várakozással |
+| 5 percenként, ha a ping megy | egy DNS-kérdés (`connectivitycheck.gstatic.com`) **közvetlenül a router 53-as portjára** – 2 próba, 3 mp várakozással |
 | a router DNS-e nem válaszol | kontrollkérdés az `1.1.1.1` DNS-ének |
 | a router hallgat, az `1.1.1.1` válaszol | gyanú: innentől percenként újra kérdez |
-| a gyanú **15 percig** megszakítás nélkül tart | router reset (`NET DIAG` 3); ha nem segít, 30 perc → 1 óra → 2 óra → 4 óra |
+| a gyanú **10 percig** megszakítás nélkül tart | router reset (`NET DIAG` 3); ha nem segít, 30 perc → 1 óra → 2 óra → 4 óra |
 
 Nincs reset, ha az `1.1.1.1` sem válaszol (valószínűleg a szolgáltató szűri a
-DNS-t), ha a DHCP nem a routert adja DNS-nek, vagy ha a zavar 15 percnél
+DNS-t), ha a DHCP nem a routert adja DNS-nek, vagy ha a zavar 10 percnél
 rövidebb (a 11-22-i nap leghosszabb zavara 9 perc volt). Mérve: a reset
-legkésőbb ~30 perccel a hiba után jön (`DN1`).
+legkésőbb ~16 perccel a hiba után jön (`DN1`).
 
 > **Miért saját DNS-kérdés?** A szokásos névfeloldás (lwIP) hiba esetén
 > átvált a tartalék DNS-re, és gyorsítótáraz – a router hibáját így elfedné. A
@@ -497,8 +497,8 @@ Amit ez hoz:
 | `ROUTER_DOWN_WINDOW_MS` | 2 perc | Ennyi internet nélküli idő után reset, ha a router sem válaszol |
 | `WAN_DOWN_WINDOW_MS` | 15 perc | Ennyi után reset, ha a router válaszol (szolgáltatói hiba) |
 | `RETRY_BACKOFF_MS` | 30 / 60 / 120 / 240 perc | Ha a reset nem segített, ennyivel az előző után jön a következő (az utolsó ismétlődik) |
-| `DNS_CHECK_INTERVAL_MS` | 15 perc | Ilyen sűrűn kérdezi a router DNS-ét (gyanúnál percenként) |
-| `DNS_FAIL_WINDOW_MS` | 15 perc | Ennyi folyamatos router-DNS-hiba után reset |
+| `DNS_CHECK_INTERVAL_MS` | 5 perc | Ilyen sűrűn kérdezi a router DNS-ét (gyanúnál percenként) |
+| `DNS_FAIL_WINDOW_MS` | 10 perc | Ennyi folyamatos router-DNS-hiba után reset |
 | `RESET_PULSE` | 90s | Router áramtalanítás időtartama |
 | `RESET_DELAY` | **max.** 10 perc | Várakozás a router reset után (bootolási idő) – korábban véget ér, ha a hálózat és az internet is visszajött |
 | `firstStartDelay` | **max.** 10 perc | Első indítás utáni várakozás – ugyanígy korábban is véget érhet |

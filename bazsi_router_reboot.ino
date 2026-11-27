@@ -44,9 +44,9 @@ constexpr uint32_t RETRY_BACKOFF_MS[] = { 30 * 60 * 1000, 60 * 60 * 1000,
                                           120 * 60 * 1000, 240 * 60 * 1000 };
 constexpr uint8_t RETRY_BACKOFF_STEPS = sizeof(RETRY_BACKOFF_MS) / sizeof(RETRY_BACKOFF_MS[0]);
 
-// A router DNS-e: 15 percenként, gyanúnál percenként; 15 perc folyamatos hiba után reset.
-constexpr uint32_t DNS_CHECK_INTERVAL_MS = 15 * 60 * 1000;
-constexpr uint32_t DNS_FAIL_WINDOW_MS = 15 * 60 * 1000;
+// A router DNS-e: 5 percenként, gyanúnál percenként; 10 perc folyamatos hiba után reset.
+constexpr uint32_t DNS_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+constexpr uint32_t DNS_FAIL_WINDOW_MS = 10 * 60 * 1000;
 constexpr char DNS_PROBE_NAME[] = "connectivitycheck.gstatic.com";
 // Várakozás a router bootolására (korábban véget ér, ha a hálózat visszajött).
 constexpr uint32_t RESET_DELAY = 10 * 60 * 1000;

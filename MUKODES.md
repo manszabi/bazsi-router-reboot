@@ -182,14 +182,14 @@ vár. Rossz jelszónál reset helyett AP mód.
 
 ### A router DNS-e
 
-Ha a ping megy, 15 percenként (`DNS_CHECK_INTERVAL_MS`) egy DNS-kérdés megy
+Ha a ping megy, 5 percenként (`DNS_CHECK_INTERVAL_MS`) egy DNS-kérdés megy
 **közvetlenül a router 53-as portjára** (saját UDP-csomag: az lwIP
 névfeloldása átváltana a tartalékra és gyorsítótárazna).
 
 | Router DNS | Kontroll: `1.1.1.1` DNS | Mi történik |
 |---|---|---|
 | válaszol (hibakód 0 vagy 3) | – | rendben; a DNS-számláló nullázódik |
-| hallgat (vagy SERVFAIL, REFUSED) | válaszol | **gyanú**: percenként újra kérdez; **15 perc** (`DNS_FAIL_WINDOW_MS`) után reset, `NET DIAG` 3 |
+| hallgat (vagy SERVFAIL, REFUSED) | válaszol | **gyanú**: percenként újra kérdez; **10 perc** (`DNS_FAIL_WINDOW_MS`) után reset, `NET DIAG` 3 |
 | hallgat | hallgat | nincs reset (nem a router hibája) |
 | a DHCP nem a routert adja DNS-nek | – | az ellenőrzés kimarad (egyszer kiírja) |
 
@@ -201,7 +201,7 @@ minden sikeres ping nullázza.
 
 | Helyzet (mérve) | Eredmény | Teszt |
 |---|---|---|
-| a router DNS-e lefagy | reset ~30 perc múlva (legfeljebb 15 perc a felismerésig + 15 perc kitartás) | `DN1` |
+| a router DNS-e lefagy | reset legkésőbb ~16 perc múlva (legfeljebb 5 perc a felismerésig + 10 perc kitartás) | `DN1` |
 | a külső DNS is hallgat | 0 reset | `DN2` |
 | 9 perces DNS-zavar | 0 reset | `DN3` |
 | a 11-22-i nap, a zavarok alatt a DNS is hallgat | 0 reset | `DN4` |
@@ -879,7 +879,7 @@ Minden bejegyzés uptime bélyeget, egy eseménykódot és egy paramétert tarta
 | `WIFI LOST` | `WiFi.status()` a kiesés pillanatában (csak a kiesés-sorozat **első** tagja) |
 | `TEST FAIL` | a kiesés kezdete (kiesésenként **egyszer**); a param a bukott tartalék HTTP teszt sorszáma, 1–5 |
 | `HTTP ERROR` | a tartalék HTTP teszt kódja, közvetlenül a `TEST FAIL` után: 200/204/403/5xx változatlan (200 = jött válasz, de nem a várt szöveg); kliens hibánál 1000 + \|kód\|: **1001** = nem sikerült kapcsolódni vagy a nevet feloldani, **1011** = nem jött válasz időben, **1100** = a kérés el sem indult |
-| `NET DIAG` | a router reset oka, közvetlenül a reset előtt: 1 = a router sem válaszol (vagy nincs Wi-Fi / gateway), 2 = a router válaszol, az internet nem, 3 = az internet él, de a router DNS-e 15 perce hallgat |
+| `NET DIAG` | a router reset oka, közvetlenül a reset előtt: 1 = a router sem válaszol (vagy nincs Wi-Fi / gateway), 2 = a router válaszol, az internet nem, 3 = az internet él, de a router DNS-e 10 perce hallgat |
 | `ROUTER RESET` | hányadik reset ebben a kiesésben |
 | `AP MODE` | 1 = nincs mentett SSID, 2 = hitelesítési hiba, 3 = 48 órája nincs Wi-Fi, 4 = a gateway sem érhető el |
 | `GW UNREACH` | 1 = a router reset előtt, 2 = a reset után is |
