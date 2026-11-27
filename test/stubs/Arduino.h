@@ -151,7 +151,6 @@ extern int g_gpioWakeResult;
 #define BIT(n) (1ULL << (n))
 #define F(x) (x)
 
-#define RTC_DATA_ATTR
 extern uint64_t g_wakeupUs;
 extern uint64_t g_gpioWakeMask;
 extern int g_gpioWakeMode;

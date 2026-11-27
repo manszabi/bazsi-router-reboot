@@ -63,16 +63,20 @@ extern uint32_t rtcWdtMagic;
 extern uint32_t rtcWdtResets;
 
 extern volatile uint32_t apDeadline;
-extern uint32_t rtcRetryRounds;
+extern uint32_t rtcWifiMagic;
+extern uint8_t  rtcWifiStep;
+extern uint32_t rtcWifiOutageMin;
+extern uint32_t wifiOutageSince, wifiLastResetAt, wifiConnectedSince;
 extern uint32_t rtcEvMagic;
 extern uint32_t rtcEvNext;
 enum EventCode : uint8_t;
-extern uint32_t rtcCarryRetryRounds;
 
 extern int g_randomCalls;
 extern uint32_t g_randomState;
 extern uint64_t g_efuseMac;
 bool gatewayPingOk();
+void wifiLadderPersist();
+static void wifiLadderPersistT() { wifiLadderPersist(); }
 void ensureFallbackDns();
 int lastHttpCode();
 uint16_t httpCodeLogParam(int code);
@@ -240,8 +244,9 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   g_fsShortReadSkip = 0;
   g_resetReason = deepSleepWake ? ESP_RST_DEEPSLEEP : ESP_RST_POWERON;
   if (!deepSleepWake) {
-    rtcRetryRounds = 0;
+    rtcWifiMagic = 0;
   }
+  wifiOutageSince = wifiLastResetAt = wifiConnectedSince = 0;
 
   clearRestartRequest(); endConfigWrite();
 
@@ -257,7 +262,6 @@ static void coldBoot(bool willConnect, const char* s, const char* p,
   g_gpioWakeResult = 0;
   g_gpioWakeMask = 0; g_gpioWakeMode = -1;
   g_isr.clear(); g_isrMode.clear();
-  rtcCarryRetryRounds = 0;
   g_randomCalls = 0;
   btnResetLatched = false; btnWifiResetLatched = false;
   btnResetDownAt = 0; btnWifiResetDownAt = 0;
@@ -307,13 +311,27 @@ static int futtat(uint32_t maxMs, F kesz) {
   return 0;
 }
 
-void retrySleep();
+// Szoftveres ujraindulas: az RTC_NOINIT tartalom es a fajlrendszer marad, minden mas elolrol.
+static void softReboot(bool willConnect) {
+  const uint32_t wm = rtcWifiMagic, wo = rtcWifiOutageMin; const uint8_t ws = rtcWifiStep;
+  const auto fs = g_fs;
+  const uint32_t evm = rtcEvMagic, evn = rtcEvNext, ora = g_millis;
+  coldBoot(willConnect, "", "", "", "");
+  g_millis = ora + 300;  // a szimulalt ido folytonos marad, hogy a teszt merhessen
+  g_fs = fs;
+  rtcWifiMagic = wm; rtcWifiStep = ws; rtcWifiOutageMin = wo;
+  rtcEvMagic = evm; rtcEvNext = evn;
+  g_resetReason = ESP_RST_SW;
+  setup();
+}
 
-// Egy router reset pulzus, majd a Wi-Fi nelkuli ujraprobalkozas alvasa; a visszateres az ebresztesi ido.
+void apSleep();
+
+// Egy router reset pulzus, majd az AP idotullepes alvasa; a visszateres az ebresztesi ido.
 static uint64_t egyResetUtanAlvas() {
   int guard = 0;
   while (!reset_device() && ++guard < 200000) { yield(); }
-  try { retrySleep(); } catch (DeepSleepSignal& d) { return d.us; }
+  try { apSleep(); } catch (DeepSleepSignal& d) { return d.us; }
   return UINT64_MAX;
 }
 
@@ -457,7 +475,7 @@ static void sc10() {
       CHECK(h >= 0 && h < logIndex("DEEP_SLEEP"), "a rögzítés az elalvás ELŐTT történt"); }
     CHECK(g_gpioWakeMask == (1ULL << 3), "reset gomb (GPIO3) ébresztésre armolva");
     CHECK(g_gpioWakeMode == 0, "LOW szintre ébred");
-    CHECK(logIndex("timer_wakeup") < logIndex("DEEP_SLEEP"), "timer is armolva alvás előtt"); }
+    CHECK(logIndex("timer_wakeup") < 0, "sikeres gombélesítésnél nincs időzítő, csak a gomb ébreszt"); }
 }
 
 static void sc11() {
@@ -814,13 +832,6 @@ static void scFT7() {
         "előbb minden ébresztőforrást töröltünk");
 }
 
-static void scFT8() {
-  coldBoot(true, "TestNet", "pw", "", "");
-  setup();
-  const uint64_t us = egyResetUtanAlvas();
-  CHECK(us == 3600ULL * 1000000ULL, "1 órás ébresztés megmaradt a router reset utáni útvonalon");
-}
-
 static void scWF1() {
   coldBoot(false, "MyNetwork", "titok123", "", "");
   setup();
@@ -829,27 +840,25 @@ static void scWF1() {
   CHECK(g_pinState[PIN_RELAY] == LOW, "a relé LOW - a router kap áramot");
 }
 
+static int uptimeSecAt(size_t idx);
+
 static void scWF2() {
+  // Hidegindulas Wi-Fi nelkul: 10 perc turelem, 3 proba, router reset - ESP-ujrainditas es alvas nelkul.
   coldBoot(false, "MyNetwork", "titok123", "", "");
   setup();
-  const int beginBefore = wifiSim.beginCount;
   const uint32_t t0 = g_millis;
-  bool slept = false; uint64_t us = 0;
-  try { while (g_millis - t0 < 20u*60*1000 && deviceMode == (DeviceMode)0) loop(); }
-  catch (DeepSleepSignal& d) { slept = true; us = d.us; }
-  CHECK(slept, "elaludt (nem AP módba ment)");
-  CHECK(us == 3600ULL*1000000ULL, "1 óra múlva magától ébred és újrapróbálja");
-  CHECK(rtcRetryRounds == 1, "egy kör elkönyvelve");
-  const int begins = wifiSim.beginCount - beginBefore;
-  const uint32_t dt = g_millis - t0;
-  CHECK(begins >= 6, "megvan a 3 + 3 blokkoló csatlakozási kísérlet");
-
-  CHECK(begins <= 6 + (int)(dt / 60000) + 2,
-        "a proba percenkent legfeljebb egy begin()-t ad hozza");
-  CHECK(logIndex(RELAY_HIGH) >= 0, "a körben lefutott egy router újraindítás");
-  CHECK(dt >= 10u*60*1000, "megvárta a 10 perces first start delayt");
-  CHECK(dt >= 25u*60*1000, "és a reset + bootolási várakozást is (~25,5 perc)");
-  CHECK(dt < 27u*60*1000, "de nem sokkal többet");
+  bool slept = false, restarted = false;
+  try { while (g_millis - t0 < 20u*60*1000 && logIndex(RELAY_HIGH) < 0) loop(); }
+  catch (DeepSleepSignal&) { slept = true; } catch (RestartSignal&) { restarted = true; }
+  const int ri = serialIndex("Router reset indul.");
+  const int mp = ri >= 0 ? uptimeSecAt((size_t)ri) : -1;
+  printf("     [info] bekapcsolastol a router reset kezdeteig: %d mp\n", mp);
+  CHECK(!slept && !restarted, "nem alszik el es nem indul ujra");
+  CHECK(logIndex(RELAY_HIGH) >= 0, "router reset");
+  CHECK(mp >= 715 && mp <= 725, "12 perc: a 10 perces turelmi ido + 3 proba utan");
+  (void)t0;
+  CHECK(rtcWifiStep == 2, "a Wi-Fi lepcso a 2. fokon (az ESP-ujrainditas kimaradt)");
+  CHECK(evCount(18) == 0, "WIFI RESTART nem volt");
 }
 
 static void scWF3() {
@@ -897,6 +906,7 @@ static void scWF5() {
 }
 
 static void scWF6() {
+  // Kapcsolatvesztes: 3 proba, majd elobb az ESP indul ujra - a router erintetlen.
   coldBoot(true, "MyNetwork", "pw", "", "");
   setup();
   loop();
@@ -904,11 +914,13 @@ static void scWF6() {
   const int beginBefore = wifiSim.beginCount;
   wifiSim.willConnect = false; wifiSim.begun = false;
   g_log.clear();
-  int guard = 0;
-  try { while (logIndex(RELAY_HIGH) < 0 && ++guard < 200000) loop(); }
-  catch (DeepSleepSignal&) {}
-  CHECK(wifiSim.beginCount - beginBefore == 3, "3 újrapróbálkozás a reset előtt");
-  CHECK(logIndex(RELAY_HIGH) >= 0, "elindult a router újraindítás (relé be)");
+  const int r = futtat(10u * 60 * 1000, [] { return logIndex(RELAY_HIGH) >= 0; });
+  CHECK(r == 2, "ESP.restart()");
+  CHECK(wifiSim.beginCount - beginBefore == 3, "3 újrapróbálkozás előtte");
+  CHECK(logIndex(RELAY_HIGH) < 0, "a routert NEM aramtalanitotta");
+  CHECK(rtcWifiStep == 1 && rtcWifiMagic == 0x42415A57UL, "a lepcso 1. foka elmentve az RTC-be");
+  CHECK(evCount(18) == 1, "WIFI RESTART a naploban");
+  CHECK(g_fs.count("/evlog.bin") == 1, "a naplo az ujraindulas elott kiment");
 }
 
 static void scWD1() {
@@ -961,7 +973,6 @@ static void scWD4() {
   coldBoot(true, "TestNet", "pw", "", "");
   rtcWdtMagic = 0x42415A53UL; rtcWdtResets = 2;
   g_resetReason = ESP_RST_POWERON;
-  rtcRetryRounds = 0;
   g_gpioWakeResult = 0;
   setup();
   CHECK(rtcWdtResets == 0, "bekapcsolás -> tiszta lap");
@@ -1028,21 +1039,23 @@ static void scE2() {
 }
 
 static void scE3() {
+  // A router reset utan sem jon vissza a Wi-Fi: nincs alvas, a lepcso szerint var.
   coldBoot(true, "TestNet", "pw", "", "");
   setup();
   loop();
   CHECK(deviceMode == (DeviceMode)0, "monitor mód");
+  rtcWifiStep = 1; rtcWifiMagic = 0x42415A57UL;
   wifiSim.willConnect = false; wifiSim.begun = false;
   g_log.clear();
-  int guard = 0;
-  bool slept = false;
-  try { while (deviceMode == (DeviceMode)0 && ++guard < 500000) { loop(); g_millis += 10; } }
-  catch (DeepSleepSignal&) { slept = true; }
-  CHECK(slept, "a router reset után sem jött vissza -> alvás és újrapróbálkozás");
+  bool slept = false, restarted = false;
+  futtat(30u * 60 * 1000, [] { return currentState == (State)1 && rtcWifiStep == 2 && logIndex(RELAY_LOW) >= 0
+                                       && serialHas("perc mulva"); });
+  try { for (int i = 0; i < 1000; i++) loop(); } catch (DeepSleepSignal&) { slept = true; } catch (RestartSignal&) { restarted = true; }
+  CHECK(!slept && !restarted, "nem alszik el, nem indul ujra");
   CHECK(deviceMode == (DeviceMode)0, "NEM AP mód (a hálózat csak nem látszik)");
-  CHECK(rtcRetryRounds == 1, "egy újrapróbálkozási kör elkönyvelve");
-  CHECK(logIndex(RELAY_HIGH) >= 0, "közben lefutott egy router újraindítás");
+  CHECK(logIndex(RELAY_HIGH) >= 0, "lefutott egy router újraindítás");
   CHECK(g_pinState[PIN_RELAY] == LOW, "a relé a végén LOW - a router kap áramot");
+  CHECK(serialHas("A kovetkezo Wi-Fi miatti router reset"), "a lepcso szerint var");
 }
 
 static void scE4() {
@@ -1321,7 +1334,7 @@ static void scR1() {
   catch (DeepSleepSignal&) { slept = true; }
   CHECK(!slept, "nem aludt el");
   CHECK(deviceMode == (DeviceMode)1, "AP beállító módba ment");
-  CHECK(rtcRetryRounds == 0, "nem számolt újrapróbálkozási kört");
+  CHECK(rtcWifiStep == 0, "a Wi-Fi lepcso nem indult el");
   CHECK(logIndex(RELAY_HIGH) < 0, "rossz jelszónál NEM indítja újra a routert");
 
   printf("     [info] csatlakozasi probalkozasok az AP modig: %d\n", wifiSim.beginCount);
@@ -1337,20 +1350,6 @@ static void scR5() {
   WiFi.begin("MyNetwork", "rosszjelszo");
   CHECK(WiFi.status() == WL_CONNECT_FAILED,
         "a masodik probalkozastol viszont megkulonboztetheto");
-}
-
-static void scR6() {
-  coldBoot(false, "MyNetwork", "titok123", "", "");
-  setup();
-  const uint32_t t0 = 0;
-  bool slept = false;
-  try { while (g_millis < 3u*60*60*1000) loop(); }
-  catch (DeepSleepSignal&) { slept = true; }
-  const uint32_t awake = g_millis - t0;
-  printf("     [info] boot -> deep sleep: %.1f perc\n", awake/60000.0);
-  CHECK(slept, "egy ora alvasra ment, nem AP modba");
-  CHECK(awake > 25u*60*1000 && awake < 26u*60*1000,
-        "az ebren toltott resz 25 es 26 perc kozott van (a doksi 25,5-ot ir)");
 }
 
 static int uptimeSecAt(size_t idx) {
@@ -1391,63 +1390,6 @@ static void scR7() {
   CHECK(halott >= 166 && halott <= 170, "halott DNS mellett 168 mp");
 }
 
-static void scR8() {
-  int alvasok = 0, korok = 0;
-  bool apMod = false;
-  for (int i = 0; i < 40 && !apMod; i++) {
-    coldBoot(false, "MyNetwork", "titok123", "", "", 500, i > 0);
-    korok++;
-    bool slept = false;
-    try { setup(); while (g_millis < 3u*60*60*1000 && deviceMode == (DeviceMode)0) loop(); }
-    catch (DeepSleepSignal&) { slept = true; }
-    if (slept) alvasok++;
-    if (deviceMode == (DeviceMode)1) apMod = true;
-  }
-  printf("     [info] %d kor, ebbol %d alvassal; AP mod: %s\n",
-         korok, alvasok, apMod ? "igen" : "nem");
-  const double oraban = (korok * 25.5 + alvasok * 60.0) / 60.0;
-  printf("     [info] osszes turelem: %d x 25,5 perc + %d x 60 perc = %.1f ora\n",
-         korok, alvasok, oraban);
-  CHECK(apMod, "vegul AP beallito modba ment");
-  CHECK(korok == 33, "pontosan 33 kort probalt");
-  CHECK(alvasok == 32, "de csak 32-szer aludt: az utolso kor mar nem alszik");
-  CHECK(oraban > 45.5 && oraban < 46.5, "a tenyleges turelem ~46 ora, nem 47");
-}
-
-static void scR2() {
-  coldBoot(false, "MyNetwork", "titok123", "", "");
-  rtcRetryRounds = 32;
-  setup();
-  bool slept = false;
-  const uint32_t t0 = g_millis;
-  try { while (g_millis - t0 < 20u*60*1000 && deviceMode == (DeviceMode)0) loop(); }
-  catch (DeepSleepSignal&) { slept = true; }
-  CHECK(!slept, "a 33. körnél már nem alszik el");
-  CHECK(deviceMode == (DeviceMode)1, "AP beállító mód");
-  CHECK(rtcRetryRounds == 0, "a számláló nullázva a következő ciklushoz");
-}
-
-static void scR3() {
-  const uint32_t roundTenths = 100
-                             + 20
-                             + 15
-                             + 100
-                             + 20
-                             + 600;
-  CHECK(roundTenths == 855, "egy kör 85,5 perc");
-  CHECK(33u * roundTenths == 28215u, "33 kör = 2821,5 perc");
-  CHECK(28215u < 48u * 60u * 10u, "és ez kevesebb, mint 2 nap (28800 tizedperc)");
-  CHECK(34u * roundTenths > 48u * 60u * 10u, "34 kör viszont már túllépné");
-}
-
-static void scR4() {
-  coldBoot(true, "MyNetwork", "titok123", "", "");
-  rtcRetryRounds = 17;
-  setup();
-  CHECK(deviceMode == (DeviceMode)0, "csatlakozott");
-  CHECK(rtcRetryRounds == 0, "új 2 napos ablak indul");
-}
-
 static void scL1() {
   coldBoot(false, "", "", "", "");
   rtcEvMagic = 0; rtcEvNext = 0;
@@ -1458,8 +1400,8 @@ static void scL1() {
   g_handlers["/log#1"](&req);
   CHECK(req._code == 200, "a /log oldal kiszolgálva");
   CHECK(req._body.find("BOOT") != std::string::npos, "a BOOT esemény megjelenik");
-  CHECK(req._body.find("Ujraprobalkozasi korok") != std::string::npos,
-        "a kör számláló látszik");
+  CHECK(req._body.find("Wi-Fi lepcso") != std::string::npos,
+        "a Wi-Fi lepcso allasa latszik");
   CHECK(req._body.find("Watchdog ujraindulasok") != std::string::npos,
         "a watchdog számláló látszik");
 }
@@ -1693,38 +1635,6 @@ static void scSER9() {
   CHECK(lpm <= 30, "a buko naplomentes sem arasztja el a soros portot");
   CHECK(serialHas("rovid iras") || serialHas("NEM sikerult"),
         "kozben a hibat tenyleg jelezte");
-}
-
-static void scSER10() {
-  coldBoot(false, "TestNet", "pw", "", "");
-  setup();
-  const size_t elotte = g_serialLog.size();
-  const uint32_t t0 = g_millis;
-  int guard = 0;
-  int alvasok = 0;
-
-  try {
-    while (alvasok < 5 && ++guard < 5000000) {
-      try { loop(); }
-      catch (DeepSleepSignal&) {
-        alvasok++;
-        const uint32_t rounds = rtcRetryRounds;
-        const uint32_t most = g_millis;
-        coldBoot(false, "TestNet", "pw", "", "", 500, true);
-        g_millis = most + 3600u * 1000;
-        rtcRetryRounds = rounds;
-        setup();
-      }
-    }
-  } catch (RestartSignal&) {}
-  const uint32_t percek = (g_millis - t0) / 60000;
-  const uint32_t lpm = percek ? (uint32_t)((g_serialLog.size() - elotte) / percek) : 0;
-  printf("     [info] %d kor a ketnapos letrabol (%u perc, %u sor osszesen): "
-         "%u sor/perc\n", alvasok, percek,
-         (unsigned)(g_serialLog.size() - elotte), lpm);
-  CHECK(alvasok == 5, "ot teljes kort lejatszottunk");
-  CHECK(lpm <= 30, "a ketnapos letra sem lepi tul a 30 sor/percet");
-  CHECK(rtcRetryRounds >= 5, "es a korszamlalo tenyleg no");
 }
 
 static void scOV1() {
@@ -2140,6 +2050,7 @@ static void scL6() {
   logEvent((EventCode)14, 11);
   logEvent((EventCode)15, 1011);
   logEvent((EventCode)16, 2);
+  logEvent((EventCode)18, 6);
 
   AsyncWebServerRequest req;
   g_handlers["/log#1"](&req);
@@ -2148,10 +2059,14 @@ static void scL6() {
                          ">ROUTER RESET<", ">AP MODE<", ">CONFIG SAVED<",
                          ">SLEEP<", ">FATAL<", ">WDT RESET<", ">STUCK BUTTON<",
                          ">GW UNREACH<", ">LOW HEAP<", ">HEAP RESTART<",
-                         ">HTTP ERROR<", ">NET DIAG<" };
+                         ">HTTP ERROR<", ">NET DIAG<", ">WIFI RESTART<" };
   bool all = true;
   for (const char* w : want) if (b.find(w) == std::string::npos) { all = false; printf("     [info] hianyzik: %s\n", w); }
-  CHECK(all, "MIND a 16 esemenykod olvashato cimket kap");
+  CHECK(all, "MIND a 17 esemenykod olvashato cimket kap");
+  logEvent((EventCode)17, 1);
+  AsyncWebServerRequest req2;
+  g_handlers["/log#1"](&req2);
+  CHECK(req2._body.find(">?<") != std::string::npos, "a regi 17-es kod (RESET SKIPPED) mar ismeretlen, nem mas nevet kap");
   CHECK(b.find(">?<") == std::string::npos, "nincs ismeretlen kod a naplóban");
 }
 
@@ -2238,7 +2153,6 @@ static void scE6() {
   setup();
   g_httpBody = "Microsoft Connect Test";
   loop();
-  rtcRetryRounds = 3;
   wifiSim.begun = false;
   wifiSim.willConnect = true;
   g_log.clear();
@@ -2248,7 +2162,7 @@ static void scE6() {
   catch (...) {}
   CHECK(logIndex(RELAY_HIGH) < 0, "NEM indit routert, ha visszajott a WiFi");
   CHECK(serialHas("WIFI RECONNECTED!"), "ujracsatlakozott");
-  CHECK(rtcRetryRounds == 0, "a sikeres teszt nullazza a 2 napos ablakot");
+  CHECK(rtcWifiStep == 0, "a Wi-Fi lepcso nem indult el");
 }
 
 static void scX7() {
@@ -2818,11 +2732,12 @@ static void wrapFutas(uint32_t kezdo) {
   loop(); loop();
   g_millis = kezdo;
   loop(); loop();
+  rtcWifiMagic = 0x42415A57UL; rtcWifiStep = 1; wifiOutageSince = g_millis;
   wifiSim.begun = false; wifiSim.willConnect = false;
   wifiSim.failStatus = WL_NO_SSID_AVAIL;
   mw_pulzus = 0; mw_magas = false; mw_wrapok = 0; mw_elozo = g_millis;
   g_onDelay = mwFigyelo;
-  try { int g = 0; while (++g < 3000000 && deviceMode != (DeviceMode)1) loop(); }
+  try { int g = 0; while (++g < 3000000 && !serialHas("A kovetkezo Wi-Fi miatti router reset")) loop(); }
   catch (...) {}
   g_onDelay = nullptr;
 }
@@ -2838,7 +2753,7 @@ static void scMW2() {
   wrapFutas(0xFFFFFFFFu - 700000u);
   CHECK(mw_wrapok == 1, "korbefordult a RESET_DELAY alatt");
   CHECK(mw_pulzus >= 89000 && mw_pulzus <= 92000, "a pulzus akkor is 90 mp");
-  CHECK(g_wakeupUs == 3600000000ULL, "a vegen ugyanugy 1 ora alvas");
+  CHECK(serialHas("A kovetkezo Wi-Fi miatti router reset"), "a vegen ugyanugy a lepcso szerint var");
 
   wrapFutas(0xFFFFFFFFu - 180000u);
   CHECK(mw_wrapok == 1, "korbefordult a hibakezeles kozepen");
@@ -2849,8 +2764,8 @@ static void scMW3() {
   wrapFutas(1716698112u);
   CHECK(mw_wrapok == 0, "ebben a szakaszban nincs wrap");
   CHECK(mw_pulzus >= 89000 && mw_pulzus <= 92000, "90 mp-es pulzus 169 nap utan is");
-  CHECK(rtcRetryRounds == 1, "a szamlalo normalisan lep");
-  CHECK(g_wakeupUs == 3600000000ULL, "1 ora alvas");
+  CHECK(rtcWifiStep == 2, "a lepcso normalisan lep");
+  CHECK(g_wakeupUs == 0, "nincs alvas");
 }
 
 static void wdLepes() { loop(); }
@@ -3402,13 +3317,13 @@ static void scNV1() {
   }
 
   {
-    coldBoot(false, "TestNet", "pw", "", "");
+    coldBoot(false, "", "", "", "");
     setup();
     int guard = 0;
     bool slept = false;
     try { while (!slept && ++guard < 900000) loop(); }
     catch (DeepSleepSignal&) { slept = true; }
-    CHECK(slept, "eljutottunk az alvasig");
+    CHECK(slept, "eljutottunk az alvasig (AP idotullepes)");
     CHECK(serialHas("alvas elott"), "az alvas elott is mentettunk");
     CHECK(logIndex("Naplo mentese") < logIndex("DEEP_SLEEP")
           || serialIndex("alvas elott") >= 0, "a mentes az elalvas elott tortent");
@@ -3512,11 +3427,8 @@ static void scNV11() {
   g_epochNow = 0;
   setup();
 
-  bool slept = false;
-  int guard = 0;
-  try { while (!slept && ++guard < 900000) loop(); }
-  catch (DeepSleepSignal&) { slept = true; }
-  CHECK(slept, "az egesz eszkalacio lefutott oraszinkron nelkul is");
+  futtat(20u * 60 * 1000, [] { return relayPulses() > 0; });
+  CHECK(relayPulses() > 0, "az eszkalacio (router reset) lefutott oraszinkron nelkul is");
   CHECK(g_fs.count("/evlog.bin") == 1, "a naplo mentese is sikerult");
   CHECK(!serialHas("1970"), "sehol nem jelenik meg hamis 1970-es datum");
 
@@ -3731,6 +3643,7 @@ static void scAP6() {
 }
 
 static void scWF11() {
+  // A router reset utan sem jon vissza a WiFi: elobb az ESP indul ujra.
   coldBoot(true, "TestNet", "pw", "", "");
   g_httpBody = "Rossz"; pingSim.ok = false;
   setup();
@@ -3742,14 +3655,10 @@ static void scWF11() {
   CHECK(currentState == (State)2, "megtortent a router reset");
   wifiSim.willConnect = false;
 
-  bool slept = false;
-  guard = 0;
-  try { while (!slept && ++guard < 900000) loop(); }
-  catch (DeepSleepSignal&) { slept = true; }
+  const int r = futtat(30u * 60 * 1000, [] { return false; });
   CHECK(serialHas("A router reset utan sem jott vissza a WiFi."),
         "a hibaag lefutott es meg is mondja");
-  CHECK(slept || deviceMode == (DeviceMode)1,
-        "es a wifiGiveUp() dontott: alvas vagy AP mod");
+  CHECK(r == 2 && rtcWifiStep == 1, "es a Wi-Fi lepcso dontott: ESP-ujrainditas");
 }
 
 static void scNV2() {
@@ -3922,7 +3831,6 @@ static void scNV8() {
 extern uint32_t rtcHeapMagic;
 extern uint32_t rtcHeapRestarts;
 extern uint8_t  rtcCarryResetEvents;
-extern uint32_t rtcCarryRetryRounds;
 
 static void scHP1() {
   coldBoot(true, "TestNet", "pw", "", "");
@@ -4222,7 +4130,6 @@ static void scHP9() {
 extern uint32_t rtcHeapMagic;
 extern uint32_t rtcHeapRestarts;
 extern uint8_t  rtcCarryResetEvents;
-extern uint32_t rtcCarryRetryRounds;
 
 static void scLOG7() {
   coldBoot(false, "", "", "", "");
@@ -4385,44 +4292,12 @@ static void scGWH3() {
   CHECK(uiFlags.firstStart, "a firstStart varakozas ujra lefut (a proba koran zarja)");
 }
 
-static void scGWH4() {
-  coldBoot(false, "TestNet", "pw", "", "");
-  rtcHeapMagic = 0;
-  setup();
-  CHECK(deviceMode == (DeviceMode)0, "monitor modban maradt es ujraprobal");
-  rtcRetryRounds = 30;
-  testState.resetEvents = 1;
-
-  g_freeHeap = 5000; g_maxAllocHeap = 4000;
-  bool restarted = false;
-  int guard = 0;
-  try {
-    while (!restarted && ++guard < 200000) { checkHeap(g_millis); g_millis += 1000; }
-  } catch (RestartSignal&) { restarted = true; }
-  CHECK(restarted, "a heap miatt ujraindult");
-  CHECK(rtcCarryRetryRounds == 30, "az atvitel rogzitette a 2 napos ablak allasat");
-
-  const uint32_t hm = rtcHeapMagic, hr = rtcHeapRestarts, cr = rtcCarryRetryRounds;
-  const uint8_t ce = rtcCarryResetEvents;
-  coldBoot(false, "TestNet", "pw", "", "");
-  CHECK(rtcRetryRounds == 0, "a szoftveres reset tenyleg nullazta volna");
-  rtcHeapMagic = hm; rtcHeapRestarts = hr;
-  rtcCarryResetEvents = ce; rtcCarryRetryRounds = cr;
-  setup();
-  CHECK(rtcRetryRounds == 30,
-        "az atvitel utan viszont a 2 napos ablak FOLYTATODIK, nem kezdodik elolrol");
-  CHECK(testState.resetEvents == 1, "es a router reset szamlalo is");
-  CHECK(serialHas("ujraprobalkozasi kor = 30"), "a soros porton is lathato");
-
-  CHECK(rtcRetryRounds < 33, "meg nem ertunk a hatarra");
-}
-
 static void scGWH5() {
   coldBoot(true, "TestNet", "pw", "", "");
   rtcHeapMagic = 0;
   setup();
   monitorUzembe();
-  rtcRetryRounds = 20;
+  rtcWifiStep = 3; rtcWifiOutageMin = 100;
 
   g_pinRead[PIN_RESETBTN] = LOW;
   bool restarted = false;
@@ -4438,8 +4313,8 @@ static void scGWH5() {
   coldBoot(true, "TestNet", "pw", "", "");
   rtcHeapMagic = hm; rtcCarryResetEvents = ce;
   setup();
-  CHECK(rtcRetryRounds == 0,
-        "gombnyomas utan a 2 napos ablak elolrol indul (szandekolt)");
+  CHECK(rtcWifiStep == 0 && rtcWifiOutageMin == 0,
+        "gombnyomas utan a Wi-Fi lepcso elolrol indul (szandekolt)");
 }
 
 static void scWDT14() {
@@ -4741,8 +4616,17 @@ static void scPWR3() {
   routerOffline(true);
   pwrArm(0);
   guard = 0;
+  bool ujraindult = false;
   try { while (pwrFirstRelayHigh == 0 && ++guard < 2000000) loop(); }
-  catch (DeepSleepSignal&) {}
+  catch (DeepSleepSignal&) {} catch (RestartSignal&) { ujraindult = true; }
+  CHECK(ujraindult, "elobb az ESP indul ujra");
+  if (ujraindult) {
+    softReboot(false);
+    routerOffline(true); pwrArm(0);
+    guard = 0;
+    try { while (pwrFirstRelayHigh == 0 && ++guard < 2000000) loop(); }
+    catch (DeepSleepSignal&) {}
+  }
   g_onDelay = nullptr;
   CHECK(pwrFirstRelayHigh != 0, "vegul az ESP is ujrainditja a routert");
   const uint32_t turelem = pwrFirstRelayHigh - kihuzta;
@@ -4835,14 +4719,6 @@ static void scSH2() {
     CHECK(slept, "5 perc hibajelzes utan elalszik");
     CHECK(us == 0, "vegzetes hiba: idozitett ebresztes NINCS");
     CHECK(g_gpioWakeMask == (1ULL << PIN_RESETBTN), "de a reset gomb felebreszti");
-  }
-
-  {
-    coldBoot(true, "TestNet", "pw", "", "");
-    setup();
-    const uint64_t us = egyResetUtanAlvas();
-    CHECK(us == 3600ULL*1000000ULL, "router reset utan sincs halozat: 1 ora");
-    CHECK(g_gpioWakeMask == (1ULL << PIN_RESETBTN), "es a reset gomb is felebreszti");
   }
 }
 
@@ -5250,7 +5126,7 @@ static void scLED4() {
   g_onDelay = figyelWifiLed;
   guard = 0;
   try { while (++guard < 100000 && s_wifiLedOffAt == 0) loop(); }
-  catch (DeepSleepSignal&) {}
+  catch (DeepSleepSignal&) {} catch (RestartSignal&) {}
   g_onDelay = nullptr;
   const uint32_t hazugsag = s_wifiLedOffAt ? s_wifiLedOffAt - t0 : 0;
   printf("     [info] a Wi-Fi LED %u mp-ig mutatott meg kapcsolatot\n", hazugsag / 1000);
@@ -5898,7 +5774,7 @@ static void scILV5() {
 }
 
 static const uint8_t  PROP_ENDPOINTS         = 5;
-static const uint32_t PROP_MAX_RETRY_ROUNDS  = 33;
+static const uint32_t PROP_MAX_WIFI_OUTAGE_MIN = 48u * 60 + 60;
 static const uint32_t PROP_EVLOG_SIZE        = 32;
 static const uint32_t PROP_RESET_PULSE_MS    = 90000;
 static const char*    PROP_PLAIN_PASS        = "TitkosJelszo123";
@@ -5945,15 +5821,15 @@ static void propCheck(PropState& ps, uint32_t step) {
   if (testState.endpointIndex >= PROP_ENDPOINTS) {
     propViolate(ps, step, "endpointIndex tullepte a vegpont-tabla meretet");
   }
-  if (rtcRetryRounds > PROP_MAX_RETRY_ROUNDS) {
-    propViolate(ps, step, "rtcRetryRounds tullepte a MAX_RETRY_ROUNDS korlatot");
+  if (rtcWifiMagic == 0x42415A57UL && rtcWifiOutageMin > PROP_MAX_WIFI_OUTAGE_MIN) {
+    propViolate(ps, step, "a Wi-Fi lepcso tulelte a 48 oras hatart (nem ment AP modba)");
   }
 
   if (rtcEvMagic == EVLOG_MAGIC_C) {
     const uint32_t db = (rtcEvNext < PROP_EVLOG_SIZE) ? rtcEvNext : PROP_EVLOG_SIZE;
     for (uint32_t i = 0; i < db; i++) {
       const uint8_t c = rtcEvents[i].code;
-      if (c < 1 || c > 17) {
+      if (c < 1 || c > 18 || c == 17) {
         propViolate(ps, step, "ervenytelen esemenykod az esemenynaploban");
         break;
       }
@@ -6718,18 +6594,23 @@ static void scWL1() {
   futtat(30u * 60 * 1000, [] { return deviceMode != (DeviceMode)0 || relayPulses() > 0; });
   CHECK(deviceMode == (DeviceMode)1, "AP beallito modba ment");
   CHECK(relayPulses() == 0, "a routert NEM aramtalanitotta");
-  CHECK(serialHas("router reset helyett AP mod"), "es megmondja, miert");
+  CHECK(serialHas("Hitelesitesi hiba"), "es megmondja, miert");
+  CHECK(rtcWifiStep == 0, "ESP-ujrainditas sem volt");
 }
 
 static void scWL2() {
+  // Wi-Fi vesztes jelszohiba nelkul: ESP-ujrainditas, utana router reset.
   coldBoot(true, "TestNet", "pw", "", "");
   setup();
   monitorUzembe();
   futtat(60u * 1000, [] { return serialHas("Successful Test"); });
   g_log.clear();
   wifiSim.willConnect = false; wifiSim.begun = false;
+  const int r = futtat(30u * 60 * 1000, [] { return relayPulses() > 0; });
+  CHECK(r == 2 && relayPulses() == 0, "elobb az ESP indul ujra, a router erintetlen");
+  softReboot(false);
   futtat(30u * 60 * 1000, [] { return relayPulses() > 0; });
-  CHECK(relayPulses() == 1, "a router reset megtortent");
+  CHECK(relayPulses() == 1, "utana a router reset megtortent");
   CHECK(deviceMode == (DeviceMode)0, "monitor modban maradt");
 }
 
@@ -7031,10 +6912,10 @@ static void scRD9() {
   try { while (!restarted && ++guard < 200000) { checkHeap(g_millis); g_millis += 1000; } }
   catch (RestartSignal&) { restarted = true; }
   CHECK(restarted, "a heap miatt ujraindult");
-  const uint32_t hm = rtcHeapMagic, hr = rtcHeapRestarts, cr = rtcCarryRetryRounds;
+  const uint32_t hm = rtcHeapMagic, hr = rtcHeapRestarts;
   const uint8_t ce = rtcCarryResetEvents;
   coldBoot(true, "TestNet", "pw", "", "");
-  rtcHeapMagic = hm; rtcHeapRestarts = hr; rtcCarryResetEvents = ce; rtcCarryRetryRounds = cr;
+  rtcHeapMagic = hm; rtcHeapRestarts = hr; rtcCarryResetEvents = ce;
   setup();
   CHECK(testState.resetEvents == 2 && testState.outage, "a szamlalo es a kieses atjott");
   monitorUzembe();
@@ -7054,19 +6935,15 @@ static void scRD10() {
 }
 
 static void scRD11() {
-  // Wi-Fi vesztes egy kiesesen belul: a lepcso a Wi-Fi agra is vonatkozik.
+  // Wi-Fi vesztes egy internetkiesesen belul: a Wi-Fi lepcso dont, elobb ESP-ujrainditas.
   ftIndit();
   auto r = ftJatszik(5, [](uint32_t) { return FtPerc{ false, false, false }; });
   CHECK(r.size() == 1, "router hiba: egy reset");
   futtat(15u * 60 * 1000, [] { return currentState == (State)0 && serialHas("RESET_DELAY"); });
-  const uint32_t elsoReset = testState.lastResetAt;
   wifiSim.willConnect = false; wifiSim.begun = false;
   g_log.clear();
-  futtat(40u * 60 * 1000, [] { return relayPulses() > 0; });
-  const uint32_t kozte = testState.lastResetAt - elsoReset;
-  printf("     [info] a ket reset kozott %.1f perc\n", kozte / 60000.0);
-  CHECK(serialHas("a kovetkezo router reset meg nem esedekes"), "a Wi-Fi vesztesre sem resetel azonnal");
-  CHECK(relayPulses() == 1 && kozte >= 30u * 60 * 1000, "a masodik reset a 30 perces lepcso utan jon");
+  const int k = futtat(40u * 60 * 1000, [] { return relayPulses() > 0; });
+  CHECK(k == 2 && relayPulses() == 0, "a Wi-Fi vesztesre nem azonnal resetel, hanem az ESP indul ujra");
 }
 
 static void scRD12() {
@@ -7289,6 +7166,173 @@ static void scDN12() {
   CHECK(evCount(EVC_NET_DIAG, 3) == 0, "es DNS miatt nem resetel");
 }
 
+
+static const uint32_t WIFI_MAGIC_C = 0x42415A57UL;
+
+// Monitor uzem, mukodo Wi-Fi-vel; utana a Wi-Fi tartosan eltunik.
+static void wflIndit() {
+  coldBoot(true, "TestNet", "pw", "", "");
+  setup();
+  monitorUzembe();
+  futtat(70u * 1000, [] { return serialHas("Successful Test"); });
+  g_log.clear(); g_serialLog.clear(); ujNaplo();
+  wifiSim.willConnect = false; wifiSim.begun = false;
+}
+
+// Futtat, es ESP.restart() utan szoftveres ujraindulast szimulal; visszaadja az ujraindulasok szamat.
+template <class F>
+static int futtatUjraindulassal(uint32_t maxMs, bool willConnect, F kesz) {
+  const uint32_t t0 = g_millis;
+  int ujra = 0;
+  while (g_millis - t0 < maxMs && !kesz()) {
+    const int r = futtat(maxMs - (g_millis - t0), kesz);
+    if (r == 2) { ujra++; softReboot(willConnect); continue; }
+    break;
+  }
+  return ujra;
+}
+
+static std::vector<double> wflResetek(uint32_t percek) {
+  std::vector<double> r;
+  const uint32_t t0 = g_millis;
+  size_t nezett = g_log.size();
+  int guard = 0;
+  try {
+    while (g_millis - t0 < percek * 60000u && ++guard < 30000000 && deviceMode == (DeviceMode)0) {
+      loop();
+      for (size_t i = nezett; i < g_log.size(); i++)
+        if (g_log[i] == RELAY_HIGH) r.push_back((g_millis - t0) / 60000.0);
+      nezett = g_log.size();
+    }
+  } catch (DeepSleepSignal&) {}
+  return r;
+}
+
+static void scWFL1() {
+  // Az ESP-ujrainditas utan visszajon a Wi-Fi: nincs router reset, nincs 10 perces varakozas.
+  wflIndit();
+  const int r = futtat(10u * 60 * 1000, [] { return false; });
+  CHECK(r == 2 && rtcWifiStep == 1, "ESP-ujrainditas, 1. fok");
+  const uint32_t t0 = g_millis;
+  softReboot(true);
+  CHECK(!uiFlags.firstStart, "a 10 perces turelmi ido kimarad (a router nem kapcsolt le)");
+  CHECK(evCount(2, 1) == 1, "WIFI OK 1: az ujrainditas segitett");
+  futtat(5u * 60 * 1000, [] { return serialHas("Successful Test"); });
+  CHECK(serialHas("Successful Test") && g_millis - t0 < 2u * 60 * 1000, "azonnal figyel tovabb");
+  CHECK(relayPulses() == 0, "a router erintetlen maradt");
+  futtat(35u * 60 * 1000, [] { return rtcWifiStep == 0; });
+  CHECK(rtcWifiStep == 0, "30 perc stabil Wi-Fi utan a lepcso nullazodott");
+}
+
+static void scWFL2() {
+  // Az ujrainditas sem segit: router reset; az ido a Wi-Fi elvesztesetol a resetig.
+  wflIndit();
+  const uint32_t t0 = g_millis;
+  futtatUjraindulassal(20u * 60 * 1000, false, [] { return serialHas("Router reset indul."); });
+  const int ri = serialIndex("Router reset indul.");
+  const double perc = ri >= 0 ? (uptimeSecAt((size_t)ri) - (int)(t0 / 1000)) / 60.0 : -1;
+  printf("     [info] a Wi-Fi elvesztesetol a router reset kezdeteig: %.1f perc\n", perc);
+  CHECK(serialHas("Router reset indul."), "router reset");
+  CHECK(perc >= 4.0 && perc <= 6.0, "kb. 5 perc (eszleles, 3 proba, ujraindulas, 3 proba)");
+  CHECK(rtcWifiStep == 2, "2. fok");
+  CHECK(evCount(18) == 1 && evCount(16, 1) >= 1, "WIFI RESTART, majd NET DIAG 1");
+}
+
+static void scWFL3() {
+  // Tartos Wi-Fi-hiany: router resetek 30 perc / 1 ora / 2 ora / 4 ora szunettel, 48 ora utan AP.
+  wflIndit();
+  futtatUjraindulassal(20u * 60 * 1000, false, [] { return rtcWifiStep == 2; });
+  g_log.clear();
+  auto r = wflResetek(50 * 60);
+  printf("     [info] %zu tovabbi router reset (perc:", r.size());
+  for (double x : r) printf(" %.0f", x);
+  printf("), vegul mode=%d, kieses %u perc\n", (int)deviceMode, (unsigned)rtcWifiOutageMin);
+  bool lepcso = r.size() >= 4;
+  const double vart[] = { 30, 60, 120, 240 };
+  double elozo = 0;
+  for (size_t i = 0; i < r.size() && i < 4; i++) {
+    const double kozte = r[i] - elozo;
+    if (kozte < vart[i] || kozte > vart[i] + 16) lepcso = false;
+    elozo = r[i];
+  }
+  CHECK(lepcso, "a resetek kozott 30 perc, 1 ora, 2 ora, 4 ora (+ a bootvarakozas)");
+  bool negyora = true;
+  for (size_t i = 4; i < r.size(); i++) if (r[i] - r[i - 1] < 240) negyora = false;
+  CHECK(negyora, "onnan legalabb 4 orankent");
+  CHECK(deviceMode == (DeviceMode)1, "48 ora utan AP beallito mod");
+  CHECK(evCount(6, 3) == 1, "AP MODE 3 a naploban");
+  CHECK(g_wakeupUs == 0, "kozben egyszer sem aludt");
+  CHECK(rtcWifiStep == 0, "AP modban a lepcso torolve");
+}
+
+static void scWFL4() {
+  // Varakozas kozben visszajon a Wi-Fi: azonnal folytatja, nincs tobb reset; percenkent egy proba.
+  wflIndit();
+  futtatUjraindulassal(20u * 60 * 1000, false, [] { return rtcWifiStep == 2 && serialHas("perc mulva"); });
+  const int b0 = wifiSim.beginCount;
+  futtat(10u * 60 * 1000, [] { return false; });
+  const int probak = wifiSim.beginCount - b0;
+  printf("     [info] 10 perc varakozas alatt %d csatlakozasi proba\n", probak);
+  CHECK(probak >= 8 && probak <= 12, "percenkent egy proba, nem 3 blokkolo");
+  wifiSim.willConnect = true; wifiSim.begun = false;
+  g_log.clear(); g_serialLog.clear();
+  futtat(3u * 60 * 1000, [] { return serialHas("Successful Test"); });
+  CHECK(serialHas("Successful Test"), "a visszajott Wi-Fi-t legfeljebb egy perc alatt eszreveszi");
+  futtat(60u * 60 * 1000, [] { return false; });
+  CHECK(relayPulses() == 0, "nincs tobb router reset");
+  CHECK(rtcWifiStep == 0, "30 perc stabil kapcsolat utan nullazva");
+}
+
+static void scWFL5() {
+  // Instabil Wi-Fi: az ujrainditas utani 30 percen belul ujra kiesik -> router reset, nem ujabb ujrainditas.
+  wflIndit();
+  futtat(10u * 60 * 1000, [] { return false; });
+  softReboot(true);
+  futtat(10u * 60 * 1000, [] { return false; });
+  CHECK(rtcWifiStep == 1, "a lepcso meg el (nincs meg 30 perc stabil)");
+  wifiSim.willConnect = false; wifiSim.begun = false;
+  g_log.clear();
+  const int r = futtat(10u * 60 * 1000, [] { return relayPulses() > 0; });
+  CHECK(r != 2 && relayPulses() == 1, "a masodik kiesesre mar router reset jon");
+}
+
+static void scWFL6() {
+  // Rossz jelszo a lepcso barmely fokan: AP mod, ujrainditas es reset nelkul, a lepcso torolve.
+  wflIndit();
+  futtat(10u * 60 * 1000, [] { return false; });
+  softReboot(false);
+  wifiSim.authFail = true;
+  futtat(10u * 60 * 1000, [] { return deviceMode != (DeviceMode)0; });
+  CHECK(deviceMode == (DeviceMode)1, "AP mod");
+  CHECK(relayPulses() == 0, "nincs router reset");
+  CHECK(rtcWifiStep == 0, "a lepcso torolve");
+}
+
+static void scWFL7() {
+  // Aramszunet torli a mentett lepcsot; az elso lepes ott a router reset, nem ujrainditas.
+  wflIndit();
+  futtat(10u * 60 * 1000, [] { return false; });
+  CHECK(rtcWifiStep == 1, "mentve");
+  coldBoot(false, "TestNet", "pw", "", "");
+  setup();
+  CHECK(rtcWifiStep == 0 && uiFlags.firstStart, "bekapcsolaskor tiszta lap, 10 perces turelemmel");
+  const int r = futtat(15u * 60 * 1000, [] { return relayPulses() > 0; });
+  CHECK(r != 2 && relayPulses() == 1, "hidegindulasnal router reset, ujrainditas nelkul");
+}
+
+static void scWFL8() {
+  // Heap-ujraindulas a lepcso kozben: a fok es a kieses hossza atjon.
+  wflIndit();
+  futtatUjraindulassal(20u * 60 * 1000, false, [] { return rtcWifiStep == 2 && serialHas("perc mulva"); });
+  futtat(20u * 60 * 1000, [] { return false; });
+  wifiLadderPersistT();
+  const uint32_t perc = rtcWifiOutageMin; const uint8_t fok = rtcWifiStep;
+  CHECK(perc >= 25, "a mentett kieses hossza percben");
+  softReboot(false);
+  CHECK(fok >= 2 && rtcWifiStep == fok && rtcWifiOutageMin == perc, "a fok es a kieses hossza atjott");
+  CHECK(serialHas("Wi-Fi lepcso folytatodik"), "a soros porton is latszik");
+}
+
 struct Scenario { const char* name; void (*fn)(); };
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
@@ -7336,13 +7380,12 @@ static const Scenario kScenarios[] = {
   { "FT5: mindkét LED egyszerre, gyorsan villog", scFT5 },
   { "FT6: hibajelzés közben nem fut az állapotgép, a gombok élnek", scFT6 },
   { "FT7: 5 perc hibajelzés után alvás, időzített ébresztés NÉLKÜL", scFT7 },
-  { "FT8: a normál elalvás továbbra is 1 óra múlva ébred", scFT8 },
   { "WF1: mentett SSID + elérhetetlen router -> nem megy azonnal AP módba", scWF1 },
-  { "WF2: 10 perc + 3 próba + router reset + 3 próba, majd alvás", scWF2 },
+  { "WF2: hidegindulas Wi-Fi nelkul: 10 perc + 3 proba, router reset, alvas nelkul", scWF2 },
   { "WF3: AP mód 5 perc után alszik, időzített ébresztés nélkül", scWF3 },
   { "WF4: fájlírás közben SOHA nem alszik el", scWF4 },
   { "WF5: minden HTTP kérés kitolja az 5 perces határidőt", scWF5 },
-  { "WF6: kapcsolatvesztés -> 3 próba, majd azonnal router reset", scWF6 },
+  { "WF6: kapcsolatvesztes -> 3 proba, majd ESP-ujrainditas (a router erintetlen)", scWF6 },
   { "WD1: egy watchdog reset még nem végzetes", scWD1 },
   { "WD2: 3 watchdog reset után végzetes hibajelzés", scWD2 },
   { "WD3: a hibajelzés 5 perc után alszik, csak gombbal ébred", scWD3 },
@@ -7351,7 +7394,7 @@ static const Scenario kScenarios[] = {
   { "WD6: 1 óra hibátlan működés nullázza a számlálót", scWD6 },
   { "E1: teljes egészséges ciklus (ellenőrzés -> várakozás -> ellenőrzés)", scE1 },
   { "E2: internet kiesik -> router reset -> visszatérés", scE2 },
-  { "E3: reset után a WiFi sem jön vissza -> alvás, újrapróbálkozás", scE3 },
+  { "E3: reset utan a WiFi sem jon vissza -> a lepcso szerint var, alvas nelkul", scE3 },
   { "E4: startConfigPortal() ismételt hívása nem duplikál", scE4 },
   { "E5: wifireset gomb törli a mentett adatokat", scE5 },
   { "P1: érvényes mentés -> 200, fájlok kiírva, újraindítás", scP1 },
@@ -7373,9 +7416,6 @@ static const Scenario kScenarios[] = {
   { "PO2: router 11 perc múlva -> még elkapja", scPO2 },
   { "PO3: router 20 perc múlva -> a reset utáni próbálkozás elkapja", scPO3 },
   { "R1: rossz jelszó -> azonnal AP mód", scR1 },
-  { "R2: 33 kör (~2 nap) után AP mód", scR2 },
-  { "R3: a 2 napos számítás ellenőrzése (33 x 85,5 perc)", scR3 },
-  { "R4: sikeres csatlakozás nullázza a 2 napos ablakot", scR4 },
   { "L1: eseménynapló és a /log oldal", scL1 },
   { "L2: körpuffer túlcsordulás", scL2 },
   { "L3: a végzetes hiba oka naplózva", scL3 },
@@ -7389,7 +7429,6 @@ static const Scenario kScenarios[] = {
   { "SER3: AP és hibajelző mód néma", scSER3 },
   { "SER8: a kuszob korul ingadozo heap sem araszt el", scSER8 },
   { "SER9: mindig buko naplomentes sem araszt el", scSER9 },
-  { "SER10: a 33 kores ketnapos letra soros terhelese", scSER10 },
   { "OV1: több reset ciklus, számlálók korlátosak", scOV1 },
   { "WDT6: nem futó TWDT esetén a sketch felhúzza és tényleg feliratkozik", scWDT6 },
   { "WDT7: sikertelen feliratkozásnál nem etet és nem hazudik védelmet", scWDT7 },
@@ -7467,9 +7506,7 @@ static const Scenario kScenarios[] = {
   { "FS9: csonka olvasás -> végzetes hiba, nem csonka konfig", scFS9 },
   { "FS10: a fileMatches() minden elbukási módja", scFS10 },
   { "R5: a rossz jelszó csak a 2. próbálkozástól látszik (STA.cpp)", scR5 },
-  { "R6: egy újrapróbálkozási kör ébren töltött ideje 25,5 perc", scR6 },
   { "R7: a felismerési idő router hibánál 150 mp élő és 168 mp halott DNS mellett", scR7 },
-  { "R8: 33 kör, 32 alvás - a tényleges türelem ~46 óra", scR8 },
   { "CH1: a chunked válasz keretbájtjai nem buktatják el a tesztet", scCH1 },
   { "CH2: több darabra vágott választ is összefűz", scCH2 },
   { "CH3: darab-kiterjesztés és nagybetűs hexa", scCH3 },
@@ -7532,7 +7569,6 @@ static const Scenario kScenarios[] = {
   { "GWH1: a router reset utani ellenorzo ablakban nincs heap-ujraindulas", scGWH1 },
   { "GWH2: es az ablak utan a gateway-dontes rendesen megszuletik", scGWH2 },
   { "GWH3: mi marad meg es mi szamolodik ujra egy heap-ujraindulas utan", scGWH3 },
-  { "GWH4: a 2 napos ablak szamlaloja is atmegy a heap-ujraindulason", scGWH4 },
   { "GWH5: gombnyomasnal viszont tovabbra is tiszta lap", scGWH5 },
   { "WDT15: ...es a millis() korbefordulasan at is", scWDT15 },
   { "CC1: a portal futasa alatt a loop nem olvassa a konfig puffereket", scCC1 },
@@ -7629,7 +7665,7 @@ static const Scenario kScenarios[] = {
   { "FB1: tartalek DNS DHCP mellett is", scFB1 },
   { "SL1: a Wi-Fi modem-alvas kikapcsolva", scSL1 },
   { "WL1: Wi-Fi vesztes rossz jelszoval - AP mod, nem router reset", scWL1 },
-  { "WL2: Wi-Fi vesztes jelszohiba nelkul - marad a router reset", scWL2 },
+  { "WL2: Wi-Fi vesztes jelszohiba nelkul - ESP-ujrainditas, utana router reset", scWL2 },
   { "SP1: a statikus IP par ellenorzese", scSP1 },
   { "SP2: osszeillo par nelkuli regi konfig - DHCP", scSP2 },
   { "SP3: a portal nem ment osszeillo par nelkuli statikus IP-t", scSP3 },
@@ -7645,10 +7681,18 @@ static const Scenario kScenarios[] = {
   { "RD8: halott router egy napig: nincs alvas, legfeljebb 4 orankent reset", scRD8 },
   { "RD9: heap-ujraindulas: a reset-szamlalo es a lepcso atjon", scRD9 },
   { "RD10: Wi-Fi van, gateway nincs: router hiba, vak ping nelkul", scRD10 },
-  { "RD11: Wi-Fi vesztes a kiesesen belul: a lepcso itt is ervenyes", scRD11 },
+  { "RD11: Wi-Fi vesztes az internetkiesesen belul: elobb ESP-ujrainditas", scRD11 },
   { "RD12: reset utan rossz jelszo: AP mod", scRD12 },
   { "RD13: az 1.1.1.1 hallgat, a 8.8.8.8 valaszol: nincs reset", scRD13 },
   { "RD14: normal uzemben percenkent egy ellenorzes", scRD14 },
+  { "WFL1: az ESP-ujrainditas utan visszajon a Wi-Fi: nincs router reset", scWFL1 },
+  { "WFL2: az ujrainditas sem segit: router reset kb. 5 perc utan", scWFL2 },
+  { "WFL3: tartos Wi-Fi-hiany: 30 perc / 1 / 2 / 4 ora lepcso, 48 ora utan AP", scWFL3 },
+  { "WFL4: varakozas kozben visszajon a Wi-Fi: azonnal folytatja", scWFL4 },
+  { "WFL5: instabil Wi-Fi: a masodik kiesesre mar router reset", scWFL5 },
+  { "WFL6: rossz jelszo a lepcso kozben: AP mod", scWFL6 },
+  { "WFL7: aramszunet torli a lepcsot, hidegindulasnal nincs ujrainditas", scWFL7 },
+  { "WFL8: heap-ujraindulas: a lepcso es a kieses hossza atjon", scWFL8 },
   { "DN1: a router DNS-e hallgat, a ping megy: reset legkesobb ~31 perc", scDN1 },
   { "DN2: a kulso DNS is hallgat: nincs reset", scDN2 },
   { "DN3: 9 perces DNS-zavar: nincs reset", scDN3 },

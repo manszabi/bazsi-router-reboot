@@ -54,8 +54,12 @@ routernél. Ha a router DNS-e 15 percig hallgat, miközben egy külső DNS
 
 - 3 csatlakozási próba, köztük 30 mp.
 - Rossz jelszó → beállító mód (AP), router reset nélkül.
-- A hálózat nem látszik → router reset, majd 1 óra alvás és új kör; kb.
-  46 óra után beállító mód.
+- Ha így sem jön vissza: **előbb az ESP indul újra** (a router érintetlen), és
+  ha az sem segít, **router reset**. Utána egyre ritkábban: 30 perc → 1 óra →
+  2 óra → 4 óránként. Közben percenként próbálkozik, alvás nincs.
+- 48 óra Wi-Fi nélkül → beállító mód. 30 perc stabil kapcsolat mindent nulláz.
+- Áramszünet után 10 perc türelmi idő (a router lassabban bootol), az
+  ESP-újraindítás ott kimarad.
 
 ## Napló
 
@@ -64,7 +68,8 @@ routernél. Ha a router DNS-e 15 percig hallgat, miközben egy külső DNS
 - A legfontosabb bejegyzések: `TEST FAIL` + `HTTP ERROR` (a kiesés kezdete),
   `NET DIAG` (1 = a router sem válaszolt, 2 = szolgáltatói hiba,
   3 = a router DNS-e hallgatott),
-  `ROUTER RESET` (hányadik ebben a kiesésben).
+  `ROUTER RESET` (hányadik ebben a kiesésben), `WIFI RESTART` (az ESP a Wi-Fi
+  miatt indult újra).
 
 ## Tovább
 

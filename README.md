@@ -12,7 +12,7 @@ ESP32-C3 alapú automatikus router újraindító rendszer. Az eszköz folyamatos
 - **Wi-Fi Manager** – böngészőből konfigurálható SSID, jelszó, IP-cím és gateway
 - **Beépített beállító weboldal** – a programba fordítva, nincs feltöltendő fájlrendszer-tartalom
 - **LittleFS** – a beállítások áramszünet után is megmaradnak
-- **Deep sleep Wi-Fi nélkül** – ha a router reset után sincs Wi-Fi, az ESP 1 órára elalszik, majd újrapróbálkozik
+- **Wi-Fi-lépcső** – ha elvész a Wi-Fi, előbb az ESP indul újra, utána router reset, majd egyre ritkábban (30 perc → 1 / 2 / 4 óra); 48 óra után beállító mód
 - **Fizikai gombok** – reset és Wi-Fi reset gombok debounce-szal
 - **Uptime kijelzés** – Soros porton folyamatosan látható az eszköz futási ideje
 
@@ -299,17 +299,15 @@ tartalék DNS (`1.1.1.1`, a router DNS-e után).
 
 | | |
 |---|---|
-| **Elalvás oka** | a router reset után sem jön vissza a Wi-Fi (újrapróbálkozási kör), AP-időtúllépés, végzetes hiba |
-| **Alvás hossza** | 1 óra (timer), vagy 60 mp beragadt gomb esetén |
-| **Ébresztés** | timer **vagy** a reset gomb (D1) lenyomása. Végzetes hiba utáni alvásnál **csak a gomb** |
+| **Elalvás oka** | AP-időtúllépés, végzetes hiba, beragadt gomb |
+| **Alvás hossza** | AP és végzetes hiba: amíg a gombot meg nem nyomják; beragadt gomb: 60 mp |
+| **Ébresztés** | a reset gomb (D1); beragadt gombnál a 60 mp-es időzítő |
 | **Ébredés után** | teljes újraindulás – a `setup()` fut le elölről |
 
 Az ESP32-C3 deep sleepből mindig **újraindulással** ébred: a RAM tartalma elvész,
-így a reset-számláló (`resetEvents`) nullázódik, és az eszköz tiszta lappal
-kezdi az internet figyelését. Három érték él RTC memóriában:
-az újrapróbálkozási körök száma (`rtcRetryRounds`, csak a deep sleepet éli túl),
-a watchdog-újraindulások számlálója és a 32 bejegyzéses diagnosztikai napló
-(mindkettő `RTC_NOINIT`, a resetet is túléli – csak az áramtalanítás törli).
+és az eszköz tiszta lappal kezdi az internet figyelését. Az alvás a Wi-Fi-lépcsőt
+is törli. RTC memóriában (`RTC_NOINIT`) él tovább a watchdog-újraindulások
+számlálója és a 32 bejegyzéses diagnosztikai napló – csak az áramtalanítás törli.
 
 > ⚠️ **Hardver: a relé lába és a lehúzó ellenállás.** A relé vezérlése a
 > `D10` = **GPIO10** lábon van, **22 kΩ lehúzó ellenállással a GND felé**.
@@ -362,7 +360,7 @@ utóbbi ~1,5 KB, 128 bejegyzés).
 
 ### A program felépítése
 
-**Nyolc fordítási egység**, ~3500 sor, **114 függvény**, egysoros kommentekkel. A gerinc
+**Nyolc fordítási egység**, ~3550 sor, **123 függvény**, egysoros kommentekkel. A gerinc
 három üzemmód (`MODE_MONITOR` / `MODE_CONFIG` / `MODE_FATAL`) és három állapot
 (`CHECK` → `WAIT`, vagy `CHECK` → `RESET`). `MODE_MONITOR`-ból van út
 a másik kettőbe, **visszaút nincs**.
@@ -506,7 +504,8 @@ Amit ez hoz:
 | `firstStartDelay` | **max.** 10 perc | Első indítás utáni várakozás – ugyanígy korábban is véget érhet |
 | `wifi_maxRetries` | 3 | Wi-Fi újracsatlakozási próbálkozások |
 | `wifiInterval` | 30s | Szünet a próbálkozások között |
-| `MAX_RETRY_ROUNDS` | 33 | 33 × 25,5 perc + 32 × 60 perc = **46 óra** türelem, körönként egy router újraindítással (az utolsó kör már nem alszik) |
+| `WIFI_STABLE_MS` | 30 perc | Ennyi stabil Wi-Fi után nullázódik a Wi-Fi-lépcső |
+| `WIFI_GIVEUP_MIN` | 48 óra | Ennyi Wi-Fi nélküli idő után AP beállító mód |
 | `AP_TIMEOUT_MS` | 5 perc | AP mód tétlenség után alvás |
 
 ## 📊 Soros monitor
@@ -554,12 +553,12 @@ Router reset legkorabban 1 perc mulva.
 ### Mennyit ír?
 
 A kimenet nem áraszthatja el a konzolt: a költségvetés **30 sor/perc**, és ez a
-legellenségesebb helyzetekben is tartja magát – pislákoló Wi-Fi (9–12), a küszöb
-körül ingadozó heap (15), mindig bukó naplómentés tartós kiesés alatt (10) –,
-míg normál működésben 9. Az AP beállító mód és a végzetes hiba villogó ciklusa a
+legellenségesebb helyzetekben is tartja magát – pislákoló Wi-Fi (8–13), a küszöb
+körül ingadozó heap (13), mindig bukó naplómentés tartós kiesés alatt (22) –,
+míg normál működésben 7. Az AP beállító mód és a végzetes hiba villogó ciklusa a
 ritkított heap-soron kívül **egyetlen sort sem ír**. Ezt az
-ismétlődő események szűrése tartja fenn (`TEST FAIL`, `WIFI LOST`,
-`STUCK BUTTON` sorozatokból csak az első).
+ismétlődő események szűrése tartja fenn (`TEST FAIL` kiesésenként egyszer, a
+`WIFI LOST` és a `STUCK BUTTON` sorozatokból csak az első).
 
 ## 🧠 Heap felügyelet
 
@@ -601,8 +600,8 @@ használja fel; gombnyomásnál nincs átvitel):
 
 - `testState.resetEvents` – a reset-lépcső állása. Nélküle egy heap-újraindulás
   után a következő reset 30+ perc helyett 2–15 perc múlva jönne.
-- `rtcRetryRounds` – a **2 napos ablak** állása. Nélküle az eszköz sosem érné el
-  a 2 napos határt, tehát sosem menne AP módba.
+- a **Wi-Fi-lépcső** foka és a kiesés hossza – ezek eleve `RTC_NOINIT`-ben élnek,
+  az újraindulás előtt csak a kiesés hossza mentődik percre pontosan.
 
 Részletek: [MUKODES.md](MUKODES.md)
 
@@ -791,9 +790,8 @@ Ha a program ismételten megakad, az újraindítgatás önmagában nem megoldás
 többi végzetes hibánál: mindkét LED villog, 5 perc után deep sleep, és **csak a
 reset gomb ébreszti**.
 
-- A számláló `RTC_NOINIT_ATTR`-ben van. Ez **nem** ugyanaz, mint a deep sleepnél
-  használt `RTC_DATA_ATTR`: az utóbbit egy watchdog reset újrainicializálná,
-  azaz épp azt veszítenénk el, amit számolni akarunk.
+- A számláló `RTC_NOINIT_ATTR`-ben van, mert az `RTC_DATA_ATTR`-t egy watchdog
+  reset újrainicializálná, azaz épp azt veszítenénk el, amit számolni akarunk.
 - Rendellenesnek számít: `ESP_RST_TASK_WDT`, `ESP_RST_INT_WDT`, `ESP_RST_WDT`,
   `ESP_RST_PANIC`, `ESP_RST_CPU_LOCKUP`.
 - **Áramtalanítás** vagy külső reset nullázza (emberi beavatkozás → tiszta lap).
@@ -819,7 +817,8 @@ Egységes politika **minden** ágon: **3 próba, köztük 30 másodperc szünet*
 | Helyzet | Viselkedés |
 |---|---|
 | Nincs mentett SSID | Azonnal **AP beállító portál** |
-| Van SSID, de nem érhető el | **legfeljebb 10 perc várakozás** (`firstStartDelay`), majd 3 próba → ha így sem megy: **AP portál** |
+| Van SSID, de nem érhető el | **legfeljebb 10 perc várakozás** (`firstStartDelay`), majd 3 próba → ha így sem megy: router reset, utána a Wi-Fi-lépcső (lent) |
+| Rossz jelszó | 3 próba után **AP portál**, router reset nélkül |
 
 A 10 perces várakozás a lényeg: áramszünet után az ESP másodpercek alatt
 elindul, a router viszont percekig bootol.
@@ -858,26 +857,31 @@ mértük.
 > hívott. A 60 mp-es köz így is korlátoz: egy 10 perces várakozás alatt
 > legfeljebb 10 próba fut.
 
-### Működés közben megszakad a kapcsolat
+### Működés közben megszakad a kapcsolat – a Wi-Fi-lépcső
 
-```
-kapcsolatvesztés → 3 próba (30 mp szünetekkel)
-                 → rossz jelszó → AP beállító portál (router reset nélkül)
-                 → egyéb sikertelen → ROUTER ÚJRAINDÍTÁS (relé ki 90 mp, be);
-                   ha a kiesés már kapott resetet, a lépcső szerint később
-                 → max. 10 perc várakozás (RESET_DELAY, korán is végetérhet)
-                 → 3 próba (30 mp szünetekkel)
-                 → sikertelen → rossz jelszó: AP mód; egyébként 1 óra alvás,
-                   33 kör (~46 óra) után AP mód
-```
+A Wi-Fi elvesztése nem mindig a router hibája (gyenge jel az ESP helyén, a
+Wi-Fi-modul elakadása), ezért előbb az ESP indítja újra magát:
+
+| Fok | Mikor | Mit csinál |
+|:-:|---|---|
+| 1 | 3 próba (30 mp szünetekkel) sem segít | **ESP-újraindítás**, a router érintetlen; utána nincs 10 perces türelmi idő |
+| 2 | utána ismét 3 próba sem segít | **router reset**, legfeljebb 10 perc várakozás, 3 próba |
+| 3 … | még mindig nincs Wi-Fi | újabb router reset **30 perc → 1 óra → 2 óra → 4 óránként** |
+| – | 48 órája nincs Wi-Fi | **AP beállító mód** |
+
+A várakozás ébren történik, közben percenként egy csatlakozási próba fut; ha a
+Wi-Fi visszajön, azonnal folytatódik a figyelés. A lépcső **30 perc stabil
+kapcsolat után** nullázódik, így egy instabil routernél a második kiesés már
+router resetet kap. Rossz jelszónál bármelyik fokon azonnal AP mód. Az
+újraindulás előtt a fok és a kiesés hossza RTC memóriába mentődik (ellenőrző
+értékkel); az áramszünet, a gombok és az alvás törlik. Mérve: a Wi-Fi
+elvesztésétől a router resetig **5,3 perc** (`WFL2`).
 
 > **Ha te magad áramtalanítod a routert:** az eszköz ezt **nem tudja
-> megkülönböztetni** attól, hogy a router lefagyott – a hálózat mindkét esetben
-> ugyanúgy eltűnik. A türelmi idő a hálózat eltűnésétől az ESP saját
-> router-resetjéig **2,0 perc** (mérve: `PWR3`). Ha ezen belül visszadugod, az
-> ESP **hozzá sem nyúl** a reléhez, csendben visszacsatlakozik (`PWR4`). Ha
-> tovább tart, ő is ad neki egy 90 másodperces áramtalanítást – kellemetlen,
-> de magától rendbe jön.
+> megkülönböztetni** attól, hogy a router lefagyott. A türelmi idő a hálózat
+> eltűnésétől az ESP saját router-resetjéig **4,3 perc** (mérve: `PWR3`; közben
+> az ESP egyszer újraindul). Ha ezen belül visszadugod, az ESP **hozzá sem nyúl**
+> a reléhez (`PWR4`).
 
 ### Áramszünet
 
@@ -1083,7 +1087,7 @@ jöhet egy áramszünet, ami az RTC naplót elvinné.
 
 | | |
 |---|---|
-| Mikor | router reset előtt, AP módba váltás előtt, **minden alvás előtt** (egyetlen közös ponton, az `enterDeepSleep()` elején), és a **heap miatti önkéntes újraindulás** előtt |
+| Mikor | router reset előtt, AP módba váltás előtt, **minden alvás előtt** (egyetlen közös ponton, az `enterDeepSleep()` elején), a **heap miatti** és a **Wi-Fi miatti** saját újraindulás előtt |
 | Írás közben | nincs alvás, újraindulás és másik írás – ugyanaz a **konfigurációs zár**, amit a webes mentés használ; foglalt zárnál a mentés **kimarad**, nem blokkol |
 | Sikeresség | **visszaolvasással** ellenőrizve; a sikertelenség **nem végzetes**, az RTC napló ettől még ép |
 | Hogyan | **hozzáfűz, nem ír felül**: a fájl megőrzi a régi tartalmát, és a végére kerül, ami a legutóbbi mentés óta keletkezett |
@@ -1152,8 +1156,8 @@ sleepet **túléli**, ezért használható a bejegyzések rendezésére bootolá
 
 **Egy esemény rögzítése nem ír flasht** – az RTC körpufferbe megy, tehát nincs
 naplóírási hiba, amit kezelni kellene, és akkor is olvasható marad, ha épp a
-fájlrendszer csatolása bukott meg. Flashre csak a **négy mentési ponton**
-íródik ki (router reset, AP mód, alvás, heap-újraindulás előtt).
+fájlrendszer csatolása bukott meg. Flashre csak az **öt mentési ponton**
+íródik ki (router reset, AP mód, alvás, heap- és Wi-Fi miatti újraindulás előtt).
 
 Ennek a következménye mérve: **működő internet mellett az eszköz 67,9 perc
 alatt nulla flash-írást végez.** Egy napig halott internetnél 18 írás (9 reset

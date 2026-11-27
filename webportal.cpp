@@ -433,8 +433,8 @@ static void sendDiagnosticLog(AsyncWebServerRequest* request) {
   const DiagCounters dc = diagCounters();
   r->printf("<b>Watchdog ujraindulasok:</b> %u / %u<br>",
             (unsigned)dc.wdtResets, (unsigned)dc.wdtLimit);
-  r->printf("<b>Ujraprobalkozasi korok:</b> %u / %u<br>",
-            (unsigned)dc.retryRounds, (unsigned)dc.retryLimit);
+  r->printf("<b>Wi-Fi lepcso:</b> %u. fok, kieses %u perce<br>",
+            (unsigned)dc.wifiStep, (unsigned)dc.wifiOutageMin);
 
   {
     const uint32_t up = (uint32_t)(esp_timer_get_time() / 1000000);
@@ -493,17 +493,18 @@ static void sendDiagnosticLog(AsyncWebServerRequest* request) {
 
   r->print(F("<h3>Param jelentese</h3><ul>"
              "<li>BOOT: az indulas oka (lasd fent)</li>"
-             "<li>WIFI OK: hanyadik ujraprobalkozasi korben sikerult</li>"
+             "<li>WIFI OK: a Wi-Fi lepcso foka csatlakozaskor (0 = nem volt kieses, "
+             "1 = az ESP ujrainditasa segitett)</li>"
              "<li>WIFI LOST: a WiFi.status() erteke</li>"
              "<li>TEST FAIL: kieses kezdete; a bukott tartalek HTTP teszt sorszama (1-5)</li>"
              "<li>ROUTER RESET: hanyadik ujrainditas ebben a kiesesben</li>"
              "<li>AP MODE: 1 = nincs SSID, 2 = rossz jelszo, "
-             "3 = letelt a 2 nap, 4 = a gateway sem erheto el</li>"
+             "3 = 48 oraja nincs Wi-Fi, 4 = a gateway sem erheto el</li>"
              "<li>CONFIG SAVED: mindig 0 - itt maga a bejegyzes az "
              "informacio, parametere nincs</li>"
              "<li>GW UNREACH: 1 = a router reset elott, 2 = utana is</li>"
-             "<li>SLEEP: 1 = ujraprobalkozas (nincs Wi-Fi), "
-             "3 = AP idotullepes, 4 = vegzetes hiba</li>"
+             "<li>SLEEP: 3 = AP idotullepes, 4 = vegzetes hiba</li>"
+             "<li>WIFI RESTART: az ESP a Wi-Fi miatt indult ujra (param: a WiFi.status() erteke)</li>"
              "<li>FATAL: 1 = LittleFS, 2 = konfig olvasas, "
              "3 = watchdog, 4 = wifireset torles, 5 = tartosan keves heap</li>"
              "<li>WDT RESET: hanyadik rendellenes ujraindulas</li>"

@@ -10,9 +10,10 @@ legyen.
 Jelölés: lekerekített doboz = belépési/kilépési pont, rombusz = döntés,
 téglalap = művelet. Az `EV_*` címkék a diagnosztikai napló eseménykódjai
 (lásd `MUKODES.md` 15. fejezet). A `saveEventLog()` a naplót a LittleFS-re is
-kiírja – **négy** fontos pillanatban: **router reset előtt**, **AP módba váltás
+kiírja – **öt** fontos pillanatban: **router reset előtt**, **AP módba váltás
 előtt**, **minden `enterDeepSleep()`-en át vezető alvás előtt** (egyetlen közös
-ponton, a függvény elején), és a **heap miatti önkéntes újraindulás előtt**;
+ponton, a függvény elején), a **heap miatti** és a **Wi-Fi miatti** saját
+újraindulás előtt;
 így egy áramszünet sem viszi el. A mentés **hozzáfűz**, nem ír felül: a fájl
 saját, 128 bejegyzéses gyűrű, az RTC napló 32-es gyűrűje pedig csak a legutóbbi
 mentés óta eltelt időt őrzi. Egyetlen kivétel a beragadt gomb 60 mp-es alvása:
@@ -35,15 +36,14 @@ stateDiagram-v2
     Setup --> MODE_CONFIG: nincs mentett SSID
     Setup --> MODE_FATAL: LittleFS / konfig / 3x watchdog hiba
     Setup --> StuckSleep: beragadt gomb
-    MODE_MONITOR --> MODE_CONFIG: rossz jelszó / 33 kör letelt / rossz statikus IP
-    MODE_MONITOR --> RetrySleep: hálózat nincs (1 óra, max 33 kör)
+    MODE_MONITOR --> MODE_CONFIG: rossz jelszó / 48 órája nincs Wi-Fi / rossz statikus IP
+    MODE_MONITOR --> Restart: Wi-Fi-lépcső 1. foka (ESP-újraindítás)
     MODE_MONITOR --> Restart: tartósan kritikus heap (önkéntes újraindulás)
     MODE_MONITOR --> MODE_FATAL: 3x heap-újraindulás sem segített
     MODE_CONFIG --> ApSleep: 5 perc tétlenség (csak gombbal ébred)
     MODE_CONFIG --> Restart: sikeres mentés (2 s múlva)
     MODE_FATAL --> FatalSleep: 5 perc villogás után (csak gombbal ébred)
     StuckSleep --> Setup: 60 s timer
-    RetrySleep --> Setup: 1 óra timer vagy reset gomb
     ApSleep --> Setup: reset gomb
     FatalSleep --> Setup: reset gomb
     Restart --> Setup
@@ -69,7 +69,7 @@ flowchart TD
     BOOTLOG --> ARM0["armButtonLatches()<br>a gomb-megszakítások élesítése<br>(a beragadt-gomb ellenőrzés UTÁN)"]
     ARM0 --> WCHK{"checkWatchdogResets()<br>rendellenes reset volt?<br>(TASK_WDT / INT_WDT / PANIC / LOCKUP)"}
     WCHK -->|"igen, sorozatban a 3."| FATAL["enterFatal()<br>MODE_FATAL, EV_FATAL(3)"]
-    WCHK -->|"nem, vagy még 3 alatt"| HC["initHeapState() + applyHeapCarry()<br>a heap-újraindulás átvitelének felhasználása:<br>resetEvents és rtcRetryRounds visszaállítása<br>(pontosan egyszer)"]
+    WCHK -->|"nem, vagy még 3 alatt"| HC["initHeapState() + applyHeapCarry()<br>a heap-újraindulás átvitele: resetEvents (pontosan egyszer)<br>initWifiLadder(): a Wi-Fi-lépcső (magic-kel);<br>ha az 1. fokon áll, a first start kimarad"]
     FATAL --> HC
     HC --> FS{"initLittleFS()<br>begin(formatOnFail = true)<br>formázás: 128 szektor, 4-7 s"}
     FS -->|"csatolás sikertelen"| FATAL2["enterFatal()<br>EV_FATAL(1)"]
@@ -81,7 +81,7 @@ flowchart TD
     PERS --> ISFATAL{MODE_FATAL?}
     ISFATAL -->|igen| TOLOOP([loop: hibajelzés])
     ISFATAL -->|nem| WIFI{"initWiFi()<br>statikus IP ha érvényes, különben DHCP<br>csatlakozás max 20 s"}
-    WIFI -->|siker| MON["MODE_MONITOR<br>EV_WIFI_OK, rtcRetryRounds = 0<br>WiFi LED = HIGH"]
+    WIFI -->|siker| MON["MODE_MONITOR<br>EV_WIFI_OK (param: a lépcső foka)<br>WiFi LED = HIGH"]
     WIFI -->|"ssid üres"| AP["startConfigPortal()<br>MODE_CONFIG, EV_AP_MODE(1)"]
     WIFI -->|"ssid van, de nem érhető el"| FIRST["MODE_MONITOR<br>first start várakozás indul<br>(3. ábra)"]
     MON --> TOLOOP2([loop: ELŐBB handleFirstStart 3. ábra,<br>utána az állapotgép])
@@ -108,11 +108,7 @@ flowchart TD
     BACK -.->|"a következő ütem"| PRB
     WAIT -->|igen| REC{"reconnectWifi()<br>3 próba, 30 s szünetekkel<br>(próbánként 20 s timeout)"}
     REC -->|siker| DONE["firstStart lezárva<br>normál monitor üzem (4. ábra)"]
-    REC -->|sikertelen| AUTH{"WL_CONNECT_FAILED?<br>(hitelesítési hiba)"}
-    AUTH -->|igen| GU["wifiGiveUp() (6. ábra)"]
-    AUTH -->|nem| RST{"routerResetAndRetry():<br>relé 90 s ki + max 10 perc bootvárás<br>(60 s-onként onlineProbe, korai kilépéssel)<br>+ reconnectWifi()"}
-    RST -->|siker| DONE
-    RST -->|sikertelen| GU
+    REC -->|sikertelen| GU["wifiFailed(hidegindulás)<br>(6. ábra) – az ESP-újraindítás kimarad,<br>az első lépés a router reset"]
 ```
 
 ---
@@ -125,7 +121,7 @@ flowchart TD
     SER --> RP{"restartPending és<br>letelt a 2 s türelmi idő?"}
     RP -->|igen| WFW["lockConfigBeforeShutdown()<br>(fájlírás megvárása max 5 s,<br>ÉS a zár megszerzése)"] --> RS([ESP.restart])
     RP -->|nem| WDC0["1 óra hibátlan futás után:<br>watchdog + heap számláló nullázása"]
-    WDC0 --> HEAP["checkHeap() – 10 s-onként mér<br>30 percenként állapotsor<br>25 kB alatt figyelmeztet (csak az átlépéskor)<br>KRITIKUS: szabad &lt; 12 kB VAGY legnagyobb tömb &lt; 6 kB<br>ha 3 egymást követő mérésen át kitart (30 s):<br>ÖNKÉNTES ÚJRAINDULÁS – csak MODE_MONITOR-ban,<br>fájlírás / relé-impulzus / reset-ellenőrző ablak alatt SOHA<br>EV_HEAP_RESTART + saveEventLog() a flashbe,<br>a resetEvents ÉS az rtcRetryRounds átvitelével"]
+    WDC0 --> HEAP["checkHeap() – 10 s-onként mér<br>30 percenként állapotsor<br>25 kB alatt figyelmeztet (csak az átlépéskor)<br>KRITIKUS: szabad &lt; 12 kB VAGY legnagyobb tömb &lt; 6 kB<br>ha 3 egymást követő mérésen át kitart (30 s):<br>ÖNKÉNTES ÚJRAINDULÁS – csak MODE_MONITOR-ban,<br>fájlírás / relé-impulzus / reset-ellenőrző ablak alatt SOHA<br>EV_HEAP_RESTART + saveEventLog() a flashbe,<br>a resetEvents átvitelével, a Wi-Fi-lépcső mentésével"]
     HEAP --> NTP["ensureNtp()<br>óraszinkron indítása, amint van kapcsolat<br>(bármelyik úton jött is létre)"]
     NTP --> MODE{deviceMode}
     MODE -->|MODE_FATAL| FB["Mindkét LED együtt villog (5 Hz)<br>gombok élnek"] --> F5{"5 perc letelt?"}
@@ -139,12 +135,9 @@ flowchart TD
     FST -->|nem| SM{currentState}
 
     SM -->|CHECK_STATE| WL{"WiFi.status()<br>== WL_CONNECTED?"}
-    WL -->|nem| RC{"EV_WIFI_LOST (csak a sorozat 1.)<br>reconnectWifi()"}
+    WL -->|nem| RC{"EV_WIFI_LOST (csak a sorozat 1.)<br>a lépcső várakozása alatt 1 próba (initWiFi),<br>különben 3 próba (reconnectWifi)"}
     RC -->|siker| L
-    RC -->|"rossz jelszó"| GUP["wifiGiveUp() → AP mód"] --> L
-    RC -->|"egyéb sikertelen"| WDUE{"volt már reset ebben a<br>kiesésben, és a lépcső<br>még nem engedi?"}
-    WDUE -->|igen| WAIT1["WAIT_STATE"] --> L
-    WDUE -->|nem| RST["Router reset, NET DIAG 1<br>(5. ábra)"] --> L
+    RC -->|sikertelen| GUP["wifiFailed() (6. ábra):<br>rossz jelszó → AP · ESP-újraindítás ·<br>router reset · várakozás a lépcső szerint"] --> L
     WL -->|igen| NET{"internetOk()<br>ping 1.1.1.1 → ping 8.8.8.8 →<br>HTTP a soron következő végpontra"}
     NET -->|"bármelyik siker"| SUC["kiesés vége, resetEvents = 0"] --> DNSC["routerDnsCheck()<br>(4b. ábra)"]
     DNSC -->|"nincs reset"| WAIT0["WAIT_STATE"] --> L
@@ -206,7 +199,7 @@ flowchart TD
     PRB -->|"mindkettő OK"| GW2
     PRB -->|"még nem, és letelt a 10 perc"| P3["WiFi.disconnect(true)<br>reconnectWifi(): 3 próba, 30 s szünet<br>(a statikus IP/DNS újra beáll)"]
     PRB -->|"még nem, és van hátra idő"| P2
-    P3 -->|sikertelen| GU["wifiGiveUp() (6. ábra)"]
+    P3 -->|sikertelen| GU["wifiFailed() (6. ábra)"]
     P3 -->|siker| GW2{"Statikus IP, és a gateway<br>továbbra sem pingelhető?"}
     GW2 -->|igen| APX["EV_GW_UNREACHABLE(2) + EV_AP_MODE(4)<br>startConfigPortal()<br>(valószínűleg rossz a statikus IP)"]
     GW2 -->|nem| OK["CHECK_STATE"]
@@ -214,25 +207,24 @@ flowchart TD
 
 ---
 
-## 6. `wifiGiveUp()` – a 46 órás kitartási politika
+## 6. `wifiFailed()` – a Wi-Fi-lépcső
 
 ```mermaid
 flowchart TD
-    IN([3 csatlakozási próba elbukott]) --> AUTH{"WL_CONNECT_FAILED?<br>(explicit hitelesítési hiba)"}
-    AUTH -->|"igen – rossz jelszó"| AP2["startConfigPortal()<br>EV_AP_MODE(2)"]
-    AUTH -->|nem| INC["rtcRetryRounds++<br>(RTC_DATA_ATTR: túléli a deep sleepet,<br>de bekapcsolásra ÉS szoftveres resetre<br>nullázódik – a heap-újraindulás viszont<br>átviszi, mert az nem emberi beavatkozás)"]
-    INC --> R33{"rtcRetryRounds >= 33?<br>(MAX_RETRY_ROUNDS)"}
-    R33 -->|"igen – ~46 óra telt el"| AP3["rtcRetryRounds = 0<br>startConfigPortal()<br>EV_AP_MODE(3)"]
-    R33 -->|nem| SL["retrySleep()<br>EV_SLEEP(1)<br>deep sleep 1 óra, majd új kör"]
+    IN([a Wi-Fi-próbák elbuktak]) --> AUTH{"WL_CONNECT_FAILED?<br>(rossz jelszó)"}
+    AUTH -->|igen| AP2["lépcső törlése<br>startConfigPortal(), EV_AP_MODE(2)"]
+    AUTH -->|nem| GIVE{"48 órája nincs Wi-Fi?<br>(WIFI_GIVEUP_MIN)"}
+    GIVE -->|igen| AP3["lépcső törlése<br>startConfigPortal(), EV_AP_MODE(3)"]
+    GIVE -->|nem| S0{"0. fok, és nem hidegindulás?"}
+    S0 -->|igen| RST["1. fok mentése az RTC-be (magic-kel)<br>EV_WIFI_RESTART, saveEventLog()<br>ESP.restart() – a router érintetlen"]
+    S0 -->|nem| PEND{"2+. fok, és a lépcső szerint<br>még nem esedékes?<br>30 → 60 → 120 → 240 perc"}
+    PEND -->|igen| WAIT["WAIT_STATE: percenként 1 próba"]
+    PEND -->|nem| RR["fok++ (legalább 2)<br>startRouterReset(NET DIAG 1)"]
 ```
 
-Egy kör ébren töltött ideje ~25,5 perc (10 perc várakozás + 3 próba + 90 s
-reset + 10 perc bootvárás + 3 próba). A két 10 perces tétel **felső korlát** –
-de erre a számításra ez nem hat: ha a hálózat végig halott (márpedig ez a
-szakasz pontosan arról szól), az `onlineProbe()` sosem sikerül, és a körök
-teljes hosszukban futnak. A körök között 1 óra alvás:
-33 × 25,5 perc + 32 × 60 perc ≈ **46 óra** türelem, mielőtt AP módba vált
-(mérve: `R8` teszt).
+A lépcső **30 perc stabil Wi-Fi után** nullázódik (`wifiConnectedTick()`). Az
+áramszünet, a gombok, a mentés utáni újraindulás és minden alvás törli; a saját,
+a heap miatti és a watchdog-újraindulást túléli (`RTC_NOINIT`).
 
 ---
 
@@ -300,7 +292,6 @@ flowchart TD
 
 | Alvás | Kiváltó ok | Napló | Timer | Reset gomb ébreszt? |
 |---|---|---|:---:|:---:|
-| `retrySleep()` | a hálózat nem látszik, kör < 33 | `EV_SLEEP(1)` | 1 óra | igen |
 | `apSleep()` | AP portál 5 perc tétlenség | `EV_SLEEP(3)` | – | igen |
 | `fatalSleep()` | végzetes hiba, 5 perc villogás után | `EV_SLEEP(4)` | – | igen |
 | beragadt gomb\* | reset/wifireset LOW induláskor **és 3 s után is** | `EV_STUCK_BUTTON` | 60 s | **nem** (szándékosan) |
@@ -319,14 +310,8 @@ memóriában túléli:
 | diagnosztikai napló (`rtcEvMagic`, `rtcEvNext`, `rtcEvents`) | `RTC_NOINIT` | deep sleep, watchdog reset, reset gomb – csak az áramtalanítás törli |
 | `rtcSavedEvNext` (a legutóbbi fájlmentés pozíciója) | `RTC_NOINIT` | ugyanaz |
 | watchdog számláló (`rtcWdtMagic`, `rtcWdtResets`) | `RTC_NOINIT` | ugyanaz |
-| heap-újraindulások és az átvitel (`rtcHeapMagic`, `rtcHeapRestarts`, `rtcCarryResetEvents`, `rtcCarryRetryRounds`) | `RTC_NOINIT` | ugyanaz |
-| `rtcRetryRounds` (a 2 napos ablak) | **`RTC_DATA`** | csak a deep sleepet – bekapcsolásra és **szoftveres resetre nullázódik** |
-
-> A `rtcRetryRounds` eltérő tárolása szándékos: a **felhasználói** beavatkozás
-> (reset gomb) tiszta 2 napos ablakot ad. A heap miatti **önkéntes**
-> újraindulás viszont nem felhasználói beavatkozás, ezért azt a
-> `rtcCarryRetryRounds` átviszi – különben az eszköz sosem érné el a 2 napos
-> határt, vagyis sosem menne AP módba.
+| heap-újraindulások és az átvitel (`rtcHeapMagic`, `rtcHeapRestarts`, `rtcCarryResetEvents`) | `RTC_NOINIT` | ugyanaz |
+| a Wi-Fi-lépcső (`rtcWifiMagic`, `rtcWifiStep`, `rtcWifiOutageMin`) | `RTC_NOINIT` | a saját, a heap miatti és a watchdog-újraindulást – az áramszünet, a gombok és az alvás törlik |
 
 A **valós idő** (`gettimeofday()`) szintén túléli a deep sleepet – az RTC
 órából jön –, míg a `millis()` minden ébredéskor nulláról indul.

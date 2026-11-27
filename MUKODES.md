@@ -39,67 +39,24 @@ Az eszköz mindig pontosan egy üzemmódban van.
 | Van mentett SSID? | Viselkedés |
 |---|---|
 | **Nincs** | Azonnal `MODE_CONFIG` |
-| **Van** | **legfeljebb 10 perc** várakozás (`firstStartDelay`), majd **3 próba** (köztük 30 mp). A várakozás korábban véget ér, ha a 60 mp-enkénti próbánál a hálózat **és** az internet is megvan – lásd lent |
+| **Van** | **legfeljebb 10 perc** várakozás (`firstStartDelay`), majd **3 próba** (köztük 30 mp). A várakozás korábban véget ér, ha a percenkénti próbánál a hálózat **és** az internet is megvan – lásd lent |
 
-A 3 próba után a **hiba oka** dönt, nem az eltelt idő:
+A 3 próba után a **hiba oka** dönt:
 
 | `WiFi.status()` | Jelentés | Következmény |
 |---|---|---|
 | `WL_CONNECT_FAILED` | hitelesítési hiba → rossz jelszó | **Azonnal AP mód** |
-| bármi más | a hálózat nem látszik → a router lekapcsolva | **1 órás alvás, majd új kör** |
+| bármi más | a hálózat nem látszik | a **Wi-Fi-lépcső** (5. fejezet) – hidegindulásnál az ESP-újraindítás kimarad, az első lépés a router reset |
 
 Az ESP32 core megkülönbözteti a kettőt (`STA.cpp`): `WIFI_REASON_NO_AP_FOUND` →
 `WL_NO_SSID_AVAIL`, `WIFI_REASON_AUTH_FAIL` → `WL_CONNECT_FAILED`. Konzervatívan
 döntünk: **csak** az explicit hitelesítési hiba küld AP módba, mert a téves
 „várjunk tovább" ára késleltetett újrakonfigurálás, a téves „AP mód" ára viszont
-egy halott eszköz.
-
-### Meddig próbálkozik? – közel 2 nap
-
-Egy kör **tartalmaz egy router újraindítást** is: ha a Wi-Fi nem látszik, a
-router is lehet lefagyva – pontosan ez az eszköz dolga.
-
-```
-indulás → 10,0 perc  firstStartDelay várakozás
-        →  2,0 perc  3 csatlakozási próba (20 mp timeout, 30 mp szünet)
-        →  1,5 perc  ROUTER ÚJRAINDÍTÁS (relé ki, RESET_PULSE)
-        → 10,0 perc  várakozás a router bootolására (RESET_DELAY)
-        →  2,0 perc  újabb 3 csatlakozási próba
-        → 60,0 perc  deep sleep
-        = 85,5 perc / kör
-```
-
-> A két 10 perces tétel **felső korlát**. A firmware 60 mp-enként megnézi, hogy
-> visszajött-e a hálózat és az internet, és ha igen, azonnal továbblép. Erre a
-> táblázatra ez mégsem hat: ha a hálózat végig halott – márpedig ez a szakasz
-> pontosan arról szól –, a próbák sosem sikerülnek, és a körök a fenti teljes
-> hosszukban futnak. A 46 órás türelem tehát változatlan.
-
-| | |
-|---|---|
-| Egy kör | **85,5 perc** (ebből 25,5 perc ébren) |
-| Körök száma | `MAX_RETRY_ROUNDS = 33` |
-| Összesen | 33 × 25,5 + 32 × 60 = 2761,5 perc = **46,0 óra** |
-
-Az utolsó kör **nem alszik egyet**: a `wifiGiveUp()` előbb növeli a számlálót,
-aztán ellenőrzi, tehát a 33.-nál már AP módba megy. Ezért 33 × 85,5 helyett
-33 × 25,5 + 32 × 60 a helyes összeg. Két napon belül marad, tartalékkal is:
-34 kör is csak 47,5 óra lenne. Két nap alatt legfeljebb **33
-router-újraindítás** történik. Az `R8` teszt végigjátssza mind a 33 kört.
-
-> **Rossz jelszó esetén nincs router reset.** Ha a `WiFi.status()`
-> `WL_CONNECT_FAILED`-et ad, az eszköz azonnal AP módba megy – a router
-> áramtalanítása ilyenkor értelmetlen lenne.
-
-Két nap után AP beállító mód, majd 5 perc után alvás. A körszámláló
-`RTC_DATA_ATTR`-ben van: a deep sleepet túléli, de **bekapcsolásra és a reset
-gombra nullázódik** – kézi beavatkozás mindig friss 2 napos ablakot ad. Sikeres
-csatlakozás szintén nullázza.
+egy halott eszköz. A rossz jelszót a core csak a 2. próbától jelzi (`R5`).
 
 A 10 perces várakozás oka: áramszünet után az ESP másodpercek alatt elindul,
-a router viszont percekig bootol.
-
-**Teljes idő bekapcsolástól az AP módig:** kb. 20 mp + 10 perc + ~2 perc ≈ **12,5 perc**
+a router viszont percekig bootol. Hidegindulástól az első router resetig mérve
+**12 perc** (`WF2`).
 
 ### Mekkora áramszünetet él túl felügyelet nélkül?
 
@@ -107,30 +64,24 @@ Teszttel kimérve (`PO1`–`PO3`):
 
 | A router ennyi idő múlva áll fel | Eredmény |
 |---|---|
-| 8 perc | Kivárja az első körben, csatlakozik |
-| 11 perc | Az első kör első próbálkozási ablakában elkapja |
-| 20 perc | A router reset utáni második ablak elkapja – **még az első körben** |
-| ennél tovább | Óránként új kör, mindegyikben egy router újraindítással |
-| **~46 óránál tovább** | Feladja: AP mód, majd 5 perc után alvás |
+| 8 perc | Kivárja a türelmi időben, csatlakozik |
+| 11 perc | Az első 3 próba elkapja |
+| 20 perc | A router reset utáni várakozás elkapja |
+| ennél tovább | a Wi-Fi-lépcső: router reset 30 perc / 1 óra / 2 óra / 4 óra szünettel, közben percenként próba |
+| **48 óránál tovább** | Feladja: AP mód, majd 5 perc után alvás |
 
-**A két hosszú várakozás 60 mp-enkénti próbája** (`onlineProbe()`) két lépésből
+**A hosszú várakozások percenkénti próbája** (`onlineProbe()`) két lépésből
 áll, ebben a sorrendben:
 
 1. **Wi-Fi – kísérlet, nem teszt.** Kapcsolat híján csak *kezdeményez* egyet
    (aszinkron `WiFi.begin()`, nem vár rá), és kilép. A kudarcnak **nincs
-   következménye**: nem nő számláló, nem változik állapot. A „3 próba, aztán
-   router reset" eszkaláció ettől független, az a várakozás *lejárta után* jön.
+   következménye**: nem nő számláló, nem változik állapot.
 2. **Internet – csak meglévő kapcsolat mellett.** Ugyanaz az ellenőrzés, mint
    normál üzemben (3. fejezet). Hálózat nélkül el sem indul.
 
 A várakozás akkor zárul korábban, ha **mindkét lépés** sikerül. A próba
 **ismétlődik**, tehát elég, ha a kapcsolat a várakozás *bármely* pontján
-helyreáll – a kilépés az azt követő ütemben megtörténik. A teljes időt csak
-akkor várjuk ki, ha végig nincs meg (mérve: `OP7`).
-
-Egy kör két próbálkozási ablakot ad (a router reset előtt és után), így az első
-kör önmagában ~25 percet fed le. Ami ebből kimarad, azt a következő körök
-kapják el. A tényleges határ **46,0 óra** (mérve: `R8`).
+helyreáll (mérve: `OP7`).
 
 ---
 
@@ -283,39 +234,53 @@ nincs út sehová – jellemzően **elgépelt statikus IP** miatt, amit a router
 
 ### Ha az újracsatlakozás sem sikerül
 
-A reset után 3 próba; ha egyik sem sikerül: `wifiGiveUp()` (6. fejezet).
+A reset után 3 próba; ha egyik sem sikerül: a Wi-Fi-lépcső (5. fejezet).
 
 ---
 
-## 5. Wi-Fi kapcsolat megszakad működés közben
+## 5. Wi-Fi kapcsolat megszakad – a Wi-Fi-lépcső
 
-| Lépés | Időtartam |
-|---|---|
-| Wi-Fi LED **ki** (a kapcsolat tényleg nincs meg), státusz LED marad **be** | azonnal |
-| **3 újracsatlakozási próba**, köztük 30 mp | max. ~2 perc |
-| Rossz jelszó (`WL_CONNECT_FAILED`) → **AP beállító mód**, router reset nélkül | |
-| Egyéb sikertelen → azonnal **router újraindítás** (4. pont, `NET DIAG` 1); ha a kiesés már kapott resetet, a lépcső szerint később | |
+Működés közben a kiesést a percenkénti ellenőrzés veszi észre (Wi-Fi LED **ki**,
+a státusz LED marad **be**). Utána:
+
+| Fok | Mikor | Mit csinál |
+|:-:|---|---|
+| 0 → 1 | 3 újracsatlakozási próba (köztük 30 mp) sem segít | **az ESP újraindítja magát**, a router érintetlen; utána nincs 10 perces türelmi idő |
+| 1 → 2 | az újraindulás után ismét 3 próba sem segít | **router reset** (`NET DIAG` 1), legfeljebb 10 perc várakozás a bootra, utána 3 próba |
+| 2 → 3 … | még mindig nincs Wi-Fi | **30 perc**, majd **1 óra**, **2 óra**, onnan **4 óránként** újabb router reset |
+| – | **48 órája** nincs Wi-Fi (`WIFI_GIVEUP_MIN`) | **AP beállító mód** (`AP MODE` 3) |
+
+- **Rossz jelszó** (`WL_CONNECT_FAILED`) bármelyik fokon: azonnal AP mód,
+  újraindítás és reset nélkül.
+- **A várakozás ébren történik**: közben percenként egy csatlakozási próba fut
+  (nem három), és ha a Wi-Fi visszajön, azonnal folytatódik a figyelés.
+- **Hidegindulásnál** (áramszünet után) a 0. fok kimarad: az ESP épp most indult.
+- **Nullázás**: ha a Wi-Fi **30 percig** folyamatosan megvan (`WIFI_STABLE_MS`).
+  Így egy instabil routernél a második kiesés már router resetet kap, nem újabb
+  ESP-újraindítást (`WFL5`).
+
+**Mit őriz meg az újraindulás:** a fokot és a kiesés eddigi hosszát
+(`rtcWifiStep`, `rtcWifiOutageMin`, `RTC_NOINIT`, ellenőrző értékkel). Ez a
+saját, a heap miatti és a watchdog-újraindulást túléli. **Törli** az
+áramszünet, a reset és a wifireset gomb, a mentés utáni újraindulás és minden
+alvás – ezek emberi beavatkozások, tehát tiszta lap.
+
+| Mérve | Eredmény | Teszt |
+|---|---|---|
+| az újraindítás után visszajön a Wi-Fi | nincs router reset, azonnal figyel | `WFL1` |
+| a Wi-Fi elvesztésétől a router reset kezdetéig | **5,3 perc** | `WFL2` |
+| tartós Wi-Fi-hiány | resetek 30 / 60 / 120 / 240 perc szünettel (+ a bootvárakozás), 48 óra után AP, alvás nélkül | `WFL3` |
+| várakozás közben visszajön | legfeljebb 1 perc alatt észreveszi; percenként 1 próba | `WFL4` |
 
 ### Ha te magad áramtalanítod a routert
 
 **Az eszköz ezt nem tudja megkülönböztetni attól, hogy a router lefagyott** – a
-hálózat mindkét esetben ugyanúgy eltűnik. Ezért ugyanaz történik, mint egy
-valódi hibánál: kivárja a 3 újracsatlakozási próbát, és ha addig sem jön vissza
-a hálózat, ő is elveszi a router áramát.
+hálózat mindkét esetben ugyanúgy eltűnik.
 
 | | mért érték |
 |---|---|
-| **Türelmi idő** a hálózat eltűnésétől az ESP saját router-resetjéig | **2,0 perc** (`PWR3`) |
+| **Türelmi idő** a hálózat eltűnésétől az ESP saját router-resetjéig | **4,3 perc** (`PWR3`; közben az ESP egyszer újraindul) |
 | Ha a router ezen belül visszajön | az ESP **hozzá sem nyúl** a reléhez, csendben visszacsatlakozik (`PWR4`) |
-
-Gyakorlatban: **ha kézzel dugod vissza a routert 2 percen belül, nem történik
-semmi.** Ha tovább tart neki felállni, az ESP is ad neki egy 90 másodperces
-áramtalanítást, majd 10 percig vár – kellemetlen, de magától rendbe jön, és a
-routernek sem árt.
-
-> Ha ez a 2 perc kevésnek bizonyul a te routerednél, a `wifi_maxRetries` (3) és
-> a `wifiInterval` (30 mp) növelésével hosszabbítható. Az ára, hogy egy valódi
-> router-fagyást is ennyivel később kezel le.
 
 ---
 
@@ -494,8 +459,8 @@ ne reagáljon, mint hogy spontán újrainduljon.
 > kör újra próbálkozik. (Mérve: `BTN4`.)
 
 > **Mennyire gyorsan reagál?** A firmware minden saját várakozó ciklusában
-> **10 ms-onként** olvassa mindkét gombot – a `waitWithButtons()`, a
-> `waitWithButtonsUntilOnline()`, az `initWiFi()` 20 mp-es várakozása, a reset
+> **10 ms-onként** olvassa mindkét gombot – a `waitWithButtons()`, az
+> `initWiFi()` 20 mp-es várakozása, a DNS-válaszra várás, a reset
 > pulzus, a `handleFirstStart()` és a `loop()` minden ága beleértve (mérve:
 > `BTN1`, a leghosszabb ablak 10 ms).
 >
@@ -584,7 +549,6 @@ el, akkor minősül beragadásnak:
 | Kiváltó ok | Hossz | Magától ébred? |
 |---|---|:---:|
 | Beragadt gomb induláskor | 60 mp | **igen** |
-| A router reset után sincs Wi-Fi (újrapróbálkozási kör, max. 33) | 1 óra | **igen** |
 | AP mód tétlenség | örökre | **nem** – csak gomb |
 | Végzetes hiba (LittleFS / konfig / watchdog) | örökre | **nem** – csak gomb |
 
@@ -745,31 +709,19 @@ folytatódik, és a következő reset a lépcső szerint az indulástól számí
 Ami eleve túléli: a diagnosztikai napló és a watchdog-számláló (`RTC_NOINIT`),
 valamint a LittleFS-en tárolt konfiguráció.
 
-#### A 2 napos ablak – a másik többfázisú létra
+#### A Wi-Fi-lépcső
 
-Ha a hálózat egyáltalán nem látszik, a program **33 kört** próbál, köröként egy
-órás alvással – kb. két napig. Utána AP beállító módba megy, hogy a felhasználó
-javíthassa a konfigurációt. A köröket az `rtcRetryRounds` számolja.
-
-Ez a számláló **szándékosan `RTC_DATA_ATTR`**, nem `RTC_NOINIT`: a deep sleepet
-túléli, de bekapcsoláskor **és szoftveres resetre nullázódik** – „a felhasználói
-beavatkozás tiszta 2 napos ablakkal indít". Gombnyomásra ez helyes.
-
-**A heap miatti újraindulás viszont nem felhasználói beavatkozás** – a saját
-döntésünk –, mégis ugyanolyan szoftveres reset. Átvitel nélkül tehát minden
-heap-újraindulás **nullázta volna a 2 napos ablakot**: az eszköz sosem érte
-volna el a határt, vagyis **sosem ment volna AP módba** – örökké
-újrapróbálkozna, és a felhasználó sosem kapna esélyt a javításra.
-
-Ezért ezt is átvisszük – de csak a *saját* újraindulásunkon. Gombnyomásnál nincs
-átvitel, tehát a tiszta lap ott megmarad. (Mérve: `GWH4`, `GWH5`.)
+A Wi-Fi-lépcső foka és a kiesés hossza eleve `RTC_NOINIT`-ben él (5. fejezet),
+tehát külön átvitel nélkül is túléli a heap-újraindulást; előtte a kiesés eddigi
+hossza percre pontosan mentődik. Gombnyomás viszont törli: ott tiszta lap kell.
+(Mérve: `WFL8`, `GWH5`.)
 
 #### A teljes lista: mi vész el, és miért nem baj
 
 | Változó | Mi lesz vele | Miért rendben |
 |---|---|---|
 | `testState.resetEvents` | **átvisszük** | enélkül a reset-lépcső elölről kezdődne |
-| `rtcRetryRounds` (2 napos ablak) | **átvisszük** | lásd fent – enélkül sosem érné el az AP módot |
+| `rtcWifiStep`, `rtcWifiOutageMin` (Wi-Fi-lépcső) | eleve `RTC_NOINIT`, a kiesés hossza előtte mentődik | lásd fent |
 | `testState.outage`, `outageStart`, `lastResetAt` | újraszámolódik | ha volt reset, a kiesés az indulástól folytatódik (`GWH3`) |
 | `testState.endpointIndex` | elvész | csak azt mondja meg, melyik HTTP végpont jön |
 | `dnsState` (DNS-gyanú, DNS-lépcső) | elvész | a DNS-ellenőrzés újraindul; legfeljebb egy korábbi DNS-reset jön |
@@ -810,7 +762,7 @@ mindkettő hozzáfér – itt van egy helyen, mi védi őket:
 | `restartPending`, `restartAt` | ír (POST) | olvas | `volatile` |
 | `savingConfig` | foglal/elenged (POST) | foglal (gombok, leállás) | **spinlock** (`beginConfigWrite()`) |
 | `rtcEvents`, `rtcEvNext` | ír (`CONFIG SAVED`), olvas (`/log`) | ír, olvas | **`evLogMux`** kritikus szakasz |
-| `rtcWdtResets`, `rtcRetryRounds` | **csak olvas** (`/log`) | ír | igazított szó – a lapon legfeljebb egy pillanattal régi érték áll |
+| `rtcWdtResets`, `rtcWifiStep`, `rtcWifiOutageMin` | **csak olvas** (`/log`) | ír | igazított szó – a lapon legfeljebb egy pillanattal régi érték áll |
 | `ssid`, `pass`, `ipStr`, `gatewayStr` | ír (POST 2. fázisa) | olvas (`WiFi.begin()`) | **szerkezeti invariáns**, lásd lent |
 
 ### A négy konfigurációs puffer
@@ -876,7 +828,6 @@ esetekben mértük meg, hanem a legellenségesebbekben is:
 | **Pislákoló Wi-Fi** (0,7–4,7 mp) | 8–13 sor/perc (`LOG4`) |
 | **A küszöb körül ingadozó heap** | 13 sor/perc (`SER8`) |
 | **Mindig bukó naplómentés** tartós kiesés alatt | 22 sor/perc (`SER9`) |
-| A 33 körös, kétnapos létra | `SER10` |
 
 > A pislákoló Wi-Fi korábban **132 sor/perc**-et adott: az óraszinkron minden
 > újracsatlakozásnál bejelentkezett. Ezért jelent be a `startNtp()` csak
@@ -923,16 +874,17 @@ Minden bejegyzés uptime bélyeget, egy eseménykódot és egy paramétert tarta
 | Esemény | A paraméter jelentése |
 |---|---|
 | `BOOT` | az indulás oka (`esp_reset_reason()`) |
-| `WIFI OK` | hányadik újrapróbálkozási körben sikerült |
+| `WIFI OK` | a Wi-Fi-lépcső foka csatlakozáskor: 0 = nem volt kiesés, 1 = az ESP újraindítása segített |
+| `WIFI RESTART` | az ESP a Wi-Fi miatt indult újra; a param a `WiFi.status()` értéke |
 | `WIFI LOST` | `WiFi.status()` a kiesés pillanatában (csak a kiesés-sorozat **első** tagja) |
 | `TEST FAIL` | a kiesés kezdete (kiesésenként **egyszer**); a param a bukott tartalék HTTP teszt sorszáma, 1–5 |
 | `HTTP ERROR` | a tartalék HTTP teszt kódja, közvetlenül a `TEST FAIL` után: 200/204/403/5xx változatlan (200 = jött válasz, de nem a várt szöveg); kliens hibánál 1000 + \|kód\|: **1001** = nem sikerült kapcsolódni vagy a nevet feloldani, **1011** = nem jött válasz időben, **1100** = a kérés el sem indult |
 | `NET DIAG` | a router reset oka, közvetlenül a reset előtt: 1 = a router sem válaszol (vagy nincs Wi-Fi / gateway), 2 = a router válaszol, az internet nem, 3 = az internet él, de a router DNS-e 15 perce hallgat |
 | `ROUTER RESET` | hányadik reset ebben a kiesésben |
-| `AP MODE` | 1 = nincs mentett SSID, 2 = hitelesítési hiba, 3 = letelt a 2 nap, 4 = a gateway sem érhető el |
+| `AP MODE` | 1 = nincs mentett SSID, 2 = hitelesítési hiba, 3 = 48 órája nincs Wi-Fi, 4 = a gateway sem érhető el |
 | `GW UNREACH` | 1 = a router reset előtt, 2 = a reset után is |
 | `CONFIG SAVED` | 0 |
-| `SLEEP` | 1 = újrapróbálkozás (nincs Wi-Fi), 3 = AP időtúllépés, 4 = végzetes hiba |
+| `SLEEP` | 3 = AP időtúllépés, 4 = végzetes hiba |
 | `FATAL` | 1 = LittleFS csatolás, 2 = konfiguráció olvasás, 3 = watchdog, 4 = a wifireset törlése nem sikerült, 5 = tartósan kevés a heap |
 | `WDT RESET` | hányadik rendellenes újraindulás |
 | `STUCK BUTTON` | 0 = reset gomb, 1 = wifireset gomb (csak az **első** kör – az ismétlődő 60 mp-es alvás-ébredés körök nem íródnak be újra) |
@@ -941,7 +893,7 @@ Minden bejegyzés uptime bélyeget, egy eseménykódot és egy paramétert tarta
 
 A `/log` oldal az aktuális állapotot is mutatja: **az indulás oka szövegesen**
 (a nyers enum-szám zárójelben marad, hibajelentéshez), watchdog számláló,
-újrapróbálkozási körök, és az **uptime nap/óra/perc/mp alakban** – ugyanúgy,
+a Wi-Fi-lépcső foka és a kiesés hossza, és az **uptime nap/óra/perc/mp alakban** – ugyanúgy,
 ahogy a soros porton. A `Param` oszlop jelentését a lap alján lévő
 jelmagyarázat írja le, tehát a naplóhoz nem kell forráskód.
 
@@ -961,10 +913,10 @@ pillanatokban** kiírja a naplót a LittleFS-re is (`/evlog.bin`):
 | **AP módba váltás előtt** | az AP mód azt jelenti, hogy az eszköz feladta; épp ezt az előzményt akarja látni az, aki odamegy és megnyitja a portált |
 | **Minden alvás előtt** | hosszú idő következik, ami alatt egy áramszünet elviheti az RTC naplót |
 | **Heap miatti önkéntes újraindulás előtt** | vezérelt leállás, mint az alvás. `ESP.restart()` az RTC memóriát nem törli, de a bejegyzések így csak a *következő* mentési pontig élnének kizárólag RTC-ben – egy áramszünet abban az ablakban épp azt a bizonyítékot vinné el, amiért az újraindulás történik (mérve: `RST1`) |
+| **Wi-Fi miatti saját újraindulás előtt** | ugyanez az ok: a kiesés előzménye ne csak RTC-ben éljen (mérve: `WF6`) |
 
 Az alvások mentése **egyetlen közös ponton**, az `enterDeepSleep()` elején
-történik – így mindhárom alvási út (`retrySleep`, `apSleep`, `fatalSleep`)
-megkapja, és egy **új** alvási úttól sem lehet elfelejteni. (Mérve: `NV9`.)
+történik – így mindkét alvási út (`apSleep`, `fatalSleep`) megkapja, és egy **új** alvási úttól sem lehet elfelejteni. (Mérve: `NV9`.)
 Csatolatlan fájlrendszernél a mentés magától kimarad, és nem akasztja meg az
 alvást.
 
@@ -1230,7 +1182,7 @@ arányosan romlik; a védelem hat sor, és nincs hátránya. (Mérve: `LOG4`.)
 ## 16. A forráskód szerkezete
 
 A program **nyolc fordítási egység**: a `bazsi_router_reboot.ino` és hét modul
-a sketch mappájában. Összesen ~3500 sor, 114 függvény. A kommentek egysorosak
+a sketch mappájában. Összesen ~3550 sor, 123 függvény. A kommentek egysorosak
 és csak a nem magától értetődő részeknél állnak; a döntések indoklása ebben a
 dokumentumban és a commit-üzenetekben van.
 
@@ -1262,9 +1214,9 @@ Fentről lefelé: minden modul csak a nála lentebb állóktól függ. A `config
 | **`secret`** | 86 | a jelszó elfedése a flashben | `encodeSecret()`, `decodeSecretInPlace()` |
 | **`sync`** | 88 | a két task közti osztott állapot | 7 függvény + `evLogMux`, `apDeadline` |
 | **`configstore`** | 230 | a négy mentett érték, a fájljaik, a LittleFS | a négy puffer, `readConfigValue()`, `readSecretValue()`, `writeConfigValue()`, `clearConfigValue()`, `staticPairValid()`, `initLittleFS()`, `filesystemReady()` |
-| **`eventlog`** | 491 | a diagnosztikai napló **és** a valós idő (NTP) | `logEvent()`, `saveEventLog()`, `loadEventLogHeader()`, `loadEventLogRange()`, `printEventLogs()`, `eventName()`, `formatEpoch()`, `ensureNtp()` |
+| **`eventlog`** | 494 | a diagnosztikai napló **és** a valós idő (NTP) | `logEvent()`, `saveEventLog()`, `loadEventLogHeader()`, `loadEventLogRange()`, `printEventLogs()`, `eventName()`, `formatEpoch()`, `ensureNtp()` |
 | **`netprobe`** | 331 | HTTP végpont-tesztek, ICMP ping, DNS-kérdés | `testInternetHTTP()`, `lastHttpCode()`, `httpCodeLogParam()`, `testInternetPing()`, `buildDnsQuery()`, `dnsResponseOk()`, `testDnsServer()` |
-| **`webportal`** | 594 | az AP beállító portál és az eszközönkénti AP jelszó | `startWebPortal()`, `stopWebPortal()`, `touchApDeadline()`, `announceApPassword()` |
+| **`webportal`** | 596 | az AP beállító portál és az eszközönkénti AP jelszó | `startWebPortal()`, `stopWebPortal()`, `touchApDeadline()`, `announceApPassword()` |
 | **`app_hooks.h`** | 22 | amit a főmodul ad a moduloknak | `feedWatchdog()`, `resetbutton()`, `wifiresetbutton()`, `waitWithButtons()`, `printUptime()`, `diagCounters()` |
 
 > A `webportal` kapta a legszorosabb határt, mert ez a program
@@ -1276,7 +1228,7 @@ Fentről lefelé: minden modul csak a nála lentebb állóktól függ. A `config
 > az a rossz határhúzás első jele.** Egyszer már meg is történt – a
 > `filesystemReady()` átmenetileg ide került, majd oda, ahová való (`configstore`).
 
-### A főmodul (`bazsi_router_reboot.ino`, ~1550 sor, 54 függvény)
+### A főmodul (`bazsi_router_reboot.ino`, ~1670 sor, 59 függvény)
 
 Ami maradt: a **döntéshozatal**. A modulok mérnek és tárolnak, a főmodul
 eldönti, mi következik.
@@ -1286,14 +1238,15 @@ eldönti, mi következik.
 | Belépési pontok | `setup()` · `loop()` |
 | A `loop()` ágai | `clearHealthyRunCounters()` · `handleFatalMode()` · `handleConfigMode()` · `runMonitorStateMachine()` |
 | Az állapotgép | `runCheckState()` · `runResetState()` · `handleFirstStart()` |
-| Wi-Fi | `initWiFi()` · `reconnectWifi()` · `wifiAuthFailed()` · `wifiGiveUp()` · `ensureFallbackDns()` |
+| Wi-Fi | `initWiFi()` · `reconnectWifi()` · `wifiAuthFailed()` · `ensureFallbackDns()` |
+| Wi-Fi-lépcső | `wifiFailed()` · `initWifiLadder()` · `wifiConnectedTick()` · `wifiResetPending()` · `wifiOutageMinutes()` · `wifiLadderPersist()` · `wifiLadderClear()` |
 | Internet és router | `internetOk()` · `gatewayPingOk()` · `routerDnsCheck()` · `gatewayUnreachable()` · `resetWaitMs()` · `backoffMs()` |
-| Relé | `startRouterReset()` · `reset_device()` · `routerResetAndRetry()` · `holdRelayForSleep()` |
-| A három alvás | `enterDeepSleep()` ← `retrySleep()`, `apSleep()`, `fatalSleep()`; külön úton `handleStuckButton()` |
+| Relé | `startRouterReset()` · `reset_device()` · `holdRelayForSleep()` |
+| A két alvás | `enterDeepSleep()` ← `apSleep()`, `fatalSleep()`; külön úton `handleStuckButton()` |
 | Gombok | a két ISR (`onResetButtonEdge()`, `onWifiResetButtonEdge()`) · `armButtonLatches()` · `resetbutton()` · `wifiresetbutton()` · `pressedButtonNow()` · `doWifiReset()` |
 | Watchdog és heap | `initWatchdog()` · `checkWatchdogResets()` · `feedWatchdog()` · `checkHeap()` · `initHeapState()` · `applyHeapCarry()` |
 | Soros parancsok | `serialCommands()` · `runSerialCommand()` |
-| Várakozások | `blockingDelay()` · `waitWithButtons()` · `waitWithButtonsUntilOnline()` · `onlineProbe()` · `onlineProbeDue()` |
+| Várakozások | `blockingDelay()` · `waitWithButtons()` · `onlineProbe()` · `onlineProbeDue()` |
 | Leállás | `lockConfigBeforeShutdown()` · `restartFromButton()` · `enterFatal()` · `fatalHalt()` |
 | Üzemmódváltás | `startConfigPortal()` – a naplómentés, a `deviceMode` és a LED-ek; a HTTP részt a `webportal` végzi |
 

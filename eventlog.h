@@ -23,7 +23,9 @@ enum EventCode : uint8_t {
   EV_LOW_HEAP = 13,
   EV_HEAP_RESTART = 14,
   EV_HTTP_ERROR = 15,
-  EV_NET_DIAG = 16
+  EV_NET_DIAG = 16,
+  // A 17-es kód a régi firmware RESET SKIPPED eseménye volt: a régi naplók miatt szabad marad.
+  EV_WIFI_RESTART = 18
 };
 
 // 12 bájt: a fájlformátum része.

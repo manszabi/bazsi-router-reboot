@@ -16,7 +16,7 @@ void printUptime();
 struct DiagCounters {
   uint32_t wdtResets;
   uint32_t wdtLimit;
-  uint32_t retryRounds;
-  uint32_t retryLimit;
+  uint32_t wifiStep;
+  uint32_t wifiOutageMin;
 };
 DiagCounters diagCounters();
