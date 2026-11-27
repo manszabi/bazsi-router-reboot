@@ -1084,7 +1084,7 @@ elérhetetlen vagy a névfeloldás bukik, az a mi `loop()`-unkat nem érinti.
 > A mérés: az `NV11` végigjátssza a teljes eszkalációt (tesztek bukása → router
 > reset → mentés → alvás), majd egy áramszünet utáni `/log` oldalt is –
 > **végig óraszinkron nélkül**. Mellékesen az **egész tesztkészlet** így fut: a
-> `coldBoot()` `g_epochNow = 0`-t állít, tehát mind a 368 forgatókönyv a
+> `coldBoot()` `g_epochNow = 0`-t állít, tehát mind a 370 forgatókönyv a
 > „nincs óraszinkron" állapotot játssza.
 
 > A valós idő a **deep sleepet túléli**. Az `esp_timer` (és így a `millis()`)
