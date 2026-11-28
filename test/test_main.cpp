@@ -8005,9 +8005,10 @@ static void scCP9() {
   // WPA2 rossz jelszo a valosagban: kezfogas-idotullepes (15, illetve 204) - mentes utan torles, AP MODE 5.
   for (uint8_t ok : { (uint8_t)WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT, (uint8_t)WIFI_REASON_HANDSHAKE_TIMEOUT,
                       (uint8_t)WIFI_REASON_AUTH_FAIL }) {
+    const int elotte = evCount(EVC_AP_MODE, 5);  // a napló a ciklus indulásain át megmarad
     const int r = mentesUtanBontassal(ok);
-    printf("     [info] bontasi ok %u: futtat=%d, AP MODE 5: %d\n", (unsigned)ok, r, evCount(EVC_AP_MODE, 5));
-    CHECK(r == 2 && evCount(EVC_AP_MODE, 5) == 1 && g_fs["/ssid.txt"].empty() && relayPulses() == 0,
+    printf("     [info] bontasi ok %u: futtat=%d, uj AP MODE 5: %d\n", (unsigned)ok, r, evCount(EVC_AP_MODE, 5) - elotte);
+    CHECK(r == 2 && evCount(EVC_AP_MODE, 5) - elotte == 1 && g_fs["/ssid.txt"].empty() && relayPulses() == 0,
           ok == 15 ? "15: rossz jelszo, torles, ujraindulas AP-ba"
                    : ok == 204 ? "204: rossz jelszo, torles" : "202: rossz jelszo, torles");
   }
