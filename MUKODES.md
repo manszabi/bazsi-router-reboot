@@ -1510,7 +1510,7 @@ bazsi-router-reboot/
 ├── webportal.h/.cpp          # az AP beállító portál és a normál üzemű állapotoldal
 │
 ├── partitions_custom.csv     # Egyedi partíciós tábla: OTA nélkül, 512 KiB LittleFS
-├── test/                     # host tesztkészlet (403 forgatókönyv)
+├── test/                     # host tesztkészlet (405 forgatókönyv)
 │
 ├── README.md                 # belépő: mi ez, és hol mi van
 ├── ATTEKINTES.md             # egyoldalas összefoglaló
@@ -2184,4 +2184,4 @@ A **valós idő** (`gettimeofday()`) szintén túléli a deep sleepet – az RTC
 
 *Az ábrák a `bazsi_router_reboot.ino` aktuális állapotát dokumentálják.
 Módosításkor a kóddal együtt frissítendők – a viselkedést a `test/` alatti
-403 forgatókönyves (2392 ellenőrzéses) tesztkészlet rögzíti.*
+405 forgatókönyves (2401 ellenőrzéses) tesztkészlet rögzíti.*
