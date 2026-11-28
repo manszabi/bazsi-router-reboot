@@ -204,12 +204,10 @@ RTC_NOINIT_ATTR uint32_t rtcWifiMagic;
 RTC_NOINIT_ATTR uint8_t  rtcWifiRestarted;
 RTC_NOINIT_ATTR uint32_t rtcWifiOutageMin;
 
-// Mentés utáni első indulás (RTC_NOINIT, induláskor egyszer felhasználva): ha a mentett hálózat nem érhető el, AP mód, nem router reset.
+// Mentés utáni első indulás (RTC_NOINIT, induláskor egyszer felhasználva): ha nem sikerül csatlakozni, a beállítások törlődnek, AP mód.
 constexpr uint32_t CONFIG_PROBE_MAGIC = 0x42415A43UL;
 RTC_NOINIT_ATTR uint32_t rtcConfigProbe;
 bool configProbe = false;
-// Az AP mód a mentés utáni sikertelen csatlakozás miatt indult: lejártakor újraindul figyelni, nem alszik el.
-bool apFromProbe = false;
 
 // A RAM-beli órák: a kiesés kezdete (az indulás óta) és a stabil kapcsolat kezdete.
 uint32_t wifiOutageSince = 0;
@@ -242,6 +240,7 @@ void wifiresetbutton();
 void armButtonLatches();
 void restartFromButton(const char* reason);
 void doWifiReset();
+void clearWifiConfigAndRestart();
 void blockingDelay(uint32_t duration);
 void waitWithButtons(uint32_t duration);
 bool onlineProbe();
@@ -983,21 +982,22 @@ void wifiFailed(bool coldStart) {
   printUptime();
   Serial.print("WiFi status a probalkozasok utan: ");
   Serial.println((int)WiFi.status());
-  const bool mentesUtan = configProbe;
-  configProbe = false;
-  if (wifiAuthFailed()) {
-    Serial.println("Hitelesitesi hiba - valoszinuleg rossz a jelszo. AP mod.");
-    wifiLadderClear();
-    apFromProbe = mentesUtan;
-    logEvent(EV_AP_MODE, 2);
+  // Mentés utáni első indulás: a sikertelen csatlakozás a beírt adat hibája - törlés, újraindulás AP módba.
+  if (configProbe) {
+    configProbe = false;
+    Serial.println("A mentett halozathoz nem sikerult csatlakozni - a beallitasok torlese, AP mod.");
+    logEvent(EV_AP_MODE, 5);
+    saveEventLog("mentes utani sikertelen csatlakozas");
+    if (beginConfigWrite()) {
+      clearWifiConfigAndRestart();
+    }
     startConfigPortal();
     return;
   }
-  if (mentesUtan) {
-    Serial.println("A mentett halozat nem erheto el - vissza AP modba (router reset nelkul).");
+  if (wifiAuthFailed()) {
+    Serial.println("Hitelesitesi hiba - valoszinuleg rossz a jelszo. AP mod.");
     wifiLadderClear();
-    apFromProbe = true;
-    logEvent(EV_AP_MODE, 5);
+    logEvent(EV_AP_MODE, 2);
     startConfigPortal();
     return;
   }
@@ -1128,6 +1128,11 @@ void doWifiReset() {
     return;
   }
   Serial.println("WIFIRESET button is pulling down!");
+  clearWifiConfigAndRestart();
+}
+
+// A mentett Wi-Fi adatok törlése és újraindulás (AP módba); a hívó már lefoglalta a konfigzárat.
+void clearWifiConfigAndRestart() {
   Serial.println("RESET saved wifi data!");
 
   bool cleared = true;
@@ -1290,7 +1295,6 @@ void setup() {
   wifiDownLogged = false;
   configProbe = (rtcConfigProbe == CONFIG_PROBE_MAGIC);
   rtcConfigProbe = 0;
-  apFromProbe = false;
 
   firstStartProbeLast = timing.startMillis - CHECK_INTERVAL_MS;
 
@@ -1363,7 +1367,7 @@ void setup() {
   }
   if (configProbe) {
     printUptime();
-    Serial.println("Mentes utani elso indulas: ha a halozat nem erheto el, AP mod (router reset nelkul).");
+    Serial.println("Mentes utani elso indulas: ha nem sikerul csatlakozni, a beallitasok torlodnek, AP mod.");
   }
 
   Serial.println("Init LittleFS.");
@@ -1428,7 +1432,7 @@ void setup() {
     } else {
       printUptime();
       Serial.println(uiFlags.firstStart ? "Nem sikerult csatlakozni - first start varakozas kovetkezik."
-                     : configProbe ? "Nem sikerult csatlakozni - ujraprobalkozas, utana AP mod."
+                     : configProbe ? "Nem sikerult csatlakozni - ujraprobalkozas, utana a beallitasok torlese, AP mod."
                                    : "Nem sikerult csatlakozni - ujraprobalkozas, utana router reset.");
       deviceMode = MODE_MONITOR;
       digitalWrite(wifiledPin, LOW);
@@ -1491,16 +1495,6 @@ void handleConfigMode(uint32_t currentMillis) {
 
   if (!configWriteInProgress() && !restartRequested() &&
       (int32_t)(currentMillis - apDeadline) >= 0) {
-    if (apFromProbe) {
-      // A mentés utáni hibás adat miatti AP-ból nem alszunk el: újraindulás, és a megszokott figyelés.
-      printUptime();
-      Serial.println("Az AP mod lejart - ujraindulas, figyeles a mentett beallitasokkal.");
-      saveEventLog("AP lejart, figyeles elott");
-      lockConfigBeforeShutdown();
-      Serial.flush();
-      ESP.restart();
-      return;
-    }
     apSleep();
   }
   delay(BUTTON_POLL_MS);

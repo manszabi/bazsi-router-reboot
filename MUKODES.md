@@ -54,16 +54,16 @@ A 3 próba után a **hiba oka** dönt:
 
 A beállító oldalon mentett adatokkal az első csatlakozás **próba**: ha nem
 sikerül, a hiba szinte biztosan a beírt adatban van (elírt hálózatnév, 5 GHz-es
-hálózat, rossz jelszó), nem a routerben. Ezért:
+hálózat, rossz jelszó), nem a routerben. Ezért a mentés utáni újraindulás (az
+ESP-é – a routerhez a mentés nem nyúl) így megy:
 
 | Lépés | Viselkedés |
 |---|---|
 | Mentés | az újraindulás előtt egy jelző kerül az RTC memóriába (`rtcConfigProbe`, ellenőrző értékkel); csak ez az út állítja |
 | Indulás | a jelzőt **azonnal felhasználja** (törli), és ehhez az induláshoz megjegyzi; a 10 perces türelmi idő kimarad, mert a mentés a routert nem kapcsolta le |
 | Sikerül csatlakozni | a próba lezárul, innen **minden a megszokott szabályok szerint** megy (`CP2`) |
-| A hálózat nem látszik | 20 mp + 3 próba után **vissza AP módba**, router reset nélkül (`AP MODE` 5; mérve 2,0 perc, `CP1`) |
-| Rossz jelszó | ugyanígy AP mód (`AP MODE` 2), reset nélkül (`CP4`) |
-| Az így indult AP módban senki nem ment | lejártakor **nem alszik el**, hanem újraindul, és a mentett adatokkal a megszokott szabály szerint figyel (10 perc türelem, majd a lépcső) – így egy félbehagyott beállítás sem hagyja felügyelet nélkül a routert (`CP3`) |
+| Nem sikerül (a hálózat nem látszik, vagy rossz a jelszó) | induláskor 1 + utána 3 próba (mint figyelés közben), majd **a mentett Wi-Fi adatok törlődnek** (mint a wifireset gombnál), és az ESP **újraindul AP módba** – router reset nélkül (`AP MODE` 5; mérve 2,0 perc, `CP1`, `CP4`) |
+| Az így indult AP mód | pontosan úgy viselkedik, mint az első indulásé: **5 perc tétlenség után alvás**, időzített ébresztés nélkül, a reset gomb ébreszti (`CP3`) |
 
 Áramszünet, gombos újraindítás vagy bármely más újraindulás után nincs jelző
 (`CP5`). Mivel a jelzőt az indulás azonnal törli, egy próba közbeni lefagyás
@@ -806,7 +806,7 @@ el, akkor minősül beragadásnak:
 | Kiváltó ok | Hossz | Magától ébred? |
 |---|---|:---:|
 | Beragadt gomb induláskor | 60 mp | **igen** |
-| AP mód tétlenség (kivéve a mentés utáni sikertelen első indulás AP-ját: az újraindul, nem alszik – 2. fejezet) | örökre | **nem** – csak gomb |
+| AP mód tétlenség | örökre | **nem** – csak gomb |
 | Végzetes hiba (LittleFS / konfig / watchdog) | örökre | **nem** – csak gomb |
 
 Minden alvás előtt a **relé `LOW`**, tehát a router kap áramot.
@@ -1140,7 +1140,7 @@ Minden bejegyzés uptime bélyeget, egy eseménykódot és egy paramétert tarta
 | `HTTP ERROR` | a tartalék HTTP teszt kódja, közvetlenül a `TEST FAIL` után: 200/204/403/5xx változatlan (200 = jött válasz, de nem a várt szöveg); kliens hibánál 1000 + \|kód\|: **1001** = nem sikerült kapcsolódni vagy a nevet feloldani, **1011** = nem jött válasz időben, **1100** = a kérés el sem indult |
 | `NET DIAG` | a router reset oka, közvetlenül a reset előtt: 1 = a router sem válaszol (vagy nincs Wi-Fi / gateway), 2 = a router válaszol, az internet nem, 3 = az internet él, de a router DNS-e 10 perce hallgat |
 | `ROUTER RESET` | hányadik reset ebben a kiesésben |
-| `AP MODE` | 1 = nincs mentett SSID, 2 = hitelesítési hiba, 3 = 48 órája nincs Wi-Fi, 4 = a gateway sem érhető el, 5 = a mentés utáni első indulásnál a mentett hálózat nem érhető el |
+| `AP MODE` | 1 = nincs mentett SSID, 2 = hitelesítési hiba, 3 = 48 órája nincs Wi-Fi, 4 = a gateway sem érhető el, 5 = a mentés utáni első indulásnál nem sikerült csatlakozni – a beállítások törölve |
 | `GW UNREACH` | 1 = a router reset előtt, 2 = a reset után is |
 | `CONFIG SAVED` | 0 |
 | `SLEEP` | 3 = AP időtúllépés, 4 = végzetes hiba |
@@ -2182,4 +2182,4 @@ A **valós idő** (`gettimeofday()`) szintén túléli a deep sleepet – az RTC
 
 *Az ábrák a `bazsi_router_reboot.ino` aktuális állapotát dokumentálják.
 Módosításkor a kóddal együtt frissítendők – a viselkedést a `test/` alatti
-401 forgatókönyves (2375 ellenőrzéses) tesztkészlet rögzíti.*
+401 forgatókönyves (2377 ellenőrzéses) tesztkészlet rögzíti.*

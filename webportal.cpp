@@ -555,7 +555,7 @@ static void sendDiagnosticLog(AsyncWebServerRequest* request) {
              "<li>ROUTER RESET: hanyadik ujrainditas ebben a kiesesben</li>"
              "<li>AP MODE: 1 = nincs SSID, 2 = rossz jelszo, "
              "3 = 48 oraja nincs Wi-Fi, 4 = a gateway sem erheto el, "
-             "5 = mentes utan a mentett halozat nem erheto el</li>"
+             "5 = mentes utan nem sikerult csatlakozni, a beallitasok torolve</li>"
              "<li>CONFIG SAVED: mindig 0 - itt maga a bejegyzes az "
              "informacio, parametere nincs</li>"
              "<li>GW UNREACH: 1 = a router reset elott, 2 = utana is</li>"

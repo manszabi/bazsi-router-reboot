@@ -54,9 +54,10 @@ routernél. Ha a router DNS-e 10 percig hallgat, miközben egy külső DNS
 
 - 3 csatlakozási próba, köztük 30 mp.
 - Rossz jelszó → beállító mód (AP), router reset nélkül.
-- Mentés utáni első indulás: ha a mentett hálózat nem érhető el, kb. 2 perc után
-  vissza beállító módba, router reset nélkül; ha ott senki nem ment, az ESP
-  újraindul, és a megszokott szabályok szerint figyel.
+- Mentés utáni első indulás: nincs türelmi idő; ha a 3 próba után sem sikerül
+  csatlakozni, a mentett Wi-Fi adatok törlődnek, és az ESP beállító módban indul
+  újra (router reset nélkül). Onnan ugyanúgy: 5 perc után alvás, a reset gomb
+  ébreszti.
 - Ha így sem jön vissza: **előbb az ESP indul újra** (a router érintetlen), és
   ha az sem segít, **router reset** (22:00–05:00 között legalább 10 perc
   kiesés után). Utána egyre ritkábban: 30 perc → 1 óra →
