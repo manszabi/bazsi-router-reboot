@@ -204,7 +204,7 @@ RTC_NOINIT_ATTR uint32_t rtcWifiMagic;
 RTC_NOINIT_ATTR uint8_t  rtcWifiRestarted;
 RTC_NOINIT_ATTR uint32_t rtcWifiOutageMin;
 
-// Mentés utáni első indulás (RTC_NOINIT, induláskor egyszer felhasználva): ha nem sikerül csatlakozni, a beállítások törlődnek, AP mód.
+// Mentés utáni első indulás: az RTC-jelző a közvetlen újraindulást jelzi (nincs türelmi idő), a /probe.txt az áramszünetet is túléli.
 constexpr uint32_t CONFIG_PROBE_MAGIC = 0x42415A43UL;
 RTC_NOINIT_ATTR uint32_t rtcConfigProbe;
 bool configProbe = false;
@@ -1140,6 +1140,7 @@ void clearWifiConfigAndRestart() {
   cleared &= clearConfigValue(LittleFS, passPath);
   cleared &= clearConfigValue(LittleFS, ipPath);
   cleared &= clearConfigValue(LittleFS, gatewayPath);
+  clearConfigValue(LittleFS, probePath);
   if (!cleared) {
     Serial.println("!!! A mentett wifi adatok torlese NEM sikerult !!!");
     logEvent(EV_FATAL, 4);
@@ -1293,8 +1294,9 @@ void startConfigPortal() {
 void setup() {
   timing.startMillis = millis();
   wifiDownLogged = false;
-  configProbe = (rtcConfigProbe == CONFIG_PROBE_MAGIC);
+  const bool mentesUtanUjraindult = (rtcConfigProbe == CONFIG_PROBE_MAGIC);
   rtcConfigProbe = 0;
+  configProbe = false;
 
   firstStartProbeLast = timing.startMillis - CHECK_INTERVAL_MS;
 
@@ -1361,13 +1363,9 @@ void setup() {
   applyTimezone();
   applyLadderCarry();
   initWifiLadder();
-  // Saját Wi-Fi miatti vagy mentés utáni újraindulás után a router nem kapcsolt le: nincs mire várni.
-  if (rtcWifiRestarted != 0 || configProbe) {
+  // Saját Wi-Fi miatti újraindulás után a router nem kapcsolt le: nincs mire várni.
+  if (rtcWifiRestarted != 0) {
     uiFlags.firstStart = false;
-  }
-  if (configProbe) {
-    printUptime();
-    Serial.println("Mentes utani elso indulas: ha nem sikerul csatlakozni, a beallitasok torlodnek, AP mod.");
   }
 
   Serial.println("Init LittleFS.");
@@ -1401,11 +1399,29 @@ void setup() {
       const ConfigStatus os = readConfigValue(LittleFS, outageApPath, kapcsolo, sizeof(kapcsolo));
       outageApEnabled = (os == CONFIG_OK && strcmp(kapcsolo, "1") == 0);
     }
+    {
+      char jelzo[4];
+      // Olvasási hiba: nincs jelző (a megszokott szabályok élnek).
+      configProbe = readConfigValue(LittleFS, probePath, jelzo, sizeof(jelzo)) == CONFIG_OK
+                    && strcmp(jelzo, "1") == 0;
+    }
 
     if (st == CONFIG_ERROR && deviceMode != MODE_FATAL) {
       logEvent(EV_FATAL, 2);
       enterFatal("A mentett wifi konfiguracio nem olvashato (serult fajlrendszer).");
     }
+  }
+
+  // Mentés utáni első indulás: közvetlenül a mentés után nincs türelmi idő; áramszünet után (a router is bootol) van.
+  configProbe = (configProbe || mentesUtanUjraindult) && ssid[0] != '\0';
+  if (configProbe) {
+    if (mentesUtanUjraindult) {
+      uiFlags.firstStart = false;
+    }
+    printUptime();
+    Serial.println(mentesUtanUjraindult
+                     ? "Mentes utani elso indulas: ha nem sikerul csatlakozni, a beallitasok torlodnek, AP mod."
+                     : "Mentes utani elso indulas aramszunet utan: 10 perc turelem, utana ha nem sikerul, torles, AP mod.");
   }
 
   Serial.println(ssid);
@@ -1635,6 +1651,10 @@ void configProbeOk() {
   configProbe = false;
   printUptime();
   Serial.println("A mentett halozat elerheto - a megszokott szabalyok szerint figyel tovabb.");
+  if (filesystemReady() && beginConfigWrite()) {
+    clearConfigValue(LittleFS, probePath);
+    endConfigWrite();
+  }
 }
 
 // A Wi-Fi visszajött: ha a kiesést naplóztuk, a visszatérés is bekerül (a lépcső fokával).

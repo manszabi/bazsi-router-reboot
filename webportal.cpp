@@ -373,6 +373,10 @@ static bool commitConfigDraft(const ConfigDraft& d) {
     Serial.println(outageApEnabled ? "be" : "ki");
     saveOk &= writeConfigValue(LittleFS, outageApPath, outageApEnabled ? "1" : "0");
   }
+  // A próbajelző hiánya nem rontja el a mentést: ilyenkor az RTC-jelző viszi (áramszünetet nem él túl).
+  if (saveOk && !writeConfigValue(LittleFS, probePath, "1")) {
+    Serial.println("A probajelzo nem irhato - aramszunet eseten a megszokott szabalyok elnek.");
+  }
   return saveOk;
 }
 

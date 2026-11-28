@@ -7852,7 +7852,8 @@ static void mentesEsUjraindulas(const char* ssidV, const char* passV, bool csatl
   g_handlers["/#2"](&req);
   CHECK(req._code == 200, "a mentes sikerult");
   const bool ujra = futtat(10u * 1000, [] { return false; }) == 2;
-  CHECK(ujra && rtcConfigProbe != 0, "a mentes utan az ESP ujraindul, a probajelzo az RTC-ben");
+  CHECK(ujra && rtcConfigProbe != 0 && g_fs["/probe.txt"] == "1",
+        "a mentes utan az ESP ujraindul, a probajelzo az RTC-ben es a flashben");
   softReboot(csatlakozik);
 }
 
@@ -7869,7 +7870,8 @@ static void scCP1() {
   CHECK(r == 2 && g_millis - t0 < 4u * 60 * 1000, "kb. 2 perc (20 mp + 3 proba) utan ujraindul");
   CHECK(evCount(EVC_AP_MODE, 5) == 1 && relayPulses() == 0 && evCount(EVC_NET_DIAG) == 0,
         "AP MODE 5, a routerhez nem nyult");
-  CHECK(g_fs["/ssid.txt"].empty() && storedPass().empty(), "a mentett SSID es jelszo torolve");
+  CHECK(g_fs["/ssid.txt"].empty() && storedPass().empty() && g_fs["/probe.txt"].empty(),
+        "a mentett SSID, jelszo es a probajelzo torolve");
   softReboot(false);
   CHECK(deviceMode == (DeviceMode)1 && !configProbe, "ujraindulas utan AP mod (nincs mentett SSID)");
 }
@@ -7879,7 +7881,8 @@ static void scCP2() {
   coldBoot(false, "", "", "", "");
   setup();
   mentesEsUjraindulas("TestNet", "jelszo123", true);
-  CHECK(deviceMode == (DeviceMode)0 && !configProbe, "csatlakozott, a jelzo torolve");
+  CHECK(deviceMode == (DeviceMode)0 && !configProbe && g_fs["/probe.txt"].empty(),
+        "csatlakozott, a jelzo (RTC es flash) torolve");
   CHECK(serialHas("a megszokott szabalyok szerint figyel tovabb"), "kimondja");
   monitorUzembe();
   wifiSim.willConnect = false; wifiSim.begun = false;
@@ -7914,12 +7917,53 @@ static void scCP4() {
 }
 
 static void scCP5() {
-  // Aramszunet vagy gombos ujrainditas utan nincs probajelzo (csak a mentes allitja).
+  // Aramszunet a mentes es az elso sikeres csatlakozas kozott, a router nem jon vissza:
+  // a flash-jelzo megmarad, 10 perc turelem (a router bootolhat), utana torles es AP mod, router reset nelkul.
+  coldBoot(false, "", "", "", "");
+  setup();
+  mentesEsUjraindulas("ElirtHalozat", "jelszo123", false);
+  const auto fs = g_fs;
+  coldBoot(false, "", "", "", "");  // aramszunet: az RTC ervenytelen, a flash marad
+  g_fs = fs;
+  setup();
+  CHECK(configProbe && uiFlags.firstStart, "a flash-jelzo megvan, es van 10 perces turelem");
+  const uint32_t t0 = g_millis;
+  const int r = futtat(20u * 60 * 1000, [] { return false; });
+  printf("     [info] aramszunet utan a torlesig: %.1f perc\n", (g_millis - t0) / 60000.0);
+  CHECK(r == 2 && g_millis - t0 >= 10u * 60 * 1000, "a 10 perc kivarasa utan ujraindul");
+  CHECK(evCount(EVC_AP_MODE, 5) == 1 && relayPulses() == 0 && g_fs["/ssid.txt"].empty()
+        && g_fs["/probe.txt"].empty(), "torles, AP MODE 5, a routerhez nem nyult");
+}
+
+static void scCP6() {
+  // Aramszunet utan a router 3 perc alatt visszajon: a 10 perc alatt csatlakozik, a jelzo torlodik, nincs torles.
+  coldBoot(false, "", "", "", "");
+  setup();
+  mentesEsUjraindulas("TestNet", "jelszo123", false);
+  const auto fs = g_fs;
+  coldBoot(false, "", "", "", "");
+  g_fs = fs;
+  wifiSim.willConnect = true; wifiSim.availableFrom = g_millis + 3u * 60 * 1000;
+  setup();
+  CHECK(configProbe && uiFlags.firstStart, "flash-jelzo, turelmi ido");
+  futtat(15u * 60 * 1000, [] { return !configProbe; });
+  CHECK(!configProbe && g_fs["/probe.txt"].empty() && g_fs["/ssid.txt"] == "TestNet",
+        "csatlakozott: a jelzo torolve, a beallitasok megmaradtak");
+  CHECK(evCount(EVC_AP_MODE, 5) == 0 && deviceMode == (DeviceMode)0, "nincs AP mod");
+}
+
+static void scCP7() {
+  // Jelzo nelkul (normal aramszunet) a megszokott hidegindulas; a wifireset gomb a jelzot is torli.
   coldBoot(false, "TestNet", "pw", "", "");
   rtcConfigProbe = 0x42415A43UL;
   coldBoot(false, "TestNet", "pw", "", "");
   setup();
-  CHECK(!configProbe && uiFlags.firstStart, "bekapcsolaskor a jelzo ervenytelen, normal indulas");
+  CHECK(!configProbe && uiFlags.firstStart, "bekapcsolaskor az RTC-jelzo ervenytelen, flash-jelzo nincs: normal indulas");
+  g_fs["/probe.txt"] = "1";
+  btnWifiResetLatched = true;
+  bool ujra = false;
+  try { wifiresetbutton(); } catch (RestartSignal&) { ujra = true; }
+  CHECK(ujra && g_fs["/probe.txt"].empty(), "a wifireset gomb a probajelzot is torli");
 }
 
 static const Scenario kScenarios[] = {
@@ -8318,7 +8362,9 @@ static const Scenario kScenarios[] = {
   { "CP2: mentes utan csatlakozik: a megszokott szabalyok", scCP2 },
   { "CP3: a torles utani AP 5 perc utan alszik, gombbal ebred", scCP3 },
   { "CP4: mentes utan rossz jelszo: torles, AP mod", scCP4 },
-  { "CP5: aramszunet utan nincs probajelzo", scCP5 },
+  { "CP5: aramszunet a mentes utan, a router nem jon vissza: turelem, torles, AP", scCP5 },
+  { "CP6: aramszunet a mentes utan, a router visszajon: csatlakozik, nincs torles", scCP6 },
+  { "CP7: jelzo nelkul normal indulas; a wifireset a jelzot is torli", scCP7 },
   { "QH1: a csendes idoszak hatarai (22:00-05:00, CET es CEST)", scQH1 },
   { "QH2: ejjel a router sem valaszol: reset 10 perc utan", scQH2 },
   { "QH3: 8 perces router-kieses: ejjel nincs reset, nappal van", scQH3 },

@@ -59,15 +59,15 @@ ESP-é – a routerhez a mentés nem nyúl) így megy:
 
 | Lépés | Viselkedés |
 |---|---|
-| Mentés | az újraindulás előtt egy jelző kerül az RTC memóriába (`rtcConfigProbe`, ellenőrző értékkel); csak ez az út állítja |
-| Indulás | a jelzőt **azonnal felhasználja** (törli), és ehhez az induláshoz megjegyzi; a 10 perces türelmi idő kimarad, mert a mentés a routert nem kapcsolta le |
-| Sikerül csatlakozni | a próba lezárul, innen **minden a megszokott szabályok szerint** megy (`CP2`) |
+| Mentés | két jelző: a flashben `/probe.txt` (`"1"`, áramszünetet is túlél), és az újraindulás előtt az RTC memóriában `rtcConfigProbe` (ellenőrző értékkel; csak ez az út állítja) |
+| Indulás közvetlenül a mentés után | az RTC-jelzőt **azonnal felhasználja**; a 10 perces türelmi idő kimarad, mert a mentés a routert nem kapcsolta le |
+| Indulás áramszünet után, megmaradt `/probe.txt`-vel | a router is bootol, ezért **a szokásos 10 perc türelem** jár (közben percenként próbál, és korán kilép, ha a hálózat és az internet megvan); utána ugyanaz a szabály (`CP5`, mérve 11,7 perc; `CP6`) |
+| Sikerül csatlakozni | a próba lezárul, a `/probe.txt` törlődik, innen **minden a megszokott szabályok szerint** megy (`CP2`) |
 | Nem sikerül (a hálózat nem látszik, vagy rossz a jelszó) | induláskor 1 + utána 3 próba (mint figyelés közben), majd **a mentett Wi-Fi adatok törlődnek** (mint a wifireset gombnál), és az ESP **újraindul AP módba** – router reset nélkül (`AP MODE` 5; mérve 2,0 perc, `CP1`, `CP4`) |
 | Az így indult AP mód | pontosan úgy viselkedik, mint az első indulásé: **5 perc tétlenség után alvás**, időzített ébresztés nélkül, a reset gomb ébreszti (`CP3`) |
 
-Áramszünet, gombos újraindítás vagy bármely más újraindulás után nincs jelző
-(`CP5`). Mivel a jelzőt az indulás azonnal törli, egy próba közbeni lefagyás
-után is a megszokott szabályok élnek.
+A wifireset gomb a jelzőt is törli; a mentésen kívül semmi nem állítja (`CP7`).
+Olvashatatlan `/probe.txt` esetén nincs jelző – a megszokott szabályok élnek.
 
 Az ESP32 core megkülönbözteti a kettőt (`STA.cpp`): `WIFI_REASON_NO_AP_FOUND` →
 `WL_NO_SSID_AVAIL`, `WIFI_REASON_AUTH_FAIL` → `WL_CONNECT_FAILED`. Konzervatívan
@@ -1508,7 +1508,7 @@ bazsi-router-reboot/
 ├── webportal.h/.cpp          # az AP beállító portál és a normál üzemű állapotoldal
 │
 ├── partitions_custom.csv     # Egyedi partíciós tábla: OTA nélkül, 512 KiB LittleFS
-├── test/                     # host tesztkészlet (401 forgatókönyv)
+├── test/                     # host tesztkészlet (403 forgatókönyv)
 │
 ├── README.md                 # belépő: mi ez, és hol mi van
 ├── ATTEKINTES.md             # egyoldalas összefoglaló
@@ -1519,8 +1519,8 @@ bazsi-router-reboot/
 A Wi-Fi beállító weboldal a programba van fordítva (`FORM_HEAD` / `FORM_TAIL`
 konstansok + a `sendConfigForm()` generálja a mezőket), a flash `.rodata`
 szekciójában – nincs külön feltöltendő `data/` mappa. A LittleFS-re így csak a
-négy konfigurációs fájl, a kiesés-AP kapcsoló, az AP jelszó és a mentett napló kerül (`/ssid.txt`,
-`/pass.txt`, `/ip.txt`, `/gateway.txt`, `/outageap.txt`, `/appass.txt`, `/evlog.bin` – ez
+négy konfigurációs fájl, a kiesés-AP kapcsoló, a mentés utáni próbajelző, az AP jelszó és a mentett napló kerül (`/ssid.txt`,
+`/pass.txt`, `/ip.txt`, `/gateway.txt`, `/outageap.txt`, `/probe.txt`, `/appass.txt`, `/evlog.bin` – ez
 utóbbi ~1,5 KB, 128 bejegyzés).
 
 ### A modulok
@@ -2182,4 +2182,4 @@ A **valós idő** (`gettimeofday()`) szintén túléli a deep sleepet – az RTC
 
 *Az ábrák a `bazsi_router_reboot.ino` aktuális állapotát dokumentálják.
 Módosításkor a kóddal együtt frissítendők – a viselkedést a `test/` alatti
-401 forgatókönyves (2377 ellenőrzéses) tesztkészlet rögzíti.*
+403 forgatókönyves (2392 ellenőrzéses) tesztkészlet rögzíti.*
