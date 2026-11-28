@@ -383,6 +383,7 @@ hálózat mindkét esetben ugyanúgy eltűnik.
 | Az űrlap előkitöltése | SSID, IP, gateway a mentett értékkel (HTML-escape-elve), a kiesés-AP kapcsoló a mentett állással; **a jelszó soha** |
 | Kiesés-AP kapcsoló | jelölőnégyzet: „Wi-Fi-kiesés alatt saját hálózat az állapotoldallal”, **alapból ki**; `/outageap.txt` (`"1"`/`"0"`), a wifireset gomb nem törli; csak `0` vagy `1` fogadható el (`OA1`); olvashatatlan fájlnál egyszerűen ki, nem végzetes hiba (`OA2`) |
 | A beállító űrlap forrása | a programba fordítva (`FORM_HEAD` / `FORM_TAIL` + `sendConfigForm()`), nincs feltöltendő `data/` mappa – a portál a LittleFS-ről semmit nem szolgál ki |
+| Kinézet | mindhárom oldal (űrlap, `/log`, állapotoldal) ugyanazt a beépített, ~1 kB-os stílust használja (`PAGE_HEAD_LIT`, flashben): kártyák, címkézett mezők, a táblázatok a kártyán belül görgetnek, világos/sötét mód a rendszer szerint; nincs külön kérés, nincs külső betűtípus, és az oldal JavaScript nélkül is működik. A válasz-stream kezdő puffere a legrosszabb esethez méretezett (űrlap 3072 B a mért 2989-hez, állapotoldal 4608 B a mért 4323-hoz), így kérés közben nincs újrafoglalás (`AP8`) |
 | Tétlenség után deep sleep | **5 perc** (`AP_TIMEOUT_MS`) az utolsó kéréstől |
 | A nyitva lévő lap keep-alive-ja | **60 mp**-enként `GET /ping` (1 bájt válasz) |
 | Elfogadott IP / gateway | **csak IPv4**, nem `0.0.0.0`, és csak együtt |
@@ -1260,6 +1261,7 @@ portot.
 | internet és a router DNS-e: rendben / hiba N perce, és a resetek száma ebben a hibában (hiba nélkül 0); Wi-Fi: rendben / rendben, de nemrég kiesett / nincs kapcsolat N perce (ez utóbbi csak a kiesés alatti saját hálózatról látszik) | a lépcsők (`diagCounters()`) |
 | fut-e épp router reset; watchdog- és heap-újraindulások | számlálók |
 | az utolsó **20** esemény | az RTC napló (fájlt nem olvas) |
+| frissítés | 60 mp-enként magától (`meta refresh`, JavaScript nélkül) |
 
 **Biztonság:** csak a saját alhálózatról érkező kérést szolgálja ki (a kliens
 címe a `WiFi.localIP()` / `WiFi.subnetMask()` hálózatába esik, vagy – amíg a
@@ -1524,7 +1526,7 @@ bazsi-router-reboot/
 ├── webportal.h/.cpp          # az AP beállító portál és a normál üzemű állapotoldal
 │
 ├── partitions_custom.csv     # Egyedi partíciós tábla: OTA nélkül, 512 KiB LittleFS
-├── test/                     # host tesztkészlet (405 forgatókönyv)
+├── test/                     # host tesztkészlet (409 forgatókönyv)
 │
 ├── README.md                 # belépő: mi ez, és hol mi van
 ├── ATTEKINTES.md             # egyoldalas összefoglaló
@@ -1553,7 +1555,7 @@ Fentről lefelé: minden modul csak a nála lentebb állóktól függ. A `config
 | **`configstore`** | 240 | a négy mentett érték, a kiesés-AP kapcsoló és a mentés utáni próbajelző, a fájljaik, a LittleFS | a négy puffer, `outageApEnabled`, `readConfigValue()`, `readSecretValue()`, `writeConfigValue()`, `clearConfigValue()`, `staticPairValid()`, `initLittleFS()`, `filesystemReady()` |
 | **`eventlog`** | 517 | a diagnosztikai napló **és** a valós idő (NTP) | `logEvent()`, `saveEventLog()`, `loadEventLogHeader()`, `loadEventLogRange()`, `printEventLogs()`, `eventName()`, `formatEpoch()`, `ensureNtp()`, `applyTimezone()`, `localHour()` |
 | **`netprobe`** | 331 | HTTP végpont-tesztek, ICMP ping, DNS-kérdés | `testInternetHTTP()`, `lastHttpCode()`, `httpCodeLogParam()`, `testInternetPing()`, `buildDnsQuery()`, `dnsResponseOk()`, `testDnsServer()` |
-| **`webportal`** | 823 | az AP beállító portál, az eszközönkénti AP jelszó, a normál üzemű állapotoldal és a kiesés alatti saját hálózat | `startWebPortal()`, `stopWebPortal()`, `startStatusPage()`, `stopStatusPage()`, `startOutageAp()`, `stopOutageAp()`, `outageApActive()`, `touchApDeadline()`, `announceApPassword()` |
+| **`webportal`** | 844 | az AP beállító portál, az eszközönkénti AP jelszó, a normál üzemű állapotoldal és a kiesés alatti saját hálózat | `startWebPortal()`, `stopWebPortal()`, `startStatusPage()`, `stopStatusPage()`, `startOutageAp()`, `stopOutageAp()`, `outageApActive()`, `touchApDeadline()`, `announceApPassword()` |
 | **`app_hooks.h`** | 31 | amit a főmodul ad a moduloknak | `feedWatchdog()`, `resetbutton()`, `wifiresetbutton()`, `waitWithButtons()`, `printUptime()`, `diagCounters()` |
 
 > A `webportal` kapta a legszorosabb határt, mert ez a program
@@ -2199,4 +2201,4 @@ A **valós idő** (`gettimeofday()`) szintén túléli a deep sleepet – az RTC
 
 *Az ábrák a `bazsi_router_reboot.ino` aktuális állapotát dokumentálják.
 Módosításkor a kóddal együtt frissítendők – a viselkedést a `test/` alatti
-405 forgatókönyves (2401 ellenőrzéses) tesztkészlet rögzíti.*
+409 forgatókönyves (2424 ellenőrzéses) tesztkészlet rögzíti.*

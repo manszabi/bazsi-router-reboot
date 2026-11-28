@@ -48,7 +48,10 @@ static bool statusRunning = false;
 static bool outageAp = false;
 constexpr uint16_t STATUS_EVENTS = 20;
 
-constexpr size_t LOG_PAGE_FIX_BYTES = 2600;
+// A stream kezdő pufferei a tényleges tartalomhoz méretezve (a könyvtár a hiányt bájtra pontosan pótolná, darabolva).
+constexpr size_t FORM_STREAM_BYTES = 3072;
+constexpr size_t STATUS_STREAM_BYTES = 4608;
+constexpr size_t LOG_PAGE_FIX_BYTES = 3400;
 constexpr size_t LOG_PAGE_ROW_BYTES = 120;
 constexpr size_t LOG_STREAM_MIN = 3072;
 
@@ -64,19 +67,38 @@ const char PARAM_OPEN[] = "open";
   "document.onvisibilitychange=()=>document.hidden||f()</script>"
 const char KEEPALIVE_JS[] = KEEPALIVE_JS_LIT;
 
+// Közös oldalfej és stílus (flashben; nincs külön kérés, nincs JavaScript-függés), világos és sötét módhoz.
+#define PAGE_HEAD_LIT \
+  "<!DOCTYPE html><html lang=\"hu\"><head><meta charset=\"utf-8\">" \
+  "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" \
+  "<style>:root{--b:#f3f5f7;--c:#fff;--t:#1d2329;--m:#5f6b76;--l:#d8dee4;--a:#1a6dd6;--w:#c62828}" \
+  "@media(prefers-color-scheme:dark){:root{--b:#14171a;--c:#1e2328;--t:#e6e9ec;--m:#9aa5af;--l:#333a41;--a:#5aa0f2;--w:#ef6c6c}}" \
+  "*{box-sizing:border-box}body{margin:0;background:var(--b);color:var(--t);" \
+  "font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}" \
+  "main{max-width:680px;margin:0 auto;padding:16px}h2{font-size:1.35em;margin:.3em 0 .8em}" \
+  "h3{font-size:1.05em;margin:1.2em 0 .5em}.c{background:var(--c);border:1px solid var(--l);" \
+  "border-radius:10px;padding:14px 16px;margin:12px 0}label{display:block;margin:10px 0 4px}" \
+  "input:not([type]),input[type=password]{display:block;width:100%;margin-top:4px;padding:9px 10px;" \
+  "font:inherit;color:var(--t);background:var(--b);border:1px solid var(--l);border-radius:8px}" \
+  "input[type=checkbox]{transform:scale(1.2);margin-right:8px}input[type=submit]{margin-top:12px;" \
+  "padding:10px 22px;font:inherit;color:#fff;background:var(--a);border:0;border-radius:8px}" \
+  "small,.m{color:var(--m)}a{color:var(--a)}b{font-weight:600}.w{color:var(--w)}" \
+  ".t{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:.9em}" \
+  "th,td{padding:6px 8px;border-bottom:1px solid var(--l);text-align:left;vertical-align:top}" \
+  "th{color:var(--m);font-weight:600}.e td{white-space:nowrap}ul{padding-left:1.2em}li{margin:3px 0}</style>"
+
 const char FORM_HEAD[] =
-  "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
-  "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-  "<title>ESP Wi-Fi beallitas</title></head><body>"
+  PAGE_HEAD_LIT
+  "<title>ESP Wi-Fi beallitas</title></head><body><main>"
   "<h2>ESP Wi-Fi beallitas</h2>"
-  "<form action=\"/\" method=\"POST\">";
+  "<form class=\"c\" action=\"/\" method=\"POST\">";
 const char FORM_TAIL[] =
   "<small>Statikus IP-hez mindket cimmezot toltsd ki, csak IPv4. "
   "DHCP-hez hagyd mindkettot uresen.</small><br>"
   "<input type=\"submit\" value=\"Mentes\"></form>"
   "<p><a href=\"/log\">Diagnosztikai naplo</a></p>"
   KEEPALIVE_JS_LIT
-  "</body></html>";
+  "</main></body></html>";
 
 // Eszközönként egyedi AP jelszó: 12 karakter, 32 elemű, összetéveszthető jelek nélküli ábécé.
 constexpr size_t AP_PASS_LEN = 12;
@@ -152,25 +174,25 @@ static void printHtmlEscaped(AsyncResponseStream* r, const char* s) {
 
 // A jelszót soha nem töltjük elő.
 static void sendConfigForm(AsyncWebServerRequest* request) {
-  AsyncResponseStream* r = request->beginResponseStream("text/html", 2048);
+  AsyncResponseStream* r = request->beginResponseStream("text/html", FORM_STREAM_BYTES);
   r->print(FORM_HEAD);
 
-  r->print(F("SSID <input name=\"ssid\" maxlength=\"32\" required value=\""));
+  r->print(F("<label>Halozat neve (SSID)<input name=\"ssid\" maxlength=\"32\" required value=\""));
   printHtmlEscaped(r, ssid);
-  r->print(F("\"><br>"));
+  r->print(F("\"></label>"));
 
-  r->print(F("Jelszo <input name=\"pass\" type=\"password\" maxlength=\"63\">"
-             " <small>(uresen hagyva a mentett jelszo marad)</small><br>"
-             "<label><input type=\"checkbox\" name=\"open\" value=\"1\"> Nyilt halozat "
-             "(jelszo nelkul)</label><br>"));
+  r->print(F("<label>Jelszo<input name=\"pass\" type=\"password\" maxlength=\"63\" autocomplete=\"off\">"
+             "</label><small>Uresen hagyva a mentett jelszo marad.</small>"
+             "<label><input type=\"checkbox\" name=\"open\" value=\"1\">Nyilt halozat "
+             "(jelszo nelkul)</label>"));
 
-  r->print(F("IP cim <input name=\"ip\" maxlength=\"15\" placeholder=\"opcionalis\" value=\""));
+  r->print(F("<label>IP cim<input name=\"ip\" maxlength=\"15\" placeholder=\"opcionalis\" value=\""));
   printHtmlEscaped(r, ipStr);
-  r->print(F("\"><br>"));
+  r->print(F("\"></label>"));
 
-  r->print(F("Atjaro (gateway) <input name=\"gateway\" maxlength=\"15\" placeholder=\"opcionalis\" value=\""));
+  r->print(F("<label>Atjaro (gateway)<input name=\"gateway\" maxlength=\"15\" placeholder=\"opcionalis\" value=\""));
   printHtmlEscaped(r, gatewayStr);
-  r->print(F("\"><br>"));
+  r->print(F("\"></label>"));
 
   // A rejtett 0 akkor is elmegy, ha a jelolonegyzet ures; bejelolve az utana kuldott 1 gyoz.
   r->print(F("<label><input type=\"hidden\" name=\"outageap\" value=\"0\">"
@@ -178,7 +200,7 @@ static void sendConfigForm(AsyncWebServerRequest* request) {
   if (outageApEnabled) {
     r->print(F(" checked"));
   }
-  r->print(F("> Wi-Fi-kieses alatt sajat halozat az allapotoldallal (192.168.4.1)</label><br>"));
+  r->print(F(">Wi-Fi-kieses alatt sajat halozat az allapotoldallal (192.168.4.1)</label>"));
 
   r->print(FORM_TAIL);
   request->send(r);
@@ -399,7 +421,8 @@ static void handleConfigPost(AsyncWebServerRequest* request) {
     touchApDeadline();
     Serial.println("A beallitasok mentese SIKERTELEN.");
 
-    char err[208];
+    // A leghosszabb ok (IP/gateway párosítás) is elfér: 36 + 174 + 45 bájt < 320.
+    char err[320];
     snprintf(err, sizeof(err),
                "A beallitasok mentese nem sikerult: %s "
                "Az eszkoz NEM indul ujra, probald meg ismet.",
@@ -483,12 +506,10 @@ static void sendDiagnosticLog(AsyncWebServerRequest* request) {
     pufferMeret = LOG_STREAM_MIN;
   }
   AsyncResponseStream* r = request->beginResponseStream("text/html", pufferMeret);
-  r->print(F("<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
-             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-             "<title>Naplo</title></head><body><h2>Diagnosztikai naplo</h2>"));
+  r->print(F(PAGE_HEAD_LIT "<title>Naplo</title></head><body><main><h2>Diagnosztikai naplo</h2>"));
 
   const esp_reset_reason_t rr = esp_reset_reason();
-  r->printf("<p><b>Utolso indulas oka:</b> %s (%d)<br>",
+  r->printf("<p class=\"c\"><b>Utolso indulas oka:</b> %s (%d)<br>",
             resetReasonName(rr), (int)rr);
 
   const DiagCounters dc = diagCounters();
@@ -507,7 +528,7 @@ static void sendDiagnosticLog(AsyncWebServerRequest* request) {
   if (fajlDb == 0 && ujDb == 0) {
     r->print(F("<p>Nincs rogzitett esemeny.</p>"));
   } else {
-    r->print(F("<p><b>Forras:</b> "));
+    r->print(F("<p class=\"m\"><b>Forras:</b> "));
     if (vanFajl) {
       char mikor[24];
       r->printf("a fajlrendszerre mentett naplo mind a %u bejegyzese", (unsigned)fajlDb);
@@ -526,7 +547,7 @@ static void sendDiagnosticLog(AsyncWebServerRequest* request) {
     r->printf("az RTC memoriabol %u, a mentes ota keletkezett bejegyzes.</p>",
               (unsigned)ujDb);
 
-    r->print(F("<table border=1 cellpadding=4><tr><th>Ido</th><th>Uptime</th>"
+    r->print(F("<div class=\"c t\"><table class=\"e\"><tr><th>Ido</th><th>Uptime</th>"
                "<th>Esemeny</th><th>Param</th><th>Forras</th></tr>"));
 
     if (fajlDb > 0) {
@@ -549,10 +570,10 @@ static void sendDiagnosticLog(AsyncWebServerRequest* request) {
     for (uint16_t i = 0; i < ujDb; i++) {
       printLogRow(r, evCopy[(evTotal - ujDb + i) % EVLOG_SIZE], "RTC");
     }
-    r->print(F("</table>"));
+    r->print(F("</table></div>"));
   }
 
-  r->print(F("<h3>Param jelentese</h3><ul>"
+  r->print(F("<h3>Param jelentese</h3><ul class=\"c m\">"
              "<li>BOOT: az indulas oka (lasd fent)</li>"
              "<li>WIFI OK: a Wi-Fi lepcso foka csatlakozaskor (0 = nem volt kieses, "
              "1 = az ESP ujrainditasa segitett, 2 vagy tobb = N-1 router reset utan)</li>"
@@ -590,7 +611,7 @@ static void sendDiagnosticLog(AsyncWebServerRequest* request) {
              "<p><a href=\"/\">Vissza a beallitasokhoz</a></p>"));
 
   r->print(KEEPALIVE_JS);
-  r->print(F("</body></html>"));
+  r->print(F("</main></body></html>"));
   request->send(r);
 }
 
@@ -611,7 +632,7 @@ static void printYesNoMin(AsyncResponseStream* r, const char* mi, bool aktiv,
                           uint32_t perc, uint32_t resetek, const char* rendben) {
   r->printf("<tr><td>%s</td><td>", mi);
   if (aktiv) {
-    r->printf("<b>hiba, %u perce</b>", (unsigned)perc);
+    r->printf("<b class=\"w\">hiba, %u perce</b>", (unsigned)perc);
   } else {
     r->print(rendben);
   }
@@ -634,17 +655,17 @@ static void sendStatusPage(AsyncWebServerRequest* request) {
   const uint16_t db = (uint16_t)(elerheto < STATUS_EVENTS ? elerheto : STATUS_EVENTS);
 
   const DiagCounters dc = diagCounters();
-  AsyncResponseStream* r = request->beginResponseStream("text/html", LOG_STREAM_MIN);
-  r->print(F("<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
-             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-             "<title>Allapot</title></head><body><h2>Router figyelo - allapot</h2>"));
+  AsyncResponseStream* r = request->beginResponseStream("text/html", STATUS_STREAM_BYTES);
+  // 60 mp-enkénti frissítés: a nyitva hagyott lap követi az állapotot (JavaScript nélkül).
+  r->print(F(PAGE_HEAD_LIT "<meta http-equiv=\"refresh\" content=\"60\">"
+             "<title>Allapot</title></head><body><main><h2>Router figyelo - allapot</h2>"));
   const uint32_t up = (uint32_t)(esp_timer_get_time() / 1000000);
   const esp_reset_reason_t rr = esp_reset_reason();
-  r->printf("<p><b>Uptime:</b> %ud %uh %um<br><b>Utolso indulas oka:</b> %s (%d)<br>"
+  r->printf("<p class=\"c\"><b>Uptime:</b> %ud %uh %um<br><b>Utolso indulas oka:</b> %s (%d)<br>"
             "<b>Szabad heap:</b> %u B</p>",
             (unsigned)(up / 86400), (unsigned)((up % 86400) / 3600), (unsigned)((up % 3600) / 60),
             resetReasonName(rr), (int)rr, (unsigned)ESP.getFreeHeap());
-  r->print(F("<table border=1 cellpadding=4><tr><th>Mit</th><th>Allapot</th>"
+  r->print(F("<div class=\"c t\"><table><tr><th>Mit</th><th>Allapot</th>"
              "<th>Resetek ebben a hibaban</th></tr>"));
   printYesNoMin(r, "Internet", dc.netOutage, dc.netOutageMin, dc.netOutage ? dc.netResets : 0, "rendben");
   printYesNoMin(r, "A router DNS-e", dc.dnsSuspect, dc.dnsSuspectMin, dc.dnsResets, "rendben");
@@ -652,9 +673,9 @@ static void sendStatusPage(AsyncWebServerRequest* request) {
   r->print(F("<tr><td>Wi-Fi</td><td>"));
   if (!dc.wifiUp) {
     if (dc.wifiStep > 0) {
-      r->printf("<b>nincs kapcsolat, %u perce</b>", (unsigned)dc.wifiOutageMin);
+      r->printf("<b class=\"w\">nincs kapcsolat, %u perce</b>", (unsigned)dc.wifiOutageMin);
     } else {
-      r->print(F("<b>nincs kapcsolat</b>"));
+      r->print(F("<b class=\"w\">nincs kapcsolat</b>"));
     }
   } else if (dc.wifiStep > 0) {
     r->print(F("rendben (nemreg kiesett, a lepcso 30 perc stabil kapcsolat utan nullazodik)"));
@@ -662,8 +683,8 @@ static void sendStatusPage(AsyncWebServerRequest* request) {
     r->print(F("rendben"));
   }
   r->print(F("</td><td>-</td></tr>"));
-  r->print(F("</table>"));
-  r->printf("<p><b>Router reset most:</b> %s<br><b>Watchdog ujraindulasok:</b> %u / %u<br>"
+  r->print(F("</table></div>"));
+  r->printf("<p class=\"c\"><b>Router reset most:</b> %s<br><b>Watchdog ujraindulasok:</b> %u / %u<br>"
             "<b>Heap miatti ujraindulasok:</b> %u</p>",
             dc.resetRunning ? "folyamatban" : "nem", (unsigned)dc.wdtResets,
             (unsigned)dc.wdtLimit, (unsigned)dc.heapRestarts);
@@ -671,15 +692,15 @@ static void sendStatusPage(AsyncWebServerRequest* request) {
   if (db == 0) {
     r->print(F("<p>Nincs rogzitett esemeny.</p>"));
   } else {
-    r->print(F("<table border=1 cellpadding=4><tr><th>Ido</th><th>Uptime</th>"
+    r->print(F("<div class=\"c t\"><table class=\"e\"><tr><th>Ido</th><th>Uptime</th>"
                "<th>Esemeny</th><th>Param</th><th>Forras</th></tr>"));
     for (uint16_t i = 0; i < db; i++) {
       printLogRow(r, evCopy[(evTotal - db + i) % EVLOG_SIZE], "RTC");
     }
-    r->print(F("</table>"));
+    r->print(F("</table></div>"));
   }
-  r->print(F("<p><i>Csak olvashato oldal. A teljes naplo es a beallitasok "
-             "az AP beallito modban erhetok el.</i></p></body></html>"));
+  r->print(F("<p class=\"m\"><small>Csak olvashato oldal, 60 mp-enkent frissul. A teljes naplo es a "
+             "beallitasok az AP beallito modban erhetok el.</small></p></main></body></html>"));
   request->send(r);
 }
 

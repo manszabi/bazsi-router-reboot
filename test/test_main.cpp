@@ -5485,10 +5485,10 @@ static void scAP8() {
 
   AsyncWebServerRequest req; g_handlers["/#1"](&req);
   const size_t meret = req._body.size();
-  printf("     [info] az urlap legrosszabb esetben %u bajt (a puffer 2048)\n",
+  printf("     [info] az urlap legrosszabb esetben %u bajt (a puffer 3072)\n",
          (unsigned)meret);
   CHECK(req._code == 200, "az urlap kiszolgalodik");
-  CHECK(meret < 2048, "es belefer a stream 2048 bajtos kezdo pufferebe");
+  CHECK(meret < 3072, "es belefer a stream 3072 bajtos kezdo pufferebe");
 
   strcpy(ssid, "MyHomeNetwork");
   strcpy(ipStr, "192.168.1.200");
@@ -7624,7 +7624,7 @@ static void scST3() {
   ftIndit();
   ftJatszik(6, [](uint32_t) { return FtPerc{ false, true, false }; });
   std::string b = allapotLap(IPAddress(192, 168, 1, 50));
-  CHECK(b.find("<td>Internet</td><td><b>hiba, ") != std::string::npos, "internet: hiba, N perce");
+  CHECK(b.find("<td>Internet</td><td><b class=\"w\">hiba, ") != std::string::npos, "internet: hiba, N perce");
   auto r = ftJatszik(15, [](uint32_t) { return FtPerc{ false, true, false }; });
   CHECK(r.size() == 1, "kozben egy reset");
   b = allapotLap(IPAddress(192, 168, 1, 50));
@@ -7839,7 +7839,7 @@ static void scST7() {
   g_fs["/outageap.txt"] = "1"; outageApEnabled = true;
   futtatUjraindulassal(10u * 60 * 1000, false, [] { return outageApActive() && relayPulses() > 0; });
   std::string b = allapotLap(IPAddress(192, 168, 4, 2));
-  CHECK(b.find("<td>Wi-Fi</td><td><b>nincs kapcsolat, ") != std::string::npos, "kieses kozben: nincs kapcsolat, N perce");
+  CHECK(b.find("<td>Wi-Fi</td><td><b class=\"w\">nincs kapcsolat, ") != std::string::npos, "kieses kozben: nincs kapcsolat, N perce");
   ftIndit();
   testState.resetEvents = 1; testState.outage = false;  // egy DNS-reset utan, az internet el
   b = allapotLap(IPAddress(192, 168, 1, 50));
@@ -8028,6 +8028,17 @@ static void scCP11() {
   const int r = futtat(10u * 60 * 1000, [] { return deviceMode == (DeviceMode)1; });
   CHECK(r == 2 && evCount(18) == 1 && deviceMode == (DeviceMode)0 && g_fs["/ssid.txt"] == "TestNet",
         "normal uzemben 15-os ok: ESP-ujrainditas, nem AP, nincs torles");
+}
+
+static void scAP9() {
+  // A leghosszabb hibauzenet (IP es gateway nem illik ossze) is csonkitatlanul megerkezik.
+  coldBoot(false, "", "", "", "");
+  setup();
+  std::string body;
+  const int kod = postConfig("Halozat", "jelszo123", "192.168.1.200", "192.168.2.1", &body);
+  printf("     [info] a hibauzenet %zu bajt\n", body.size());
+  CHECK(kod == 500 && body.find("nem illik ossze") != std::string::npos, "500, az ok megnevezesevel");
+  CHECK(body.find("probald meg ismet.") != std::string::npos, "nem csonkolt: a zaro mondat is benne van");
 }
 
 static const Scenario kScenarios[] = {
@@ -8251,6 +8262,7 @@ static const Scenario kScenarios[] = {
   { "AP5: aposztrof es tarsai az SSID-ben - HTML escape", scAP5 },
   { "AP7: mind a negy mezo egyformán turi a beillesztett szokozoket", scAP7 },
   { "AP8: a beallito urlap befer a stream kezdo pufferebe", scAP8 },
+  { "AP9: a leghosszabb hibauzenet sem csonkolodik", scAP9 },
   { "LOG7: a /log oldal a legrosszabb esetben is befer a pufferbe", scLOG7 },
   { "LOG8: firmware frissites utan a regi elrendezesu naplo ervenytelen", scLOG8 },
   { "LOG9: a wifireset a naplofajlt szandekosan NEM torli", scLOG9 },
