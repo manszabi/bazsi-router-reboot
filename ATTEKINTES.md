@@ -53,7 +53,14 @@ routernél. Ha a router DNS-e 10 percig hallgat, miközben egy külső DNS
 ## Ha nincs Wi-Fi
 
 - 3 csatlakozási próba, köztük 30 mp.
-- Rossz jelszó → beállító mód (AP), router reset nélkül.
+- Ha a router hitelesítési hibát jelez → beállító mód (AP), router reset nélkül.
+  WPA2-nél egy megváltozott router-jelszó rendszerint kiesésnek látszik, és a
+  lépcsőn halad; az új jelszót a wifireset gombbal vagy beállító módban adhatod meg.
+- Mentés utáni első indulás: nincs türelmi idő (áramszünet után van, mert a
+  router is bootol). Ha a próbák után sem sikerül csatlakozni: rossz jelszónál
+  a mentett Wi-Fi adatok törlődnek, elérhetetlen hálózatnál megmaradnak; mindkét
+  esetben beállító mód, router reset nélkül. Onnan ugyanúgy: 5 perc után alvás,
+  a reset gomb ébreszti (ébredéskor újra próbál).
 - Ha így sem jön vissza: **előbb az ESP indul újra** (a router érintetlen), és
   ha az sem segít, **router reset** (22:00–05:00 között legalább 10 perc
   kiesés után). Utána egyre ritkábban: 30 perc → 1 óra →

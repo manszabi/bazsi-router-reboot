@@ -1,4 +1,4 @@
-// A mentett konfiguráció (SSID, jelszó, IP, gateway) és a LittleFS olvasás/írás.
+// A mentett beállítások (SSID, jelszó, IP, gateway, a kiesés-AP kapcsoló, a mentés utáni próbajelző) és a LittleFS olvasás/írás.
 #pragma once
 
 #include <Arduino.h>
@@ -18,6 +18,9 @@ extern const char gatewayPath[];
 
 // Opcionális kapcsoló ("1"/"0"): Wi-Fi-kiesés alatt saját hálózat az állapotoldallal; hiányzó fájl = ki.
 extern const char outageApPath[];
+
+// Mentés utáni első indulás jelzője ("1"); a flashben, hogy egy közbejött áramszünetet is túléljen.
+extern const char probePath[];
 extern bool outageApEnabled;
 
 // A hiányzó fájl nem hiba (első indulás, wifireset után).

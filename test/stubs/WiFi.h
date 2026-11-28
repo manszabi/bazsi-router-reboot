@@ -48,6 +48,7 @@ struct WifiSim {
   bool sleepEnabled = true;
   bool apRunning = false;
   bool softApFails = false;
+  uint8_t disconnectReason = 0;
 
   IPAddress dhcpGw = IPAddress(192, 168, 1, 1);
   // A DHCP által adott első DNS (alapból a router).
@@ -58,6 +59,17 @@ struct WifiSim {
   void reset() { *this = WifiSim(); }
 };
 extern WifiSim wifiSim;
+
+// Network esemenyek: csak a STA-bontas oka kell (arduino_event_info_t.wifi_sta_disconnected.reason).
+typedef enum { ARDUINO_EVENT_WIFI_STA_DISCONNECTED = 5, ARDUINO_EVENT_MAX = 100 } arduino_event_id_t;
+typedef struct { uint8_t ssid[32]; uint8_t ssid_len; uint8_t bssid[6]; uint8_t reason; int8_t rssi; } wifi_event_sta_disconnected_t;
+typedef union { wifi_event_sta_disconnected_t wifi_sta_disconnected; } arduino_event_info_t;
+typedef void (*StubEventCb)(arduino_event_id_t, arduino_event_info_t);
+extern StubEventCb g_staEventCb;
+#define WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT 15
+#define WIFI_REASON_NO_AP_FOUND 201
+#define WIFI_REASON_AUTH_FAIL 202
+#define WIFI_REASON_HANDSHAKE_TIMEOUT 204
 
 class STAClassStub {
 public:
@@ -92,7 +104,14 @@ public:
     wifiSim.begun = true; wifiSim.beginAt = g_millis; wifiSim.radioOff = false;
     wifiSim.beginCount++;
     simLog(std::string("WiFi.begin(") + (s ? s : "") + ")");
+    // A sikertelen csatlakozas bontasi okat a valodi core esemenykent kuldi.
+    if (!wifiSim.willConnect && wifiSim.disconnectReason != 0 && g_staEventCb) {
+      arduino_event_info_t info = {};
+      info.wifi_sta_disconnected.reason = wifiSim.disconnectReason;
+      g_staEventCb(ARDUINO_EVENT_WIFI_STA_DISCONNECTED, info);
+    }
   }
+  int onEvent(StubEventCb cb, arduino_event_id_t) { g_staEventCb = cb; return 1; }
 
   wl_status_t failNow() {
     if (wifiSim.authFail) {

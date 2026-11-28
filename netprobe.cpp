@@ -184,7 +184,7 @@ bool testInternetPing(const IPAddress& target, const char* targetName) {
     } else {
       Serial.println(" sikertelen.");
       if (j == 0) {
-        Serial.println("⚠️ Elso ping hiba - lehet, hogy a halozat ebred.");
+        Serial.println("FIGYELEM: Elso ping hiba - lehet, hogy a halozat ebred.");
       }
     }
     // Korai kilépés, ha az eredmény már eldőlt.
@@ -195,7 +195,7 @@ bool testInternetPing(const IPAddress& target, const char* targetName) {
     waitWithButtons(PING_GAP_MS);
   }
   const bool ok = successCount >= PING_MIN_SUCCESS;
-  Serial.println(ok ? "✅ Ping teszt sikeres." : "❌ Ping teszt sikertelen - halozati problema valoszinu.");
+  Serial.println(ok ? "OK: Ping teszt sikeres." : "HIBA: Ping teszt sikertelen - halozati problema valoszinu.");
   return ok;
 }
 
@@ -282,6 +282,6 @@ bool testDnsServer(const IPAddress& server, const char* name, const char* server
     }
   }
   udp.stop();
-  Serial.println(ok ? "✅ DNS teszt sikeres." : "❌ DNS teszt sikertelen.");
+  Serial.println(ok ? "OK: DNS teszt sikeres." : "HIBA: DNS teszt sikertelen.");
   return ok;
 }

@@ -19,6 +19,7 @@ const char passPath[] = "/pass.txt";
 const char ipPath[] = "/ip.txt";
 const char gatewayPath[] = "/gateway.txt";
 const char outageApPath[] = "/outageap.txt";
+const char probePath[] = "/probe.txt";
 bool outageApEnabled = false;
 
 bool isUsableIPv4(const IPAddress& addr) {

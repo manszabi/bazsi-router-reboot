@@ -293,6 +293,7 @@ size_t strlcpy(char* d, const char* s, size_t n) {
 #endif
 
 uint32_t g_epochNow = 0;
+StubEventCb g_staEventCb = nullptr;
 uint32_t g_epochTickFrom = 0;
 int      g_ntpStarts = 0;
 void configTzTime(const char* tz, const char* server) {
