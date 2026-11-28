@@ -54,11 +54,11 @@ routernél. Ha a router DNS-e 10 percig hallgat, miközben egy külső DNS
 
 - 3 csatlakozási próba, köztük 30 mp.
 - Rossz jelszó → beállító mód (AP), router reset nélkül.
-- Mentés utáni első indulás: nincs türelmi idő; ha a 3 próba után sem sikerül
-  csatlakozni, a mentett Wi-Fi adatok törlődnek, és az ESP beállító módban indul
-  újra (router reset nélkül). Onnan ugyanúgy: 5 perc után alvás, a reset gomb
-  ébreszti. Ha a mentés után áramszünet jön, ez a szabály megmarad (a jelző a
-  flashben van), csak a router bootolása miatt 10 perc türelemmel.
+- Mentés utáni első indulás: nincs türelmi idő (áramszünet után van, mert a
+  router is bootol). Ha a próbák után sem sikerül csatlakozni: rossz jelszónál
+  a mentett Wi-Fi adatok törlődnek, elérhetetlen hálózatnál megmaradnak; mindkét
+  esetben beállító mód, router reset nélkül. Onnan ugyanúgy: 5 perc után alvás,
+  a reset gomb ébreszti (ébredéskor újra próbál).
 - Ha így sem jön vissza: **előbb az ESP indul újra** (a router érintetlen), és
   ha az sem segít, **router reset** (22:00–05:00 között legalább 10 perc
   kiesés után). Utána egyre ritkábban: 30 perc → 1 óra →

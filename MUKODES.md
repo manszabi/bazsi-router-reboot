@@ -52,19 +52,20 @@ A 3 próba után a **hiba oka** dönt:
 
 ### A mentés utáni első indulás
 
-A beállító oldalon mentett adatokkal az első csatlakozás **próba**: ha nem
-sikerül, a hiba szinte biztosan a beírt adatban van (elírt hálózatnév, 5 GHz-es
-hálózat, rossz jelszó), nem a routerben. Ezért a mentés utáni újraindulás (az
-ESP-é – a routerhez a mentés nem nyúl) így megy:
+A beállító oldalon mentett adatokkal az első csatlakozás **próba**. A rossz
+jelszót az ESP biztosan felismeri; azt viszont nem tudja eldönteni, hogy egy
+nem látszó hálózat elírás-e, vagy épp a router áll. Ezért a mentés utáni
+újraindulás (az ESP-é – a routerhez a mentés nem nyúl) így megy:
 
 | Lépés | Viselkedés |
 |---|---|
 | Mentés | két jelző: a flashben `/probe.txt` (`"1"`, áramszünetet is túlél), és az újraindulás előtt az RTC memóriában `rtcConfigProbe` (ellenőrző értékkel; csak ez az út állítja) |
-| Indulás közvetlenül a mentés után | az RTC-jelzőt **azonnal felhasználja**; a 10 perces türelmi idő kimarad, mert a mentés a routert nem kapcsolta le |
-| Indulás áramszünet után, megmaradt `/probe.txt`-vel | a router is bootol, ezért **a szokásos 10 perc türelem** jár (közben percenként próbál, és korán kilép, ha a hálózat és az internet megvan); utána ugyanaz a szabály (`CP5`, mérve 11,7 perc; `CP6`) |
+| Indulás közvetlenül a mentés után, vagy bármely szoftveres újraindulás / ébredés után | az RTC-jelzőt **azonnal felhasználja**; a 10 perces türelmi idő kimarad, mert a router nem kapcsolt le (`CP8`) |
+| Indulás áramszünet után (bekapcsolás, feszültségesés), megmaradt `/probe.txt`-vel | a router is bootol, ezért **a szokásos 10 perc türelem** jár (közben percenként próbál, és korán kilép, ha a hálózat és az internet megvan); utána ugyanaz a szabály (`CP5`, `CP6`) |
 | Sikerül csatlakozni | a próba lezárul, a `/probe.txt` törlődik, innen **minden a megszokott szabályok szerint** megy (`CP2`) |
-| Nem sikerül (a hálózat nem látszik, vagy rossz a jelszó) | induláskor 1 + utána 3 próba (mint figyelés közben), majd **a mentett Wi-Fi adatok törlődnek** (mint a wifireset gombnál), és az ESP **újraindul AP módba** – router reset nélkül (`AP MODE` 5; mérve 2,0 perc, `CP1`, `CP4`) |
-| Az így indult AP mód | pontosan úgy viselkedik, mint az első indulásé: **5 perc tétlenség után alvás**, időzített ébresztés nélkül, a reset gomb ébreszti (`CP3`) |
+| Rossz jelszó | induláskor 1 + utána 3 próba (mint figyelés közben), majd **a mentett Wi-Fi adatok és a jelző törlődnek** (mint a wifireset gombnál), és az ESP **újraindul AP módba** – router reset nélkül (`AP MODE` 5, `CP4`) |
+| A hálózat nem látszik | ugyanannyi próba után **AP mód, a beállítások és a jelző megmaradnak** – router reset nélkül (`AP MODE` 6; mérve 2,0 perc, `CP1`) |
+| Az így indult AP mód | pontosan úgy viselkedik, mint az első indulásé: **5 perc tétlenség után alvás**, időzített ébresztés nélkül, a reset gomb ébreszti. Ébredéskor (a megmaradt jelzővel) a próba türelmi idő nélkül megismétlődik – ha a router közben feljött, csatlakozik (`CP3`) |
 
 A wifireset gomb a jelzőt is törli; a mentésen kívül semmi nem állítja (`CP7`).
 Olvashatatlan `/probe.txt` esetén nincs jelző – a megszokott szabályok élnek.
@@ -327,7 +328,8 @@ is ezt a szerkezetet használja, saját példánnyal). A Wi-Fi-ágnak csak két 
 adata van: megvolt-e már az ESP-újraindítás (`rtcWifiRestarted`), és mióta tart
 a kiesés (`rtcWifiOutageMin`, a 48 órás határhoz). A „fok” ezekből számolódik
 (`wifiLadderLevel()`: 0 = nincs kiesés, 1 = ESP-újraindítás, 2+ = utána N-1
-router reset). Következmény: egy sikeres internet-ellenőrzés a Wi-Fi miatti
+router reset; csak a kiesés kezdete óta jött resetek számítanak – egy korábbi
+DNS-reset nem, `rtcWifiBaseResets`, `WFL13`). Következmény: egy sikeres internet-ellenőrzés a Wi-Fi miatti
 reseteket is nullázza – ahogy minden más resetet –, az ESP-újraindítás jelzője
 viszont csak 30 perc stabil kapcsolat után törlődik.
 
@@ -1140,7 +1142,7 @@ Minden bejegyzés uptime bélyeget, egy eseménykódot és egy paramétert tarta
 | `HTTP ERROR` | a tartalék HTTP teszt kódja, közvetlenül a `TEST FAIL` után: 200/204/403/5xx változatlan (200 = jött válasz, de nem a várt szöveg); kliens hibánál 1000 + \|kód\|: **1001** = nem sikerült kapcsolódni vagy a nevet feloldani, **1011** = nem jött válasz időben, **1100** = a kérés el sem indult |
 | `NET DIAG` | a router reset oka, közvetlenül a reset előtt: 1 = a router sem válaszol (vagy nincs Wi-Fi / gateway), 2 = a router válaszol, az internet nem, 3 = az internet él, de a router DNS-e 10 perce hallgat |
 | `ROUTER RESET` | hányadik reset ebben a kiesésben |
-| `AP MODE` | 1 = nincs mentett SSID, 2 = hitelesítési hiba, 3 = 48 órája nincs Wi-Fi, 4 = a gateway sem érhető el, 5 = a mentés utáni első indulásnál nem sikerült csatlakozni – a beállítások törölve |
+| `AP MODE` | 1 = nincs mentett SSID, 2 = hitelesítési hiba, 3 = 48 órája nincs Wi-Fi, 4 = a gateway sem érhető el, 5 = a mentés után rossz jelszó – a beállítások törölve, 6 = a mentés után a hálózat nem érhető el – a beállítások megmaradtak |
 | `GW UNREACH` | 1 = a router reset előtt, 2 = a reset után is |
 | `CONFIG SAVED` | 0 |
 | `SLEEP` | 3 = AP időtúllépés, 4 = végzetes hiba |
