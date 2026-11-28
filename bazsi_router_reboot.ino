@@ -173,6 +173,13 @@ enum DeviceMode : uint8_t {
 State currentState = CHECK_STATE;
 DeviceMode deviceMode = MODE_MONITOR;
 
+// A reset oka (a NET DIAG esemény paramétere).
+enum NetDiag : uint8_t {
+  DIAG_ROUTER = 1,
+  DIAG_WAN = 2,
+  DIAG_DNS = 3
+};
+
 // Igaz, ha a WiFi.config() statikus IP-t állított be.
 bool staticConfigActive = false;
 
@@ -220,27 +227,6 @@ bool wifiDownLogged = false;
 // Az utolsó STA-bontás oka (a Wi-Fi esemény-taskból írva); a mentés utáni próba ebből ismeri fel a rossz jelszót.
 volatile uint8_t staDisconnectReason = 0;
 
-void onStaDisconnected(arduino_event_id_t event, arduino_event_info_t info) {
-  if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
-    staDisconnectReason = info.wifi_sta_disconnected.reason;
-  }
-}
-
-bool wifiAuthFailed();
-
-// Rossz jelszó a mentés utáni próbában: a core jelzése, vagy a WPA2-nél tipikus kézfogás-időtúllépés (15, 204) és a 202.
-bool probeWrongPassword() {
-  const uint8_t ok = staDisconnectReason;
-  return wifiAuthFailed() || ok == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT
-         || ok == WIFI_REASON_HANDSHAKE_TIMEOUT || ok == WIFI_REASON_AUTH_FAIL;
-}
-
-// A reset oka (a NET DIAG esemény paramétere).
-enum NetDiag : uint8_t {
-  DIAG_ROUTER = 1,
-  DIAG_WAN = 2,
-  DIAG_DNS = 3
-};
 
 
 // Szándékos (heap, Wi-Fi) újraindulásnál átvitt internet-lépcső (RTC_NOINIT, egyszer használjuk fel).
@@ -366,6 +352,56 @@ void applyLadderCarry() {
   printUptime();
   Serial.print("Ujraindulas utan folytatjuk: router reset szamlalo = ");
   Serial.println(testState.resetEvents);
+}
+
+// Csendes időszak: 22:00-05:00 helyi idő szerint; érvényes idő nélkül (NTP előtt) nem az.
+bool quietHours() {
+  const int ora = localHour();
+  return ora >= 0 && (ora >= QUIET_START_HOUR || ora < QUIET_END_HOUR);
+}
+
+// A lépcső: az n. sikertelen reset után ennyit várunk a következővel (n >= 1).
+uint32_t backoffMs(uint8_t resetek) {
+  const uint8_t lepcso = (resetek <= RETRY_BACKOFF_STEPS) ? (uint8_t)(resetek - 1)
+                                                          : (uint8_t)(RETRY_BACKOFF_STEPS - 1);
+  return RETRY_BACKOFF_MS[lepcso];
+}
+
+// A hiba kezdete: az első reset türelmi ideje innen számít.
+void ladderBegin(ResetLadder& l, uint32_t now) {
+  if (!l.outage) {
+    l.outage = true;
+    l.outageStart = now;
+  }
+}
+
+// A hiba elmúlt: a lépcső elölről indul.
+void ladderEnd(ResetLadder& l) {
+  l.outage = false;
+  l.resetEvents = 0;
+}
+
+void ladderCountReset(ResetLadder& l, uint32_t now) {
+  if (l.resetEvents < 255) {
+    l.resetEvents++;
+  }
+  l.lastResetAt = now;
+}
+
+// Ennyi ms múlva jöhet a következő reset (0 = most): az első a hiba kezdetétől, a többi az előzőtől.
+uint32_t ladderWaitMs(const ResetLadder& l, uint32_t now, uint32_t firstWindowMs) {
+  const uint32_t kezdet = (l.resetEvents == 0) ? l.outageStart : l.lastResetAt;
+  const uint32_t varni = (l.resetEvents == 0) ? firstWindowMs : backoffMs(l.resetEvents);
+  const uint32_t eltelt = now - kezdet;
+  return (eltelt < varni) ? varni - eltelt : 0;
+}
+
+// Az internet-ág első resetjének türelmi ideje: a router él 15 perc, különben 2 (csendes időszakban 10) perc.
+uint32_t netFirstWindowMs(bool routerOk) {
+  if (routerOk) {
+    return WAN_DOWN_WINDOW_MS;
+  }
+  return quietHours() ? QUIET_WINDOW_MS : ROUTER_DOWN_WINDOW_MS;
 }
 
 // Heap mérése, ritkított kiírás, tartósan kritikus szintnél önkéntes újraindulás.
@@ -926,6 +962,20 @@ bool wifiAuthFailed() {
   return WiFi.status() == WL_CONNECT_FAILED;
 }
 
+// A Wi-Fi esemény-taskból: az utolsó STA-bontás oka.
+void onStaDisconnected(arduino_event_id_t event, arduino_event_info_t info) {
+  if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+    staDisconnectReason = info.wifi_sta_disconnected.reason;
+  }
+}
+
+// Rossz jelszó a mentés utáni próbában: a core jelzése, vagy a WPA2-nél tipikus kézfogás-időtúllépés (15, 204) és a 202.
+bool probeWrongPassword() {
+  const uint8_t ok = staDisconnectReason;
+  return wifiAuthFailed() || ok == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT
+         || ok == WIFI_REASON_HANDSHAKE_TIMEOUT || ok == WIFI_REASON_AUTH_FAIL;
+}
+
 // A kiesés eddigi hossza percben (a mentett rész + az aktuális indulás óta eltelt).
 uint32_t wifiOutageMinutes() {
   return rtcWifiOutageMin + (millis() - wifiOutageSince) / 60000;
@@ -1000,6 +1050,20 @@ uint32_t wifiFirstWindowMs() {
 // Kell-e még várni a következő Wi-Fi miatti router resettel (a közös internet-lépcső szerint).
 bool wifiResetPending() {
   return rtcWifiRestarted != 0 && ladderWaitMs(testState, millis(), wifiFirstWindowMs()) > 0;
+}
+
+// Sikerült csatlakozni: a mentés utáni próba lezárult, innen a megszokott szabályok élnek.
+void configProbeOk() {
+  if (!configProbe) {
+    return;
+  }
+  configProbe = false;
+  printUptime();
+  Serial.println("A mentett halozat elerheto - a megszokott szabalyok szerint figyel tovabb.");
+  if (filesystemReady() && beginConfigWrite()) {
+    clearConfigValue(LittleFS, probePath);
+    endConfigWrite();
+  }
 }
 
 // A Wi-Fi próbák után: rossz jelszó -> AP; előbb ESP-újraindítás, aztán router reset a közös lépcsőn; 48 óra után AP.
@@ -1583,56 +1647,6 @@ void startRouterReset(uint8_t diag) {
   resetDelayProbeLast = timing.stateStart;
 }
 
-// Csendes időszak: 22:00-05:00 helyi idő szerint; érvényes idő nélkül (NTP előtt) nem az.
-bool quietHours() {
-  const int ora = localHour();
-  return ora >= 0 && (ora >= QUIET_START_HOUR || ora < QUIET_END_HOUR);
-}
-
-// A lépcső: az n. sikertelen reset után ennyit várunk a következővel (n >= 1).
-uint32_t backoffMs(uint8_t resetek) {
-  const uint8_t lepcso = (resetek <= RETRY_BACKOFF_STEPS) ? (uint8_t)(resetek - 1)
-                                                          : (uint8_t)(RETRY_BACKOFF_STEPS - 1);
-  return RETRY_BACKOFF_MS[lepcso];
-}
-
-// A hiba kezdete: az első reset türelmi ideje innen számít.
-void ladderBegin(ResetLadder& l, uint32_t now) {
-  if (!l.outage) {
-    l.outage = true;
-    l.outageStart = now;
-  }
-}
-
-// A hiba elmúlt: a lépcső elölről indul.
-void ladderEnd(ResetLadder& l) {
-  l.outage = false;
-  l.resetEvents = 0;
-}
-
-void ladderCountReset(ResetLadder& l, uint32_t now) {
-  if (l.resetEvents < 255) {
-    l.resetEvents++;
-  }
-  l.lastResetAt = now;
-}
-
-// Ennyi ms múlva jöhet a következő reset (0 = most): az első a hiba kezdetétől, a többi az előzőtől.
-uint32_t ladderWaitMs(const ResetLadder& l, uint32_t now, uint32_t firstWindowMs) {
-  const uint32_t kezdet = (l.resetEvents == 0) ? l.outageStart : l.lastResetAt;
-  const uint32_t varni = (l.resetEvents == 0) ? firstWindowMs : backoffMs(l.resetEvents);
-  const uint32_t eltelt = now - kezdet;
-  return (eltelt < varni) ? varni - eltelt : 0;
-}
-
-// Az internet-ág első resetjének türelmi ideje: a router él 15 perc, különben 2 (csendes időszakban 10) perc.
-uint32_t netFirstWindowMs(bool routerOk) {
-  if (routerOk) {
-    return WAN_DOWN_WINDOW_MS;
-  }
-  return quietHours() ? QUIET_WINDOW_MS : ROUTER_DOWN_WINDOW_MS;
-}
-
 // Él a ping: hallgat-e tartósan a router DNS-e, miközben egy külső DNS válaszol? Igaz, ha reset indult.
 bool routerDnsCheck() {
   const uint32_t now = millis();
@@ -1683,20 +1697,6 @@ bool routerDnsCheck() {
   ladderCountReset(dnsState, now);
   startRouterReset(DIAG_DNS);
   return true;
-}
-
-// Sikerült csatlakozni: a mentés utáni próba lezárult, innen a megszokott szabályok élnek.
-void configProbeOk() {
-  if (!configProbe) {
-    return;
-  }
-  configProbe = false;
-  printUptime();
-  Serial.println("A mentett halozat elerheto - a megszokott szabalyok szerint figyel tovabb.");
-  if (filesystemReady() && beginConfigWrite()) {
-    clearConfigValue(LittleFS, probePath);
-    endConfigWrite();
-  }
 }
 
 // A Wi-Fi visszajött: ha a kiesést naplóztuk, a visszatérés is bekerül (a lépcső fokával).

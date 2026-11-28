@@ -207,7 +207,9 @@ naplózza, amikor visszajön az internet.
 
 A Wi-Fi elvesztésére (3 próba után sincs kapcsolat) a Wi-Fi-lépcső felel
 (5. szakasz): előbb az ESP indul újra, és csak ha az sem segít, jön a router
-reset. Rossz jelszónál reset helyett AP mód.
+reset. Ha a router hitelesítési hibát jelez (`WL_CONNECT_FAILED`), reset helyett
+AP mód; WPA2-nél egy megváltozott jelszó viszont rendszerint kiesésnek látszik,
+és a lépcsőn halad (2. fejezet).
 
 **Éjszakai csendes időszak** (`QUIET_START_HOUR` = 22, `QUIET_END_HOUR` = 5,
 helyi idő a `NTP_TZ` szerint): a router-hiba (`NET DIAG` 1) türelmi ideje
@@ -312,8 +314,10 @@ a státusz LED marad **be**). Utána:
 | 2 → 3 … | még mindig nincs Wi-Fi | **30 perc**, majd **1 óra**, **2 óra**, onnan **4 óránként** újabb router reset |
 | – | **48 órája** nincs Wi-Fi (`WIFI_GIVEUP_MIN`) | **AP beállító mód** (`AP MODE` 3) |
 
-- **Rossz jelszó** (`WL_CONNECT_FAILED`) bármelyik fokon: azonnal AP mód,
-  újraindítás és reset nélkül.
+- **Hitelesítési hiba** (`WL_CONNECT_FAILED`, a router elutasította) bármelyik
+  fokon: azonnal AP mód, újraindítás és reset nélkül. WPA2-nél a rossz jelszó
+  rendszerint kézfogás-időtúllépésként jön, és normál üzemben a lépcsőn halad
+  (2. fejezet, `CP11`).
 - **A várakozás ébren történik**: közben percenként egy csatlakozási próba fut
   (nem három), és ha a Wi-Fi visszajön, azonnal folytatódik a figyelés.
 - **Hidegindulásnál** (áramszünet után) a 0. fok kimarad: az ESP épp most indult.
@@ -1483,7 +1487,7 @@ arányosan romlik; a védelem hat sor, és nincs hátránya. (Mérve: `LOG4`.)
 ## 16. A forráskód szerkezete
 
 A program **nyolc fordítási egység**: a `bazsi_router_reboot.ino` és hét modul
-a sketch mappájában. Összesen ~3750 sor, ~130 függvény. A kommentek egysorosak
+a sketch mappájában. Összesen ~4000 sor, ~135 függvény. A kommentek egysorosak
 és csak a nem magától értetődő részeknél állnak; a döntések indoklása ebben a
 dokumentumban és a commit-üzenetekben van.
 
@@ -1546,11 +1550,11 @@ Fentről lefelé: minden modul csak a nála lentebb állóktól függ. A `config
 | **`strutil`** | 24 | `trimInPlace()` | 1 függvény |
 | **`secret`** | 86 | a jelszó elfedése a flashben | `encodeSecret()`, `decodeSecretInPlace()` |
 | **`sync`** | 88 | a két task közti osztott állapot | 7 függvény + `evLogMux`, `apDeadline` |
-| **`configstore`** | 236 | a négy mentett érték és a kiesés-AP kapcsoló, a fájljaik, a LittleFS | a négy puffer, `outageApEnabled`, `readConfigValue()`, `readSecretValue()`, `writeConfigValue()`, `clearConfigValue()`, `staticPairValid()`, `initLittleFS()`, `filesystemReady()` |
+| **`configstore`** | 240 | a négy mentett érték, a kiesés-AP kapcsoló és a mentés utáni próbajelző, a fájljaik, a LittleFS | a négy puffer, `outageApEnabled`, `readConfigValue()`, `readSecretValue()`, `writeConfigValue()`, `clearConfigValue()`, `staticPairValid()`, `initLittleFS()`, `filesystemReady()` |
 | **`eventlog`** | 517 | a diagnosztikai napló **és** a valós idő (NTP) | `logEvent()`, `saveEventLog()`, `loadEventLogHeader()`, `loadEventLogRange()`, `printEventLogs()`, `eventName()`, `formatEpoch()`, `ensureNtp()`, `applyTimezone()`, `localHour()` |
 | **`netprobe`** | 331 | HTTP végpont-tesztek, ICMP ping, DNS-kérdés | `testInternetHTTP()`, `lastHttpCode()`, `httpCodeLogParam()`, `testInternetPing()`, `buildDnsQuery()`, `dnsResponseOk()`, `testDnsServer()` |
-| **`webportal`** | 783 | az AP beállító portál, az eszközönkénti AP jelszó, a normál üzemű állapotoldal és a kiesés alatti saját hálózat | `startWebPortal()`, `stopWebPortal()`, `startStatusPage()`, `stopStatusPage()`, `startOutageAp()`, `stopOutageAp()`, `outageApActive()`, `touchApDeadline()`, `announceApPassword()` |
-| **`app_hooks.h`** | 30 | amit a főmodul ad a moduloknak | `feedWatchdog()`, `resetbutton()`, `wifiresetbutton()`, `waitWithButtons()`, `printUptime()`, `diagCounters()` |
+| **`webportal`** | 823 | az AP beállító portál, az eszközönkénti AP jelszó, a normál üzemű állapotoldal és a kiesés alatti saját hálózat | `startWebPortal()`, `stopWebPortal()`, `startStatusPage()`, `stopStatusPage()`, `startOutageAp()`, `stopOutageAp()`, `outageApActive()`, `touchApDeadline()`, `announceApPassword()` |
+| **`app_hooks.h`** | 31 | amit a főmodul ad a moduloknak | `feedWatchdog()`, `resetbutton()`, `wifiresetbutton()`, `waitWithButtons()`, `printUptime()`, `diagCounters()` |
 
 > A `webportal` kapta a legszorosabb határt, mert ez a program
 > **biztonságkritikus felülete**: ezen megy be a Wi-Fi jelszó. A POST-kezelő,
@@ -1561,7 +1565,7 @@ Fentről lefelé: minden modul csak a nála lentebb állóktól függ. A `config
 > az a rossz határhúzás első jele.** Egyszer már meg is történt – a
 > `filesystemReady()` átmenetileg ide került, majd oda, ahová való (`configstore`).
 
-### A főmodul (`bazsi_router_reboot.ino`, ~1740 sor, 67 függvény)
+### A főmodul (`bazsi_router_reboot.ino`, ~1880 sor, 72 függvény)
 
 Ami maradt: a **döntéshozatal**. A modulok mérnek és tárolnak, a főmodul
 eldönti, mi következik.
@@ -1572,7 +1576,8 @@ eldönti, mi következik.
 | A `loop()` ágai | `clearHealthyRunCounters()` · `handleFatalMode()` · `handleConfigMode()` · `runMonitorStateMachine()` |
 | Az állapotgép | `runCheckState()` · `runResetState()` · `handleFirstStart()` |
 | Wi-Fi | `initWiFi()` · `reconnectWifi()` · `wifiAuthFailed()` · `ensureFallbackDns()` |
-| Wi-Fi-lépcső | `wifiFailed()` · `initWifiLadder()` · `wifiConnectedTick()` · `wifiResetPending()` · `wifiFirstWindowMs()` · `wifiLadderLevel()` · `wifiOutageMinutes()` · `persistBeforeRestart()` · `wifiLadderClear()` |
+| Wi-Fi-lépcső | `wifiFailed()` · `initWifiLadder()` · `wifiConnectedTick()` · `wifiResetPending()` · `wifiFirstWindowMs()` · `wifiLadderLevel()` · `wifiOutageMinutes()` · `persistBeforeRestart()` · `wifiLadderClear()` · `noteWifiUp()` |
+| Mentés utáni próba | `configProbeOk()` · `probeWrongPassword()` · `onStaDisconnected()` (Wi-Fi esemény) · `clearWifiConfigAndRestart()` (a wifireset gombbal közös) |
 | Internet és router | `internetOk()` · `gatewayPingOk()` · `routerDnsCheck()` · `gatewayUnreachable()` · `netFirstWindowMs()` · `quietHours()` |
 | A közös reset-lépcső | `ladderBegin()` · `ladderEnd()` · `ladderCountReset()` · `ladderWaitMs()` · `backoffMs()` · `carryLadder()` · `applyLadderCarry()` |
 | Relé | `startRouterReset()` · `reset_device()` · `holdRelayForSleep()` |

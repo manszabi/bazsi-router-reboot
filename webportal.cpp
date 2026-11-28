@@ -44,6 +44,8 @@ static AsyncWebServer server(80);
 static AsyncWebServer statusServer(80);
 static bool statusHandlersSet = false;
 static bool statusRunning = false;
+// A Wi-Fi-kiesés alatti saját hálózat fut-e (AP+STA).
+static bool outageAp = false;
 constexpr uint16_t STATUS_EVENTS = 20;
 
 constexpr size_t LOG_PAGE_FIX_BYTES = 2600;
@@ -591,8 +593,6 @@ static void sendDiagnosticLog(AsyncWebServerRequest* request) {
   r->print(F("</body></html>"));
   request->send(r);
 }
-
-static bool outageAp = false;
 
 // Csak a saját alhálózatról (a router mögül) vagy a kiesés alatti saját hálózatunkról szolgálunk ki, máshonnan 403.
 static bool fromLocalNet(AsyncWebServerRequest* request) {

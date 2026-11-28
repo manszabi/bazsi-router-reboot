@@ -1,4 +1,4 @@
-// A mentett konfiguráció (SSID, jelszó, IP, gateway) és a LittleFS olvasás/írás.
+// A mentett beállítások (SSID, jelszó, IP, gateway, a kiesés-AP kapcsoló, a mentés utáni próbajelző) és a LittleFS olvasás/írás.
 #pragma once
 
 #include <Arduino.h>
