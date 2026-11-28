@@ -47,7 +47,7 @@ A 3 próba után a **hiba oka** dönt:
 
 | `WiFi.status()` | Jelentés | Következmény |
 |---|---|---|
-| `WL_CONNECT_FAILED` | hitelesítési hiba → rossz jelszó | **Azonnal AP mód** |
+| `WL_CONNECT_FAILED` | hitelesítési hiba (a router elutasította, 202-es ok) | **Azonnal AP mód** |
 | bármi más | a hálózat nem látszik | a **Wi-Fi-lépcső** (5. fejezet) – hidegindulásnál az ESP-újraindítás kimarad, az első lépés a router reset |
 
 ### A mentés utáni első indulás
@@ -63,8 +63,8 @@ nem látszó hálózat elírás-e, vagy épp a router áll. Ezért a mentés ut�
 | Indulás közvetlenül a mentés után, vagy bármely szoftveres újraindulás / ébredés után | az RTC-jelzőt **azonnal felhasználja**; a 10 perces türelmi idő kimarad, mert a router nem kapcsolt le (`CP8`) |
 | Indulás áramszünet után (bekapcsolás, feszültségesés), megmaradt `/probe.txt`-vel | a router is bootol, ezért **a szokásos 10 perc türelem** jár (közben percenként próbál, és korán kilép, ha a hálózat és az internet megvan); utána ugyanaz a szabály (`CP5`, `CP6`) |
 | Sikerül csatlakozni | a próba lezárul, a `/probe.txt` törlődik, innen **minden a megszokott szabályok szerint** megy (`CP2`) |
-| Rossz jelszó | induláskor 1 + utána 3 próba (mint figyelés közben), majd **a mentett Wi-Fi adatok és a jelző törlődnek** (mint a wifireset gombnál), és az ESP **újraindul AP módba** – router reset nélkül (`AP MODE` 5, `CP4`) |
-| A hálózat nem látszik | ugyanannyi próba után **AP mód, a beállítások és a jelző megmaradnak** – router reset nélkül (`AP MODE` 6; mérve 2,0 perc, `CP1`) |
+| Rossz jelszó | induláskor 1 + utána 3 próba (mint figyelés közben), majd **a mentett Wi-Fi adatok és a jelző törlődnek** (mint a wifireset gombnál), és az ESP **újraindul AP módba** – router reset nélkül (`AP MODE` 5). Rossz jelszónak számít a core hitelesítési hibája, és a Wi-Fi esemény nyers bontási oka is (`WiFi.onEvent`): 15 (`4WAY_HANDSHAKE_TIMEOUT`, a WPA2-es rossz jelszó tipikus jele), 204 (`HANDSHAKE_TIMEOUT`), 202 (`AUTH_FAIL`) (`CP4`, `CP9`) |
+| A hálózat nem látszik (201-es `NO_AP_FOUND` vagy egyéb ok) | ugyanannyi próba után **AP mód, a beállítások és a jelző megmaradnak** – router reset nélkül (`AP MODE` 6; mérve 2,0 perc, `CP1`, `CP10`) |
 | Az így indult AP mód | pontosan úgy viselkedik, mint az első indulásé: **5 perc tétlenség után alvás**, időzített ébresztés nélkül, a reset gomb ébreszti. Ébredéskor (a megmaradt jelzővel) a próba türelmi idő nélkül megismétlődik – ha a router közben feljött, csatlakozik (`CP3`) |
 
 A wifireset gomb a jelzőt is törli; a mentésen kívül semmi nem állítja (`CP7`).
@@ -75,6 +75,16 @@ Az ESP32 core megkülönbözteti a kettőt (`STA.cpp`): `WIFI_REASON_NO_AP_FOUND
 döntünk: **csak** az explicit hitelesítési hiba küld AP módba, mert a téves
 „várjunk tovább" ára késleltetett újrakonfigurálás, a téves „AP mód" ára viszont
 egy halott eszköz. A rossz jelszót a core csak a 2. próbától jelzi (`R5`).
+
+> **Fontos a WPA2-es routereknél:** a rossz jelszó itt ritkán jön
+> hitelesítési hibaként. Az ESP-IDF szerint a tipikus jele a 4 utas kézfogás
+> időtúllépése (15-ös ok, az ESP-n 204-es `HANDSHAKE_TIMEOUT`), amit a core
+> `WL_CONNECTION_LOST`/`WL_DISCONNECTED`-ként ad tovább, nem
+> `WL_CONNECT_FAILED`-ként. Normál üzemben ezért egy megváltozott router-jelszó
+> nem AP módba visz, hanem a Wi-Fi-lépcsőn halad (ESP-újraindítás, router reset)
+> – ez szándékos: a kézfogás gyenge jelnél vagy újrainduló routernél is kifuthat
+> az időből, és ott egy téves „rossz jelszó” ítélet indokolatlanul törölne
+> (`CP11`). A mentés utáni próba viszont a nyers bontási okot is nézi (lent).
 
 A 10 perces várakozás oka: áramszünet után az ESP másodpercek alatt elindul,
 a router viszont percekig bootol. Hidegindulástól az első router resetig mérve

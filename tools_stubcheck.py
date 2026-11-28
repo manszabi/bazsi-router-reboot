@@ -211,6 +211,18 @@ def main():
           bool(re.search(r'IPAddress softAPSubnetMask\(\);', wap)),
           bool(re.search(r'IPAddress softAPSubnetMask\(\)', stub_wifi)))
     wtg = szoveg(keres(gyokerek, 'esp_wifi/include/esp_wifi_types_generic.h'))
+    for nev, ertek in [('WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT', '15'), ('WIFI_REASON_NO_AP_FOUND', '201'),
+                       ('WIFI_REASON_AUTH_FAIL', '202'), ('WIFI_REASON_HANDSHAKE_TIMEOUT', '204')]:
+        allit(f"{nev} = {ertek} (a mentes utani rossz-jelszo felismeres)",
+              egy(wtg, r'^\s*%s\s*=\s*(\d+)' % nev), egy(stub_wifi, r'^#define %s (\d+)' % nev))
+    allit("wifi_event_sta_disconnected_t.reason: uint8_t",
+          bool(re.search(r'uint8_t reason;\s*/\*\*< Disconnection reason \*/\s*int8_t\s+rssi;[^}]*\} wifi_event_sta_disconnected_t;', wtg)), True)
+    ne = szoveg(keres(gyokerek, 'libraries/Network/src/NetworkEvents.h'))
+    allit("arduino_event_info_t: wifi_sta_disconnected tag",
+          bool(re.search(r'wifi_event_sta_disconnected_t wifi_sta_disconnected;', ne)), True)
+    allit("WiFiGenericClass::onEvent(WiFiEventFuncCb, arduino_event_id_t)",
+          bool(re.search(r'onEvent\(WiFiEventFuncCb cbEvent, arduino_event_id_t event = ARDUINO_EVENT_MAX\);',
+                         szoveg(keres(gyokerek, 'libraries/WiFi/src/WiFiGeneric.h')))), True)
     allit("WIFI_AP_STA = WIFI_MODE_APSTA = 3 (a stub erteke)",
           bool(re.search(r'#define WIFI_AP_STA WIFI_MODE_APSTA', wt))
           and bool(re.search(r'WIFI_MODE_NULL = 0,[^\n]*\n\s*WIFI_MODE_STA,[^\n]*\n\s*WIFI_MODE_AP,[^\n]*\n\s*WIFI_MODE_APSTA,', wtg)),

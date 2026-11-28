@@ -217,6 +217,24 @@ uint32_t wifiConnectedSince = 0;
 // Kiírtuk-e a WIFI LOST-ot (a visszatérés WIFI OK-t kap, és a következő kiesés újra naplózódik).
 bool wifiDownLogged = false;
 
+// Az utolsó STA-bontás oka (a Wi-Fi esemény-taskból írva); a mentés utáni próba ebből ismeri fel a rossz jelszót.
+volatile uint8_t staDisconnectReason = 0;
+
+void onStaDisconnected(arduino_event_id_t event, arduino_event_info_t info) {
+  if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+    staDisconnectReason = info.wifi_sta_disconnected.reason;
+  }
+}
+
+bool wifiAuthFailed();
+
+// Rossz jelszó a mentés utáni próbában: a core jelzése, vagy a WPA2-nél tipikus kézfogás-időtúllépés (15, 204) és a 202.
+bool probeWrongPassword() {
+  const uint8_t ok = staDisconnectReason;
+  return wifiAuthFailed() || ok == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT
+         || ok == WIFI_REASON_HANDSHAKE_TIMEOUT || ok == WIFI_REASON_AUTH_FAIL;
+}
+
 // A reset oka (a NET DIAG esemény paramétere).
 enum NetDiag : uint8_t {
   DIAG_ROUTER = 1,
@@ -265,6 +283,7 @@ void startRouterReset(uint8_t diag);
 uint32_t backoffMs(uint8_t resetek);
 bool quietHours();
 bool wifiAuthFailed();
+bool probeWrongPassword();
 bool reset_device();
 void startConfigPortal();
 void enterFatal(const char* reason);
@@ -748,6 +767,7 @@ bool initWiFi() {
   }
 
   WiFi.mode(outageApActive() ? WIFI_AP_STA : WIFI_STA);
+  staDisconnectReason = 0;
 
   WiFi.setSleep(false);
 
@@ -990,8 +1010,10 @@ void wifiFailed(bool coldStart) {
   // Mentés utáni első indulás: rossz jelszó -> törlés és AP; elérhetetlen hálózat (lehet a router is) -> a beállítás marad, AP.
   if (configProbe) {
     configProbe = false;
-    if (wifiAuthFailed()) {
-      Serial.println("Mentes utan rossz jelszo - a beallitasok torlese, AP mod.");
+    if (probeWrongPassword()) {
+      Serial.print("Mentes utan rossz jelszo (bontasi ok: ");
+      Serial.print(staDisconnectReason);
+      Serial.println(") - a beallitasok torlese, AP mod.");
       logEvent(EV_AP_MODE, 5);
       saveEventLog("mentes utan rossz jelszo");
       if (beginConfigWrite()) {
@@ -1449,6 +1471,7 @@ void setup() {
   Serial.println(gatewayStr);
 
   WiFi.persistent(false);
+  WiFi.onEvent(onStaDisconnected, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
 
   if (deviceMode != MODE_FATAL) {
     if (initWiFi()) {

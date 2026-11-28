@@ -7992,6 +7992,43 @@ static void scWFL13() {
   CHECK(relayPulses() > 0 && wifiLadderLevel() == 2, "az elso Wi-Fi miatti router reset utan: 2. fok");
 }
 
+// Mentes utan a megadott bontasi okkal bukik a csatlakozas; visszaadja a futtat() eredmenyet.
+static int mentesUtanBontassal(uint8_t ok) {
+  coldBoot(false, "", "", "", "");
+  setup();
+  mentesEsUjraindulas("TestNet", "rosszjelszo", false);
+  wifiSim.disconnectReason = ok;
+  return futtat(20u * 60 * 1000, [] { return deviceMode == (DeviceMode)1; });
+}
+
+static void scCP9() {
+  // WPA2 rossz jelszo a valosagban: kezfogas-idotullepes (15, illetve 204) - mentes utan torles, AP MODE 5.
+  for (uint8_t ok : { (uint8_t)WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT, (uint8_t)WIFI_REASON_HANDSHAKE_TIMEOUT,
+                      (uint8_t)WIFI_REASON_AUTH_FAIL }) {
+    const int r = mentesUtanBontassal(ok);
+    printf("     [info] bontasi ok %u: futtat=%d, AP MODE 5: %d\n", (unsigned)ok, r, evCount(EVC_AP_MODE, 5));
+    CHECK(r == 2 && evCount(EVC_AP_MODE, 5) == 1 && g_fs["/ssid.txt"].empty() && relayPulses() == 0,
+          ok == 15 ? "15: rossz jelszo, torles, ujraindulas AP-ba"
+                   : ok == 204 ? "204: rossz jelszo, torles" : "202: rossz jelszo, torles");
+  }
+}
+
+static void scCP10() {
+  // Nem talalhato halozat (201): elirt nev vagy alló router - a beallitas marad, AP MODE 6.
+  mentesUtanBontassal((uint8_t)WIFI_REASON_NO_AP_FOUND);
+  CHECK(deviceMode == (DeviceMode)1 && evCount(EVC_AP_MODE, 6) == 1 && g_fs["/ssid.txt"] == "TestNet",
+        "201: AP MODE 6, a beallitas megmaradt");
+}
+
+static void scCP11() {
+  // Normal uzemben (nincs proba) a kezfogas-idotullepes NEM torol: a megszokott lepcso (ESP-ujrainditas).
+  wflIndit();
+  wifiSim.disconnectReason = (uint8_t)WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT;
+  const int r = futtat(10u * 60 * 1000, [] { return deviceMode == (DeviceMode)1; });
+  CHECK(r == 2 && evCount(18) == 1 && deviceMode == (DeviceMode)0 && g_fs["/ssid.txt"] == "TestNet",
+        "normal uzemben 15-os ok: ESP-ujrainditas, nem AP, nincs torles");
+}
+
 static const Scenario kScenarios[] = {
   { "W1: nincs mentett SSID -> AP konfigurációs portál, NEM alszik el", sc0 },
   { "W2: sikeres csatlakozás -> monitor mód, DHCP (nincs statikus IP)", sc1 },
@@ -8393,6 +8430,9 @@ static const Scenario kScenarios[] = {
   { "CP7: jelzo nelkul normal indulas; a wifireset a jelzot is torli", scCP7 },
   { "CP8: proba kozbeni szoftveres ujraindulas: nincs turelmi ido", scCP8 },
   { "WFL13: a Wi-Fi-lepcso foka csak a kieses alatti reseteket szamolja", scWFL13 },
+  { "CP9: mentes utan WPA2 rossz jelszo (15, 204, 202): torles, AP MODE 5", scCP9 },
+  { "CP10: mentes utan nem talalhato halozat (201): a beallitas marad, AP MODE 6", scCP10 },
+  { "CP11: normal uzemben a kezfogas-idotullepes nem torol", scCP11 },
   { "QH1: a csendes idoszak hatarai (22:00-05:00, CET es CEST)", scQH1 },
   { "QH2: ejjel a router sem valaszol: reset 10 perc utan", scQH2 },
   { "QH3: 8 perces router-kieses: ejjel nincs reset, nappal van", scQH3 },
